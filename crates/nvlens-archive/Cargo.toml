@@ -7,7 +7,16 @@ license.workspace = true
 
 [dependencies]
 nvlens-core.workspace = true
+nvlens-io.workspace = true
 nvlens-crypto.workspace = true
+nvlens-bin.workspace = true
+nvlens-audio.workspace = true
+nvlens-script.workspace = true
+tracing.workspace = true
+encoding_rs.workspace = true
+
+[dev-dependencies]
+nvlens-engine.workspace = true
 
 [lints]
 workspace = true

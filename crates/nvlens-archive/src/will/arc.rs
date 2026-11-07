@@ -17,11 +17,12 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use nvlens_core::{
-    ArcView, Archive, ArchiveFormat, Entry, Error, Format, ResourceKind, Result, is_sane_count,
-    register_archive,
+    ArcView, Archive, ArchiveFormat, Entry, Error, Format, ResourceKind, Result, register_archive,
 };
 use nvlens_crypto::compress::lzss;
+use nvlens_io::BinaryReader;
 
+const SIGNATURES: &[u32] = &[0];
 const INDEX_START: u64 = 8;
 
 /// The `ARC/WillV2` archive format.
@@ -33,65 +34,65 @@ impl Format for WillV2Arc {
         "arc/willv2"
     }
 
-    fn description(&self) -> &'static str {
-        "Will Co. game engine resource archive v2 (AdvHD)"
+    fn signatures(&self) -> &'static [u32] {
+        // No fixed magic: engine identification selects this reader.
+        SIGNATURES
     }
 
     fn extensions(&self) -> &'static [&'static str] {
         &["arc", "ar2"]
     }
+
+    fn description(&self) -> &'static str {
+        "Will Co. game engine resource archive v2 (AdvHD)"
+    }
 }
 
 impl ArchiveFormat for WillV2Arc {
-    fn try_open(&self, view: &Arc<ArcView>) -> Result<Option<Box<dyn Archive>>> {
+    fn open(
+        &self,
+        view: &Arc<ArcView>,
+        _: &nvlens_core::ArchiveOptions,
+    ) -> Result<Box<dyn Archive>> {
         match parse_index(view) {
-            Some(entries) => Ok(Some(Box::new(WillV2Archive {
+            Some(entries) => Ok(Box::new(WillV2Archive {
                 view: Arc::clone(view),
                 entries,
-            }))),
-            None => Ok(None),
+            })),
+            None => Err(Error::Corrupt {
+                offset: 0,
+                reason: "Invalid AdvHD v2 index".into(),
+            }),
         }
     }
 }
 
 /// Parses the index; any mismatch returns `None` (i.e. "not this format").
 fn parse_index(view: &ArcView) -> Option<Vec<Entry>> {
-    let count = view.read_i32_le(0).ok()?;
-    if !is_sane_count(count as i64) {
-        return None;
-    }
-    let index_size = view.read_u32_le(4).ok()? as u64;
+    let count = u64::from(view.read_u32_le(0).ok()?);
+    let index_size = u64::from(view.read_u32_le(4).ok()?);
     let base = INDEX_START.checked_add(index_size)?;
-    if base >= view.len() {
+    // Each record needs two u32 fields and at least its UTF-16 terminator.
+    if base > view.len() || count > index_size / 10 {
         return None;
     }
-
-    let mut off = INDEX_START;
-    let mut entries = Vec::with_capacity(count as usize);
+    let index = view.slice(INDEX_START, index_size).ok()?;
+    let mut reader = BinaryReader::new(index);
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(usize::try_from(count).ok()?)
+        .ok()?;
     for _ in 0..count {
-        if off >= base {
-            return None;
-        }
-        let size = view.read_u32_le(off).ok()? as u64;
-        let rel = view.read_u32_le(off + 4).ok()? as u64;
+        let size = u64::from(reader.read_u32_le().ok()?);
+        let rel = u64::from(reader.read_u32_le().ok()?);
         let offset = base.checked_add(rel)?;
-        off += 8;
-
-        // UTF-16LE NUL-terminated name; must stay within the index block.
         let mut units = Vec::new();
         loop {
-            if off >= base {
-                return None;
-            }
-            let unit = view.read_u16_le(off).ok()?;
-            off += 2;
+            let unit = reader.read_u16_le().ok()?;
             if unit == 0 {
                 break;
             }
             units.push(unit);
-        }
-        if units.is_empty() {
-            return None;
         }
         let name = String::from_utf16(&units).ok()?;
 
@@ -102,13 +103,13 @@ fn parse_index(view: &ArcView) -> Option<Vec<Entry>> {
             size,
             packed: None,
         };
-        if !entry.check_placement(view.len()) || !entry.has_valid_name() {
+        if !entry.check_placement(view.len()) {
             return None;
         }
         entries.push(entry);
     }
     // The index must end exactly at the data boundary, otherwise not this format.
-    if off != base {
+    if reader.remaining() != 0 {
         return None;
     }
     Some(entries)
@@ -124,6 +125,10 @@ struct WillV2Archive {
 impl Archive for WillV2Archive {
     fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    fn open_entry_raw(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
+        Ok(Cow::Borrowed(self.view.slice(entry.offset, entry.size)?))
     }
 
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
@@ -163,6 +168,40 @@ register_archive!(WillV2Arc);
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use nvlens_core::ArchiveOptions;
+    use nvlens_io::BinaryWriter;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TestDir(std::path::PathBuf);
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn build_arc(records: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut index = Vec::new();
+        let mut data = Vec::new();
+        for &(name, payload) in records {
+            let mut header = [0u8; 8];
+            BinaryWriter::u32_le(u32::try_from(payload.len()).unwrap(), &mut header[..4]);
+            BinaryWriter::u32_le(u32::try_from(data.len()).unwrap(), &mut header[4..8]);
+            index.extend_from_slice(&header);
+            for unit in name.encode_utf16().chain(std::iter::once(0)) {
+                let mut word = [0u8; 2];
+                BinaryWriter::u16_le(unit, &mut word);
+                index.extend_from_slice(&word);
+            }
+            data.extend_from_slice(payload);
+        }
+        let mut out = vec![0u8; 8];
+        BinaryWriter::u32_le(u32::try_from(records.len()).unwrap(), &mut out[..4]);
+        BinaryWriter::u32_le(u32::try_from(index.len()).unwrap(), &mut out[4..8]);
+        out.extend_from_slice(&index);
+        out.extend_from_slice(&data);
+        out
+    }
 
     #[test]
     fn ext_matching() {
@@ -178,5 +217,66 @@ mod tests {
         for b in 0u8..=255 {
             assert_eq!(b.rotate_right(2).rotate_left(2), b);
         }
+    }
+
+    #[test]
+    fn mounts_lazily_and_applies_entry_transforms() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = TestDir(std::env::temp_dir().join(format!(
+            "nvlens-will-arc-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )));
+        fs::create_dir_all(&dir.0).unwrap();
+
+        let ws2_plain = b"script";
+        let ws2_stored: Vec<u8> = ws2_plain.iter().map(|b| b.rotate_left(2)).collect();
+        let psp_valid = [3, 0, 0, 0, 0b0000_0111, b'A', b'B', b'C'];
+        let bytes = build_arc(&[
+            ("scene.ws2", &ws2_stored),
+            ("ok.psp", &psp_valid),
+            ("corrupt.psp", b"short"),
+            ("raw.bin", b"raw"),
+        ]);
+
+        let rio_path = dir.0.join("Rio.arc");
+        fs::write(&rio_path, &bytes).unwrap();
+        let archive = WillV2Arc
+            .open(
+                &Arc::new(ArcView::open(&rio_path).unwrap()),
+                &ArchiveOptions::default(),
+            )
+            .unwrap();
+        let entries = archive.entries();
+        assert_eq!(entries.len(), 4);
+        assert_eq!(&*archive.open_entry(&entries[0]).unwrap(), ws2_plain);
+        assert_eq!(&*archive.open_entry_raw(&entries[0]).unwrap(), &ws2_stored);
+        assert_eq!(&*archive.open_entry(&entries[1]).unwrap(), b"ABC");
+        assert!(archive.open_entry(&entries[2]).is_err());
+        assert_eq!(&*archive.open_entry(&entries[3]).unwrap(), b"raw");
+
+        let model_path = dir.0.join("CharaModel.arc");
+        fs::write(&model_path, &bytes).unwrap();
+        let model_arc = WillV2Arc
+            .open(
+                &Arc::new(ArcView::open(&model_path).unwrap()),
+                &ArchiveOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            &*model_arc.open_entry(&model_arc.entries()[0]).unwrap(),
+            &ws2_stored
+        );
+
+        let truncated_path = dir.0.join("truncated.arc");
+        fs::write(&truncated_path, &bytes[..12]).unwrap();
+        assert!(
+            WillV2Arc
+                .open(
+                    &Arc::new(ArcView::open(&truncated_path).unwrap()),
+                    &ArchiveOptions::default(),
+                )
+                .is_err()
+        );
     }
 }
