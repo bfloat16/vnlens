@@ -15,46 +15,54 @@ use crate::binary::{BinaryIo, BinaryReader};
 /// Read-only, randomly-accessible memory view of an archive file.
 pub struct ArcView {
     path: PathBuf,
-    map: Mmap,
+    map: Option<Mmap>,
 }
 
 impl std::fmt::Debug for ArcView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ArcView")
             .field("path", &self.path)
-            .field("len", &self.map.len())
+            .field("len", &self.len())
             .finish()
     }
 }
 
 impl ArcView {
     /// Memory-maps the file at `path`.
+    #[allow(unsafe_code)]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
-        // SAFETY: read-only mapping; nvlens never mutates the backing file while
-        // the view is alive. If an external process truncates the file, later
-        // access faults via the OS (SIGBUS / error page), a known trade-off.
-        let map = unsafe { Mmap::map(&file)? };
+        let map = if file.metadata()?.len() == 0 {
+            None
+        } else {
+            // SAFETY: nvlens never modifies a mapped source. Callers must keep
+            // external writers from truncating or changing it during use.
+            Some(unsafe { Mmap::map(&file)? })
+        };
         Ok(Self { path, map })
     }
 
     /// Total size of the file in bytes.
+    #[must_use]
     pub fn len(&self) -> u64 {
-        self.map.len() as u64
+        self.map.as_ref().map_or(0, |map| map.len() as u64)
     }
 
     /// Whether the file is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.map.is_none()
     }
 
     /// Source file name without directory; empty if it cannot be determined.
+    #[must_use]
     pub fn file_name(&self) -> &str {
         self.path.file_name().and_then(|s| s.to_str()).unwrap_or("")
     }
 
     /// Full path of the source file.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -70,26 +78,16 @@ impl ArcView {
                     self.len()
                 ))
             })?;
-        Ok(&self.map[offset as usize..end as usize])
-    }
-
-    /// Reads one byte at `offset`.
-    pub fn read_u8(&self, offset: u64) -> Result<u8> {
-        Ok(self.slice(offset, 1)?[0])
-    }
-
-    /// Reads a little-endian `u16` at `offset`.
-    pub fn read_u16_le(&self, offset: u64) -> Result<u16> {
-        Ok(BinaryReader::u16_le(self.slice(offset, 2)?))
+        let start = usize::try_from(offset)
+            .map_err(|_| BinaryIo::unexpected_eof("slice offset does not fit usize"))?;
+        let stop = usize::try_from(end)
+            .map_err(|_| BinaryIo::unexpected_eof("slice end does not fit usize"))?;
+        let bytes = self.map.as_deref().unwrap_or(&[]);
+        Ok(&bytes[start..stop])
     }
 
     /// Reads a little-endian `u32` at `offset`.
     pub fn read_u32_le(&self, offset: u64) -> Result<u32> {
         Ok(BinaryReader::u32_le(self.slice(offset, 4)?))
-    }
-
-    /// Reads a little-endian `i32` at `offset`.
-    pub fn read_i32_le(&self, offset: u64) -> Result<i32> {
-        Ok(BinaryReader::i32_le(self.slice(offset, 4)?))
     }
 }

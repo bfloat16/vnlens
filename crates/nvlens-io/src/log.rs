@@ -4,6 +4,7 @@
 //! every crate emits records with the `tracing` macros (`trace!`, `debug!`,
 //! `info!`, `warn!`, `error!`). The active level can be overridden at runtime
 //! via the `RUST_LOG` environment variable.
+#![forbid(unsafe_code)]
 
 use std::sync::Once;
 
@@ -24,10 +25,10 @@ pub fn init(verbosity: u8) {
             _ => "trace",
         };
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
-        tracing_subscriber::fmt()
+        let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(false)
             .with_writer(std::io::stderr)
-            .init();
+            .try_init();
     });
 }

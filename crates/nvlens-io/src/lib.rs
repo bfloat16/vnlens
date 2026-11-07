@@ -4,11 +4,16 @@
 //! project (see [`binary`]), and owns the memory-mapped [`ArcView`] and the
 //! unified logging manager ([`log`]). It is the only crate allowed to use
 //! `unsafe`, and solely for memory mapping.
+#![deny(unsafe_code)]
 
 mod binary;
+mod source;
 mod view;
 
+pub mod filesystem;
 pub mod log;
+pub mod pe;
 
 pub use binary::{BinaryIo, BinaryReader, BinaryWriter, Endian};
+pub use source::{BinarySourceReader, ReadAt};
 pub use view::ArcView;

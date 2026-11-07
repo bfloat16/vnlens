@@ -11,8 +11,7 @@
 //!
 //! Multi-byte values default to little-endian; big-endian variants are named
 //! explicitly or selected via [`Endian`].
-
-use std::io::{Read, Seek, SeekFrom};
+#![forbid(unsafe_code)]
 
 /// Byte order selector for multi-byte integer decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,15 +21,8 @@ pub enum Endian {
 }
 
 impl Endian {
-    /// Reads a `u16` from a two-byte slice using this byte order.
-    pub fn read_u16(self, data: &[u8]) -> u16 {
-        match self {
-            Self::Little => BinaryReader::u16_le(data),
-            Self::Big => BinaryReader::u16_be(data),
-        }
-    }
-
     /// Reads a `u32` from a four-byte slice using this byte order.
+    #[must_use]
     pub fn read_u32(self, data: &[u8]) -> u32 {
         match self {
             Self::Little => BinaryReader::u32_le(data),
@@ -39,6 +31,7 @@ impl Endian {
     }
 
     /// Reads a `u64` from an eight-byte slice using this byte order.
+    #[must_use]
     pub fn read_u64(self, data: &[u8]) -> u64 {
         match self {
             Self::Little => BinaryReader::u64_le(data),
@@ -56,61 +49,98 @@ pub struct BinaryReader<'a> {
 
 impl<'a> BinaryReader<'a> {
     /// Reads a little-endian `u16` from the first two bytes of `data`.
+    #[must_use]
     pub fn u16_le(data: &[u8]) -> u16 {
         u16::from_le_bytes([data[0], data[1]])
     }
 
     /// Reads a big-endian `u16` from the first two bytes of `data`.
+    #[must_use]
     pub fn u16_be(data: &[u8]) -> u16 {
         u16::from_be_bytes([data[0], data[1]])
     }
 
     /// Reads a little-endian `i16` from the first two bytes of `data`.
+    #[must_use]
     pub fn i16_le(data: &[u8]) -> i16 {
         i16::from_le_bytes([data[0], data[1]])
     }
 
     /// Reads a little-endian `u32` from the first four bytes of `data`.
+    #[must_use]
     pub fn u32_le(data: &[u8]) -> u32 {
         u32::from_le_bytes([data[0], data[1], data[2], data[3]])
     }
 
     /// Reads a big-endian `u32` from the first four bytes of `data`.
+    #[must_use]
     pub fn u32_be(data: &[u8]) -> u32 {
         u32::from_be_bytes([data[0], data[1], data[2], data[3]])
     }
 
     /// Reads a little-endian `i32` from the first four bytes of `data`.
+    #[must_use]
     pub fn i32_le(data: &[u8]) -> i32 {
         i32::from_le_bytes([data[0], data[1], data[2], data[3]])
     }
 
     /// Reads a little-endian `u64` from the first eight bytes of `data`.
+    #[must_use]
     pub fn u64_le(data: &[u8]) -> u64 {
         u64::from_le_bytes(as_array8(data))
     }
 
     /// Reads a big-endian `u64` from the first eight bytes of `data`.
+    #[must_use]
     pub fn u64_be(data: &[u8]) -> u64 {
         u64::from_be_bytes(as_array8(data))
     }
 
     /// Reads a little-endian `i64` from the first eight bytes of `data`.
+    #[must_use]
     pub fn i64_le(data: &[u8]) -> i64 {
         i64::from_le_bytes(as_array8(data))
     }
 
-    /// Reads a little-endian `u16` from `data` at a fixed offset.
-    pub fn u16_le_at(data: &[u8], offset: usize) -> u16 {
-        Self::u16_le(&data[offset..offset + 2])
+    /// Reads an IEEE 754 little-endian float.
+    #[must_use]
+    pub fn f64_le(data: &[u8]) -> f64 {
+        f64::from_bits(Self::u64_le(data))
     }
 
-    /// Reads a little-endian `u32` from `data` at a fixed offset.
-    pub fn u32_le_at(data: &[u8], offset: usize) -> u32 {
-        Self::u32_le(&data[offset..offset + 4])
+    /// Reads an IEEE 754 little-endian float.
+    #[must_use]
+    pub fn f32_le(data: &[u8]) -> f32 {
+        f32::from_bits(Self::u32_le(data))
+    }
+
+    /// Reads an unsigned little-endian integer stored in `width` bytes.
+    pub fn compact_u64_le(data: &[u8]) -> std::io::Result<u64> {
+        if data.len() > 8 {
+            return Err(BinaryIo::invalid_input(format!(
+                "compact integer width {} exceeds 8",
+                data.len()
+            )));
+        }
+        let mut value = 0u64;
+        for (shift, &byte) in data.iter().enumerate() {
+            value |= u64::from(byte) << (shift * 8);
+        }
+        Ok(value)
+    }
+
+    /// Reads a signed little-endian integer with sign extension to 64 bits.
+    pub fn compact_i64_le(data: &[u8]) -> std::io::Result<i64> {
+        let value = Self::compact_u64_le(data)?;
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let shift = (8 - data.len()) * 8;
+        Ok(((value << shift) as i64) >> shift)
     }
 
     /// Creates a reader positioned at the start of `data`.
+    #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
@@ -118,24 +148,15 @@ impl<'a> BinaryReader<'a> {
     /// Creates a reader positioned at `pos`; errors if `pos` is past the end.
     pub fn new_at(data: &'a [u8], pos: usize) -> std::io::Result<Self> {
         if pos > data.len() {
-            return Err(BinaryIo::invalid_input(format!(
+            return Err(BinaryIo::unexpected_eof(format!(
                 "offset out of range: 0x{pos:X}"
             )));
         }
         Ok(Self { data, pos })
     }
 
-    /// Returns the backing slice length.
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Returns whether the backing slice is empty.
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
     /// Returns the current byte position.
+    #[must_use]
     pub fn position(&self) -> usize {
         self.pos
     }
@@ -152,6 +173,7 @@ impl<'a> BinaryReader<'a> {
     }
 
     /// Returns the number of unread bytes.
+    #[must_use]
     pub fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.pos)
     }
@@ -161,7 +183,7 @@ impl<'a> BinaryReader<'a> {
         let end = self
             .pos
             .checked_add(len)
-            .ok_or_else(|| BinaryIo::invalid_input("read offset overflow"))?;
+            .ok_or_else(|| BinaryIo::unexpected_eof("read offset overflow"))?;
         if end > self.data.len() {
             return Err(BinaryIo::unexpected_eof(format!(
                 "unexpected EOF at 0x{:X}, need {len} bytes",
@@ -183,11 +205,6 @@ impl<'a> BinaryReader<'a> {
         Ok(Self::u16_le(self.read_bytes(2)?))
     }
 
-    /// Reads a little-endian `i16`.
-    pub fn read_i16_le(&mut self) -> std::io::Result<i16> {
-        Ok(Self::i16_le(self.read_bytes(2)?))
-    }
-
     /// Reads a little-endian `u32`.
     pub fn read_u32_le(&mut self) -> std::io::Result<u32> {
         Ok(Self::u32_le(self.read_bytes(4)?))
@@ -196,11 +213,6 @@ impl<'a> BinaryReader<'a> {
     /// Reads a `u32` using the requested byte order.
     pub fn read_u32(&mut self, endian: Endian) -> std::io::Result<u32> {
         Ok(endian.read_u32(self.read_bytes(4)?))
-    }
-
-    /// Reads a little-endian `i32`.
-    pub fn read_i32_le(&mut self) -> std::io::Result<i32> {
-        Ok(Self::i32_le(self.read_bytes(4)?))
     }
 
     /// Reads a little-endian `u64`.
@@ -217,24 +229,6 @@ impl<'a> BinaryReader<'a> {
     pub fn read_i64_le(&mut self) -> std::io::Result<i64> {
         Ok(Self::i64_le(self.read_bytes(8)?))
     }
-
-    /// Reads `count` little-endian UTF-16 code units.
-    pub fn read_utf16_units_le(&mut self, count: usize) -> std::io::Result<Vec<u16>> {
-        let mut units = Vec::with_capacity(count);
-        for _ in 0..count {
-            units.push(self.read_u16_le()?);
-        }
-        Ok(units)
-    }
-
-    /// Skips padding until the cursor is aligned to a four-byte boundary.
-    pub fn align4(&mut self) -> std::io::Result<()> {
-        let rem = self.pos & 3;
-        if rem != 0 {
-            let _ = self.read_bytes(4 - rem)?;
-        }
-        Ok(())
-    }
 }
 
 /// Stateless little/big-endian encoders writing into caller-owned buffers.
@@ -242,6 +236,10 @@ impl<'a> BinaryReader<'a> {
 pub struct BinaryWriter;
 
 impl BinaryWriter {
+    /// Writes an IEEE 754 little-endian float.
+    pub fn f32_le(value: f32, out: &mut [u8]) {
+        Self::u32_le(value.to_bits(), out);
+    }
     /// Writes a little-endian `u16` into the first two bytes of `out`.
     pub fn u16_le(value: u16, out: &mut [u8]) {
         out[..2].copy_from_slice(&value.to_le_bytes());
@@ -250,6 +248,11 @@ impl BinaryWriter {
     /// Writes a little-endian `u32` into the first four bytes of `out`.
     pub fn u32_le(value: u32, out: &mut [u8]) {
         out[..4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// Writes a big-endian `u32` into the first four bytes of `out`.
+    pub fn u32_be(value: u32, out: &mut [u8]) {
+        out[..4].copy_from_slice(&value.to_be_bytes());
     }
 
     /// Writes a little-endian `u32` into `out` at a fixed offset.
@@ -261,46 +264,40 @@ impl BinaryWriter {
     pub fn u64_be(value: u64, out: &mut [u8]) {
         out[..8].copy_from_slice(&value.to_be_bytes());
     }
+
+    /// Writes a little-endian `u64` into the first eight bytes of `out`.
+    pub fn u64_le(value: u64, out: &mut [u8]) {
+        out[..8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// Writes the low `out.len()` bytes of `value` in little-endian order.
+    pub fn compact_u64_le(value: u64, out: &mut [u8]) -> std::io::Result<()> {
+        if out.len() > 8 {
+            return Err(BinaryIo::invalid_input(format!(
+                "compact integer width {} exceeds 8",
+                out.len()
+            )));
+        }
+        for (shift, byte) in out.iter_mut().enumerate() {
+            *byte = ((value >> (shift * 8)) & 0xFF) as u8;
+        }
+        Ok(())
+    }
 }
 
-/// Adapters over `std::io::Read`/`Seek` streams, plus error constructors.
+/// Binary I/O error constructors.
 #[derive(Debug)]
 pub struct BinaryIo;
 
 impl BinaryIo {
-    /// Reads a little-endian `u16` from a stream.
-    pub fn read_u16_le<R: Read>(reader: &mut R) -> std::io::Result<u16> {
-        let mut bytes = [0u8; 2];
-        reader.read_exact(&mut bytes)?;
-        Ok(u16::from_le_bytes(bytes))
-    }
-
-    /// Reads a little-endian `u32` from a stream.
-    pub fn read_u32_le<R: Read>(reader: &mut R) -> std::io::Result<u32> {
-        let mut bytes = [0u8; 4];
-        reader.read_exact(&mut bytes)?;
-        Ok(u32::from_le_bytes(bytes))
-    }
-
-    /// Reads a little-endian `i32` from a stream.
-    pub fn read_i32_le<R: Read>(reader: &mut R) -> std::io::Result<i32> {
-        let mut bytes = [0u8; 4];
-        reader.read_exact(&mut bytes)?;
-        Ok(i32::from_le_bytes(bytes))
-    }
-
-    /// Reads a little-endian `u32` from a seekable stream at a fixed offset.
-    pub fn read_u32_le_at<R: Read + Seek>(reader: &mut R, offset: u64) -> std::io::Result<u32> {
-        reader.seek(SeekFrom::Start(offset))?;
-        Self::read_u32_le(reader)
-    }
-
     /// Constructs an `InvalidInput` I/O error.
+    #[must_use]
     pub fn invalid_input(message: impl Into<String>) -> std::io::Error {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
     }
 
     /// Constructs an `UnexpectedEof` I/O error.
+    #[must_use]
     pub fn unexpected_eof(message: impl Into<String>) -> std::io::Error {
         std::io::Error::new(std::io::ErrorKind::UnexpectedEof, message.into())
     }
@@ -317,6 +314,19 @@ fn as_array8(data: &[u8]) -> [u8; 8] {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_signed_values_extend_the_highest_byte() {
+        for width in 1..=8 {
+            assert_eq!(
+                BinaryReader::compact_i64_le(&[0xff; 8][..width]).unwrap(),
+                -1
+            );
+        }
+        assert_eq!(BinaryReader::compact_i64_le(&[0x80]).unwrap(), -128);
+        assert_eq!(BinaryReader::compact_i64_le(&[0, 0x80]).unwrap(), -32768);
+        assert_eq!(BinaryReader::compact_i64_le(&[0xff, 0]).unwrap(), 255);
+    }
 
     #[test]
     fn cursor_reads_advance() {
@@ -340,5 +350,13 @@ mod tests {
         let mut out = [0u8; 4];
         BinaryWriter::u32_le(0xDEAD_BEEF, &mut out);
         assert_eq!(BinaryReader::u32_le(&out), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn compact_integer_roundtrip() {
+        let mut out = [0u8; 3];
+        BinaryWriter::compact_u64_le(0x00AB_CDEF, &mut out).unwrap();
+        assert_eq!(out, [0xEF, 0xCD, 0xAB]);
+        assert_eq!(BinaryReader::compact_u64_le(&out).unwrap(), 0x00AB_CDEF);
     }
 }
