@@ -1,0 +1,29 @@
+[package]
+name = "nvlens-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nvlens"
+path = "src/main.rs"
+
+[dependencies]
+nvlens-engine.workspace = true
+nvlens-core.workspace = true
+nvlens-io.workspace = true
+nvlens-archive.workspace = true
+nvlens-image.workspace = true
+nvlens-audio.workspace = true
+nvlens-script.workspace = true
+nvlens-video.workspace = true
+gpui.workspace = true
+image.workspace = true
+unicode-segmentation.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+rodio.workspace = true
+
+[lints]
+workspace = true
