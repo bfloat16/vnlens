@@ -1,437 +1,167 @@
-# AGENTS.md — nvlens 开发规范
+# 后续开发规范
 
-nvlens 是使用 Rust 编写的视觉小说（Visual Novel / Galgame）资源提取器：识别专有归档格式，提取其中条目，并将专有图像/音频解码为通用格式。本文件是所有贡献者与 AI 代理的强制约束，动手前须通读。
+本文件是仓库的根规范，适用于所有目录。nvlens 是 Rust 编写的视觉小说资源提取器；根 `Cargo.toml` 统一管理构建、依赖和 lint，排版遵循 `cargo fmt` 及仓库内的 `rustfmt.toml`（如存在）。本文件只记录通用开发规范，不记录具体功能实现、界面尺寸、控件布局、按钮文案或当前开发进度。
 
----
+格式实现以格式规范和已验证的实际行为为准，不设置人为的文件大小、条目数量、字符串长度、解压大小、嵌套深度或密钥长度限制。字段范围、结构关系和处理流程均从格式本身推导；不能为适配工具内部模型而拒绝合法数据、截断内容或改变语义。
 
-## 1. 目标与范围
+## 1. 环境与构建
 
-**目标**
-- 无损提取各类专有归档（`.arc/.dat/.pak/.xp3/...`）中的文件条目。
-- 将专有图像解码为 PNG，音频解码为 WAV/OGG。
-- 核心库与界面无关，可在 CLI、GUI、第三方 crate 三种形态复用。
-- 架构可扩展至数百种格式家族，新增格式无需改动核心。
+- 使用 Rust 2024、resolver `3`；编译器通过根 `rust-toolchain.toml` 固定为 `1.99.1`，与根 `Cargo.toml` 的 `rust-version` 保持一致。升级时查询最新稳定版并固定具体版本号，同步更新两处配置；不使用浮动的 `stable`。开发环境需要目标平台链接工具，rustfmt 和 Clippy 由工具链配置安装。
+- 新 crate 放入 `crates/` 并加入 workspace；继承 `version`、`edition`、`rust-version`、`license` 和 workspace lints。依赖统一在根 `[workspace.dependencies]` 声明，成员使用 `dep.workspace = true`。
+- 保留根 lint：`missing_debug_implementations`、Clippy `all` 为 warn，`unwrap_used`、`expect_used`、`panic` 为 deny。检查必须零告警，不通过全局 `allow` 或降低检查等级规避。
+- 优先标准库和已有依赖；新增依赖须必要、维护良好、许可兼容并说明理由，不引入未审计 unsafe 或把 GUI 依赖带入核心库。
+- Features 只能增加能力，不得关闭安全检查或改变 API 语义。`build.rs` 只处理必要资产，保持确定性和幂等。
 
-**非目标**
-- 不提供归档创建/回写，除非个别格式明确需要。
-- 不追求与任何既有工具的字节级兼容，只要求提取内容语义等价。
-- GUI 为后续可选层，其类型不得渗入核心库。
+## 2. 目录与模块职责
 
----
+| 路径 | 职责 |
+| --- | --- |
+| `crates/nvlens-gui` | GPUI 桌面入口、资源浏览、预览、提取调度与结果展示。 |
+| `crates/nvlens-engine` | 游戏引擎特征识别、封包定向路由和密钥参数解析。 |
+| `crates/nvlens-io` | 二进制读写、mmap 视图、日志初始化。 |
+| `crates/nvlens-core` | 资源模型、错误、格式 trait、注册与探测。 |
+| `crates/nvlens-crypto` | 压缩、加解密、哈希与校验和。 |
+| `crates/nvlens-bin` | 外部密钥资产、构建期复制与运行期加载。 |
+| `crates/nvlens-archive` | 按引擎路由读取归档、索引解析与条目读取。 |
+| `crates/nvlens-{image,audio,script,video}` | 对应资源的识别、解码与导出。 |
+| `crates/*/tests/`、`tests/fixtures/` | 集成测试与共享最小样本，按需建立。 |
 
-## 2. 工具链约束
+## 3. 模块规范
 
-| 项 | 规定 |
-|---|---|
-| Edition | 2024 |
-| MSRV | 固定写入根 `Cargo.toml` 的 `rust-version`（当前 1.85）；升级须在 PR 说明理由 |
-| 注释语言 | **代码内一切注释与 doc 注释一律英文**（本规范文档除外）。标识符、日志、错误信息也用英文 |
-| `lib.rs` | 只做对外暴露（`mod`/`pub use`/`pub fn init`），**不写业务逻辑**；逻辑放独立 `.rs` 模块 |
-| 二进制 I/O | 所有字节读写唯一走 `nvlens-io`（见 §4），其它 crate 不得手写 `from_le_bytes`/`to_le_bytes` 之类裸解码 |
-| 日志 | 统一用 `nvlens-io::log` 管理器初始化，各处用 `tracing` 宏输出 |
-| 格式化 | `cargo fmt` 必须通过，排版以 `rustfmt.toml` 为准 |
-| Lint | `cargo clippy --all-targets --all-features -- -D warnings` 零告警 |
-| unsafe | 默认 `#![forbid(unsafe_code)]`；仅 `nvlens-io` 的 mmap 封装局部放开，每处 `unsafe` 附 `// SAFETY:` |
-| panic | 库代码正常路径禁止 `unwrap/expect/panic!/unreachable!/todo!`；失败一律走 `Result`。测试与 `main` 例外 |
+以下小节依次对应第 2 节。依赖方向为界面层 → engine/域格式 → core/crypto/bin/io，engine 不依赖域格式，core 和 crypto → io；bin 仅依赖 std 与 tracing，io 不依赖内部 crate。域之间仅允许 archive 为内嵌资源调用 audio/script，禁止反向依赖和回环。GUI 遵守同一分层，核心库不依赖 GPUI。封包目录和资源处理必须持有成功识别的引擎上下文。
 
-根 `Cargo.toml` 统一 lint：
+### 3.1 `crates/nvlens-gui`
 
-```toml
-[workspace.lints.rust]
-missing_debug_implementations = "warn"
+- 唯一应用入口为 GPUI 桌面程序 `nvlens`，不保留 CLI。GPUI 使用最新稳定发布版本并固定具体版本，依赖统一在 workspace 声明。
+- 入口统一初始化域注册与日志；格式解析、算法和路径写入复用库。GUI 只负责交互、展示、任务调度和播放设备，不包含格式解析。
+- 目录与封包导航支持任意嵌套层级，大型列表使用虚拟化；界面展示不改变资源原名和路径语义，文字截断遵循 Unicode 字素边界。
+- 挂载与列表展示只读取索引及必要元信息，资源内容和关联文件按访问需要读取。解析、读取和提取在后台执行，不阻塞界面线程。
+- 长任务提供进度和取消；单条目失败继续后续条目并汇总错误。提取保留格式名称，落盘路径交给 io 处理，不把宿主文件系统命名限制当成格式损坏。
+- 资源预览与转换调用对应域 crate；字节码通过通用 IR 展示反汇编，纯文本直接展示。界面不宣称尚未实现的解码或导出能力。
 
-[workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
+### 3.2 `crates/nvlens-engine`
+
+- 每个引擎一个模块，通过 inventory 注册识别器；优先检查 PE 内的字符串和代码特征，再检查当前游戏目录结构。识别器只读取证据及必要参数，不通过解析封包内容猜测引擎。
+- 识别结果包含引擎身份、证据、支持的封包路由及所需密钥；未知、证据冲突或必要密钥未解析时停止后续资源处理，不回退尝试其它封包格式。
+- 识别结果按游戏实例共享，嵌套封包继承同一上下文。PE 地址映射留在 io，纯算法留在 crypto，大型密钥资产由 bin 加载；密钥不得出现在 Debug、日志或错误中。
+
+### 3.3 `crates/nvlens-io`
+
+- 字节与整数的编码、解码统一在 `binary` 实现，其它模块及测试复用 `BinaryReader`、`BinaryWriter`、`BinaryIo`、`Endian`，不得手写 `from_*_bytes`、`to_*_bytes` 或移位拼装替代。
+- `ArcView` 负责只读 mmap，整数读取委托 `BinaryReader`。读前校验范围；无状态读取需先保证切片长度，越界返回 `UnexpectedEof`，不得 panic。大文件按需切片，不整文件读入内存再解析。
+- 长度、偏移、计数和解压结果按格式字段、索引关系及实际数据边界校验，不使用统一的“合理数量”或固定资源上限。大数据采用分块、流式或按需读取；嵌套和引用按格式遍历，依据实际引用关系处理循环，不靠固定深度拒绝合法结构。
+- 字节序和文本编码由格式决定，大端通过 `_be` 或 `Endian::Big` 明示。CP932/Shift-JIS 使用 `encoding_rs`；UTF-16LE 经 reader 读取码元后调用 `String::from_utf16`，不预设小端或 UTF-8。位流能力集中在 io。
+
+### 3.4 `crates/nvlens-core`
+
+- 只定义 `Entry`、`Packed`、`ResourceKind`、错误、路由参数、trait 和 `Catalog` 等抽象，不放具体格式或算法。Catalog 按明确的格式 tag 定向调用一个读取器，不按扩展名、签名或失败结果轮询读取器；保持可测试、可注入，格式状态属于打开后的实例。
+- `Format` 按 `tag`、`signatures`、`extensions`、`description` 顺序显式实现。tag 唯一，扩展名小写且不带点；`SIGNATURES` 随识别入口放在引擎 `mod.rs` 或具体格式文件中，使用已核对的小端 `u32` 字面量，无固定签名用 `&[0]`。
+- 归档通过 `inventory` 和 `register_archive!` 注册，不维护手写格式列表。各资源域提供对应的解码 trait 与 inventory 注册；ResourceResolver 只在格式请求时读取关联资源。
+
+### 3.5 `crates/nvlens-crypto`
+
+- 按 `compress/`、`cipher/`、`hash/`、`checksum/` 组织。算法只处理字节和参数，不包含归档概念、不读文件、不依赖 bin；密钥由调用方传入。
+- 优先复用已有算法；zlib/deflate 使用 `flate2`，专有算法集中实现。字节 framing 仍走 io，不在格式模块复制算法。
+- 共享缓存只存不可变数据；并行读取使用独立游标，可变解密状态按实例或线程隔离。
+
+### 3.6 `crates/nvlens-bin`
+
+- 大型密钥块放入 `keys/<engine>/*.bin`，禁止 `include_bytes!`。路径常量放在 `nvlens_bin::keys::<engine>`，调用方统一使用 `nvlens_bin::load`，返回并缓存 `Arc<[u8]>`。
+- `build.rs` 递归复制到产物同级 `bin/<engine>/`，保留目录层级，对目录和每个 key 发出 `cargo:rerun-if-changed`。
+- 支持外部密钥目录配置及相对可执行文件的资产加载。发布时携带 bin 目录，不依赖开发期源码路径；此 crate 不放解密或格式逻辑。
+- 短口令可用格式常量，小型 scheme 可用 JSON，字节数组用 hex。游戏参数属于引擎模块；用户选择通过 trait 交给宿主，库不读 stdin、不弹窗。
+- 密钥长度、编码和表结构遵循所属算法或格式，不设置全局大小限制。
+
+### 3.7 `crates/nvlens-archive`
+
+- 每个引擎一个 `src/<engine>/`，格式类型实现 `Format`、`ArchiveFormat`；格式声明与 `register_archive!` 可放在引擎 `mod.rs` 或具体格式文件中，每个格式只注册一次。新增格式同时接入模块声明和测试。
+- 挂载封包必须懒加载：只读取、解析索引及其必要元信息，保存条目的位置和读取参数；`ArchiveFormat::open()`、`entries()` 和列表展示不预读条目内容，也不批量解压、解密或解码资源。
+- 访问哪个条目，才在 `open_entry()` / `open_entry_raw()` 中读取该条目并按格式处理；索引自身需要的解压、解密与条目内容处理分开。嵌套封包和关联数据文件同样按访问需要打开，缓存仅保存已经请求的数据。
+- 按格式规定检查签名、版本、条目数和索引范围；计数由字段宽度、索引布局和实际数据推导，不使用 `is_sane_count` 一类人为阈值。名称按原格式解析与保留，存储范围按实际数据源校验，落盘路径由输出层处理。
+- Entry 的 offset/size 表示所在文件内的存储范围，压缩信息用 `Option<Packed>`，类型用 `ResourceKind`。索引、密钥和视图保存在 Archive 实例中，不用全局可变状态。
+- 原始切片返回 `Cow::Borrowed`，变换后返回 `Cow::Owned`。有独立原始数据路径时覆盖 `open_entry_raw()`，其默认实现委托 `open_entry()`。容器调用 audio/script 处理内嵌资源，不复制跨域解析。
+
+### 3.8 `crates/nvlens-{image,audio,script,video}`
+
+- image：先读取元信息再解码像素；使用自有 Image/PixelBuffer 模型，通用与专有图像处理均在本域。导出保留图像偏移等格式元信息，不依赖 GUI 类型。
+- audio：负责音频识别、解密、解码与导出，PCM 保留采样率、声道等信息。原样提取保留通用编码，播放设备属于 GUI。
+- script：负责脚本和结构化资源。字节码做到 disasm，以通用、可扩展的 IR 保存指令、操作数、表达式 token、源位置和未知字段，不要求高层源码还原；纯文本可直接展示。
+- 引擎识别及 PE 密钥提取统一由 engine 提供，资源域接收已解析参数，不自行扫描 EXE 或尝试其它引擎；命令表等关联脚本按访问需要读取。
+- video：只处理视频资源；通用容器逻辑留在 archive。按实际格式需求补齐抽象，不预建无调用方框架。
+
+### 3.9 测试
+
+- 单元测试放在同文件 `#[cfg(test)] mod tests`，使用 `use super::*;`；集成测试放在对应 crate 的 `tests/`。
+- 识别覆盖 PE 证据优先级、未知引擎、冲突、密钥缺失及无回退路由；格式覆盖签名、正常提取、错误输入、截断、边界和文件名安全；算法提供已知输入/输出向量，解码器提供像素、PCM、文本摘要或条目列表黄金测试。
+- 归档测试验证懒加载：挂载和列索引不读取条目内容；访问单个条目只触发其所需读取与变换，未访问条目的内容错误不影响挂载。
+- 优先合成数据和许可明确的最小样本。受限游戏资源不入库，本机样本测试用 `#[ignore]` 并说明获取和运行方式；临时目录唯一且用后清理。
+- 测试以格式规定的合法与非法数据为依据，覆盖大文件、多条目和嵌套变体，不为人为限制编写拒绝测试；探测、解析和解压入口逐步接入 fuzz，检查越界、溢出及遍历错误。
+
+## 4. 取消、进度与错误
+
+- 长任务的取消和进度通过宿主 trait 或回调传入，阶段及循环边界响应取消；跳过项计入进度，取消返回 `Error::Cancelled`，不得按条目损坏继续处理。
+- 域库使用 `nvlens_core::Error` / `Result`；io、crypto、bin 保持依赖方向，不反向引用 core。引擎识别返回 `Ok(Some(_))` 表示识别完成、`Ok(None)` 表示未知引擎；封包定向打开失败必须返回错误，不把损坏作为尝试其它格式的信号。
+- 越界经 `Error::Io` 保留 `UnexpectedEof`；损坏用 `Corrupt { offset, reason }`，不支持用 `Unsupported`，未知密钥用 `UnknownScheme`。错误保留原因链及格式、条目、偏移上下文。
+- 日志和错误信息使用英文，库只用 `tracing`，最终错误由宿主展示一次；不输出密钥或大块二进制内容。
+
+## 5. 代码风格
+
+### 格式
+
+- 排版统一使用 `cargo fmt --all`；文件使用无 BOM 的 UTF-8、LF 和末尾换行。
+
+### 语言特性
+
+- 库正常路径禁止 `unwrap`、`expect`、`panic!`、`unreachable!`、`todo!`，失败返回 Result；测试确需 unwrap 时局部添加 `#[allow(clippy::unwrap_used)]`。
+- 除 io 的 mmap 最小封装外使用 `#![forbid(unsafe_code)]`；每处 unsafe 前写 `// SAFETY:` 说明不变量，新增需求须说明理由并补测试。
+- 文件偏移和长度用 `u64`，内存索引用 `usize`，转换优先 `TryFrom`。边界计算用 `checked_*`，协议回绕用 `wrapping_*`，饱和语义用 `saturating_*`；算术右移显式使用有符号类型。
+- 优先借用与 Cow，避免无意义 clone；公共状态用 enum/newtype，类型按需实现 Debug/Clone 等 trait，重要返回值标记 `#[must_use]`，Debug 不泄露密钥。
+
+### 命名
+
+- 类型、trait、枚举成员用 `UpperCamelCase`；函数、变量、模块用 `snake_case`；常量用 `SCREAMING_SNAKE_CASE`。不顺带重命名无关代码。
+
+### 文件组织
+
+- `lib.rs` 只放模块声明、公开导出和 `init()`。按引擎与职责组织文件，不新增泛化的 utils/helpers 目录。
+- 引擎 `mod.rs` 可集中放格式元数据、签名、识别与分派逻辑，以及引擎共享代码；复杂的索引解析和解码实现按格式拆到独立文件。
+
+### 注释
+
+- 代码注释和 doc 使用英文。格式文件顶部说明格式依据、布局、字节序、关键变换及变体；公共入口说明错误、所有权和缓冲约束，不复述代码。
+- 依据写可核对的类名、方法、字段或逆向位置，不引用不存在的报告或本机路径。算法常数和位运算保持可验证，不做未经验证的等价化简。
+
+## 6. 简洁性：不写与要删除的代码
+
+以下写法不得新增；清理时保持格式行为和安全约束，限定在任务相关范围：
+
+- **无用封装**：一对一字段复制的中间类型、纯转发薄封装、没有替换需求的 trait，以及仅为测试增加的生产选项。
+- **无调用方的成员**：不可达开关、分支或输出。删除前用 `rg` 核对源码、测试、宏注册和公开 API 用途；不能误删 inventory 注册或第三方可用的扩展点。
+- **无意义赋值**：只写不读、立即覆盖、无用别名和临时集合复制；只需跳过的字段直接读过，仍保留范围检查。
+- **过度防御**：格式没有要求的大小、数量、长度或深度阈值；重复校验已由类型或受控内部契约保证的条件；对固定内部常量做运行期检查。
+- **重复实现**：已有二进制 I/O、算法、key 加载或域入口覆盖的功能；只为合并相似代码而新增跨引擎抽象。
+
+保留格式本身要求的签名、版本、范围、计数、校验和及结构一致性检查，以及落盘路径处理、取消和进度。格式变体差异、原始读取路径、格式依据注释和正式扩展点按实际需要保留；任何格式约束都应能说明其依据。
+
+## 7. 验证
+
+代码或 Cargo 配置修改后，在仓库根目录按顺序执行；失败时先修复再进入下一步：
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
 ```
 
----
-
-## 3. 架构总览
-
-### 3.1 Workspace 布局
-
-```
-nvlens/
-├─ Cargo.toml            # [workspace]，统一 lints 与依赖版本
-├─ crates/
-│  ├─ nvlens-io/         # I/O：唯一的二进制读写模块 + mmap 视图 + 统一日志管理器。唯一允许 unsafe
-│  ├─ nvlens-core/       # 抽象层：trait、Entry、注册表、探测、错误、scheme。无具体格式
-│  ├─ nvlens-crypto/     # 纯计算算法：解压、加解密、校验和等（与格式无关，输入字节出字节）
-│  ├─ nvlens-archive/    # 归档格式实现（按引擎分模块）
-│  ├─ nvlens-image/      # 图像格式解码 + 通用 Image 模型、调色板工具
-│  ├─ nvlens-audio/      # 音频格式解码
-│  ├─ nvlens-script/     # 脚本格式解码与文本提取
-│  ├─ nvlens-video/      # 视频格式处理
-│  ├─ nvlens-cli/        # 二进制 `nvlens`
-│  └─ nvlens-gui/        # 可选，后期；不被上述任何 crate 依赖
-└─ tests/fixtures/
-```
-
-依赖方向单向，禁止回环（`io` 是最底层，`core`/`crypto` 建立其上）：
-
-```
-cli / gui → {archive, image, audio, script, video} → core, crypto
-core → io
-crypto → io
-```
-
-`io` 不依赖任何其它内部 crate；`core` 依赖 `io` 并重导出 `ArcView`。各格式 crate 依赖 `core`，需要纯算法时依赖 `crypto`。
-
-**纯计算算法集中于 `nvlens-crypto`**：压缩/解压（LZSS、zlib…）、加解密（Blowfish、Camellia、自定义密钥流…）、校验和/哈希（CRC…）等与格式无关的例程一律放此 crate，按 `compress/`、`cipher/`、`checksum/` 等子模块组织。它们只吞吐字节、不含归档/格式概念；读取长度前缀等字节 framing 仍走 `nvlens-io`（保持二进制 I/O 单一来源）。
-
-### 3.2 条目模型
-
-```rust
-/// 归档中的一个文件条目。
-#[derive(Clone, Debug)]
-pub struct Entry {
-    pub name: String,           // 归档内相对路径；禁止绝对路径与 `..`
-    pub kind: ResourceKind,
-    pub offset: u64,
-    pub size: u64,
-    pub packed: Option<Packed>, // Some 表示压缩条目
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Packed {
-    pub unpacked_size: u64,
-    pub is_packed: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResourceKind { Archive, Image, Audio, Script, Video, Unknown }
-```
-
-- 资源类型用枚举 `ResourceKind`，禁止裸字符串比较。
-- “可能压缩”用组合 `Option<Packed>` 表达，不用继承式 trait 对象模拟。
-- 条目边界校验（`offset + size <= archive_len` 且不溢出）在打开归档时强制执行。
-
-### 3.3 格式 trait 层级
-
-```rust
-/// 一切格式处理器的公共元信息。
-pub trait Format: Sync + Send {
-    /// 唯一短标签，通常为主扩展名，如 "xp3"、"spack"。
-    fn tag(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-    /// 可能的首 4 字节签名（小端 u32）；`0` 表示签名不固定，探测时兜底。
-    fn signatures(&self) -> &'static [u32] { &[0] }
-    /// 关联扩展名（小写，无点），用于探测排序与类型推断。
-    fn extensions(&self) -> &'static [&'static str];
-}
-
-/// 归档格式。
-pub trait ArchiveFormat: Format {
-    fn is_hierarchic(&self) -> bool { false }
-    /// 探测并打开。匹配成功返回归档实例；非本格式返回 `Ok(None)`；数据损坏返回 `Err`。
-    /// 传入 `&Arc<ArcView>`，实现可 `Arc::clone` 存入归档以支持后续读取。
-    fn try_open(&self, view: &Arc<ArcView>) -> Result<Option<Box<dyn Archive>>>;
-}
-
-/// 已打开的归档，持有自身状态（索引、密钥、视图引用）。
-pub trait Archive: Send {
-    fn entries(&self) -> &[Entry];
-    /// 打开条目内容：原始条目零拷贝借用映射，变换后条目返回拥有的缓冲。
-    fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>>;
-}
-
-/// 图像格式。分两阶段：先读元信息，再解码像素。
-pub trait ImageFormat: Format {
-    fn read_meta(&self, r: &mut BinaryReader) -> Result<Option<ImageMeta>>;
-    fn read(&self, r: &mut BinaryReader, meta: &ImageMeta) -> Result<Image>;
-}
-
-/// 音频格式，返回解码后的 PCM 源。
-pub trait AudioFormat: Format {
-    fn try_open(&self, r: &mut BinaryReader) -> Result<Option<Box<dyn AudioSource>>>;
-}
-```
-
-设计要点：
-- **探测三态**：`Ok(Some)` 匹配成功；`Ok(None)` 非本格式，试下一个；`Err` 是本格式但已损坏。探测循环只吞 `Ok(None)` 与 `Err`，绝不 panic。
-- **状态归属实例**：`try_open` 返回实现 `Archive` 的自定义 struct，把密钥、索引存入其中，杜绝全局可变状态。
-- **界面无关**：图像 trait 返回自有 `Image`，不引用任何窗口/位图系统类型。
-
-### 3.4 注册与探测
-
-用 `inventory` 做编译期分布式注册，格式实现无需触碰核心：
-
-```rust
-// nvlens-core
-pub struct ArchiveRegistration(pub fn() -> Box<dyn ArchiveFormat>);
-inventory::collect!(ArchiveRegistration);
-
-#[macro_export]
-macro_rules! register_archive {
-    ($ty:ty) => {
-        inventory::submit! { $crate::ArchiveRegistration(|| Box::new(<$ty>::default())) }
-    };
-}
-```
-
-格式文件末尾一行完成注册：
-
-```rust
-register_archive!(SpackArchive);
-```
-
-`Catalog` 惰性构建（`OnceLock`），非全局单例，可注入以便测试。索引结构：
-
-```rust
-pub struct Catalog {
-    by_signature: HashMap<u32, Vec<&'static dyn ArchiveFormat>>,
-    by_extension: HashMap<String, Vec<&'static dyn ArchiveFormat>>,
-    // image / audio / script 同理
-}
-```
-
-探测算法：
-
-1. 读首 4 字节，取小端 u32 作为 `signature`。
-2. 取 `by_signature[signature]` 候选集合。
-3. 候选多于一个时，扩展名匹配者排前。
-4. 处于嵌套归档中时，父归档声明的 `contained_formats` 内的 tag 优先。
-5. 逐个 `try_open`；全部失败则以 `signature = 0` 的兜底格式再试一轮。
-6. 仍失败则视为普通文件（`ResourceKind::Unknown`）。
-
-签名统一取 `u32::from_le_bytes(header[..4])`。
-
-### 3.5 图像模型
-
-```rust
-/// 解码后的图像，界面无关，通道统一 8-bit。
-#[derive(Clone)]
-pub struct Image {
-    pub meta: ImageMeta,
-    pub pixels: PixelBuffer,
-}
-
-pub enum PixelBuffer {
-    Rgba8(Vec<u8>),
-    Bgra8(Vec<u8>),                              // 原生序，避免无谓换序，导出时定序
-    Indexed { data: Vec<u8>, palette: Vec<[u8; 4]> },
-    Gray8(Vec<u8>),
-}
-
-#[derive(Clone, Debug)]
-pub struct ImageMeta {
-    pub width: u32,
-    pub height: u32,
-    pub offset_x: i32,
-    pub offset_y: i32,
-    pub bpp: u16,
-    pub file_name: Option<String>,
-}
-```
-
-- 调色板读取（RGB/BGR/RGBA/BGRA 及各变体）作为 `nvlens-image` 的复用工具函数，供大量格式共用。
-- 导出统一走 `nvlens-image` 的 PNG 编码器；带偏移的图像在导出时保留偏移信息，不静默丢弃。
-
-### 3.6 格式模块组织
-
-每个域 crate（`nvlens-archive` 等）下，每个引擎一个模块目录：
-
-```
-nvlens-archive/src/
-├─ lib.rs              # 仅 mod 声明 + pub use + init()，无逻辑
-├─ kirikiri/
-│  ├─ mod.rs
-│  └─ xp3.rs
-├─ will/
-│  └─ arc.rs
-└─ ...
-```
-
-- 模块名用引擎 snake_case（`kirikiri`、`cat_system`、`will`）。
-- 引擎内共享的小工具放该引擎 `mod.rs`。
-- 与格式无关的纯算法（解压、加解密、校验和）放 `nvlens-crypto`，格式代码调用之。
-- 每个格式文件顶部用英文 doc 注释注明格式来源与结构要点。
-- 图像/音频/脚本/视频格式分别落在对应域 crate，组织方式相同。
-
----
-
-## 4. I/O 层（nvlens-io）
-
-底层 crate，唯一允许 `unsafe`（仅 mmap），并承担三项职责：**二进制读写的唯一来源**、mmap 视图、统一日志管理器。
-
-### 4.1 二进制读写（`binary` 模块，全项目唯一来源）
-
-所有字节 ↔ 整数的转换只在此模块发生；其它 crate 不得手写 `from_le_bytes` 之类裸解码，一律经此。按输入形态分三个入口：
-
-- **`BinaryReader<'a>`**：`&[u8]` 上的游标 + 无状态解码器。
-  - 无状态：`BinaryReader::u32_le(&buf)`、`u16_le_at(&buf, off)` 等（输入须恰为对应字节数）。
-  - 游标：`new/new_at`、`read_u8/u16_le/i32_le/u64_le`、`read_bytes(len)`、`read_utf16_units_le(n)`、`position/set_position/remaining/align4`。
-- **`BinaryWriter`**：无状态编码器写入调用方缓冲（`u32_le(v, &mut out)`、`u32_le_at(...)`）。
-- **`BinaryIo`**：`std::io::Read/Seek` 流适配（`read_u32_le(r)`、`read_u32_le_at(r, off)`）与错误构造器（`invalid_input`、`unexpected_eof`）。
-- **`Endian`**：`Little/Big`，按运行期字节序选择解码。
-
-### 4.2 ArcView（随机访问，`memmap2` 只读映射）
-
-读取方法返回 `std::io::Result`，越界为 `UnexpectedEof`；**内部解码委托 `BinaryReader`**，不重复实现字节解析：
-
-```rust
-impl ArcView {
-    pub fn open(path: impl AsRef<Path>) -> io::Result<Self>;
-    pub fn len(&self) -> u64;
-    pub fn file_name(&self) -> &str;
-    pub fn slice(&self, offset: u64, size: u64) -> io::Result<&[u8]>; // 边界检查
-    pub fn read_u8(&self, off: u64) -> io::Result<u8>;
-    pub fn read_u16_le(&self, off: u64) -> io::Result<u16>;
-    pub fn read_u32_le(&self, off: u64) -> io::Result<u32>;
-    pub fn read_i32_le(&self, off: u64) -> io::Result<i32>;
-}
-```
-
-### 4.3 日志管理器（`log` 模块）
-
-统一初始化入口 `nvlens_io::log::init(verbosity)`（基于 `tracing` + `tracing-subscriber`，`Once` 幂等，`RUST_LOG` 可覆盖）。二进制启动时调用一次；各 crate 用 `tracing` 宏输出，不各自初始化 subscriber。
-
-### 4.4 规则
-- 偏移与长度一律 `u64`，支持大于 4GB 的文件。
-- 所有读取先边界检查，越界返回 `Err`，绝不 panic。
-- 探测/解析中，“读越界=非本格式”是常态控制流：用 `.ok()?` 将 `io::Result` 收敛为 `Option` 并短路，最终 `try_open` 包成 `Ok(None)`；`core::Error` 供格式层显式自校验使用。
-- 多字节默认小端；大端方法名显式带 `_be` 或经 `Endian`。
-- 文本默认 CP932/Shift-JIS，用 `encoding_rs` 解码，禁止假设 UTF-8（UTF-16LE 文件名用 `String::from_utf16`）。
-- 位流（MSB/LSB）后续置于 `nvlens-io::bitstream`，供图像与压缩格式复用。
-
----
-
-## 5. 加密与 Scheme 数据
-
-部分归档按游戏加密，密钥数据与代码分离：
-
-- Scheme 数据用 `serde` + JSON，可读、可 diff、可社区贡献；字节数组以 hex 字符串存储。
-- 每个需要密钥的格式定义自己的 `#[derive(Serialize, Deserialize)]` scheme struct，集中登记于 `schemes/*.json`。
-- 交互（如按游戏标题选择密钥）抽象为 trait，不绑定任何界面：
-
-```rust
-pub trait SchemeProvider {
-    /// 归档需要密钥时调用；返回 None 表示用户取消。
-    fn request(&self, notice: &str, options: &[&str]) -> Option<Selection>;
-}
-```
-
-- 核心库不弹窗、不读 stdin；CLI/测试各自实现。
-- 用户取消映射为 `Error::Cancelled`，不视为数据损坏。
-
----
-
-## 6. 依赖策略
-
-优先标准库；新增依赖须必要且维护良好，并在 PR 说明。默认批准清单：
-
-| 用途 | crate |
-|---|---|
-| mmap | `memmap2` |
-| 错误（库 / 二进制） | `thiserror` / `anyhow` |
-| 分布式注册 | `inventory` |
-| 惰性单例 | `std::sync::OnceLock` / `once_cell` |
-| 文本编码 | `encoding_rs` |
-| 压缩 | `flate2`（zlib/deflate），其余 LZSS 等自研于 `nvlens-crypto` |
-| 序列化 | `serde`, `serde_json` |
-| 图像输出 | `image` 或自研精简编码器 |
-| CLI | `clap`（derive） |
-| 日志 | `tracing`, `tracing-subscriber`（subscriber 仅由 `nvlens-io::log::init` 初始化） |
-| 并行 | `rayon`（批量提取，可选） |
-
-加密算法（Blowfish/Camellia/自定义密钥流）优先自研于 `nvlens-crypto`，以保证位级可控。禁止引入无维护、带未审计 `unsafe`、或把界面依赖拖入核心的 crate。
-
----
-
-## 7. 错误处理
-
-`nvlens-core` 统一错误类型：
-
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),        // 含越界读取（UnexpectedEof）
-    #[error("invalid format")]
-    InvalidFormat,
-    #[error("unsupported: {0}")]
-    Unsupported(String),
-    #[error("data corrupted at 0x{offset:x}: {reason}")]
-    Corrupt { offset: u64, reason: String },
-    #[error("unknown encryption scheme")]
-    UnknownScheme(Option<String>),
-    #[error("operation cancelled")]
-    Cancelled,
-}
-pub type Result<T> = std::result::Result<T, Error>;
-```
-
-规则：
-- “非本格式”用 `Ok(None)`，不用 `Err`——探测循环据此区分“换下一个”与“记录损坏”。
-- 越界读取由 `nvlens-io` 返回 `UnexpectedEof`，经 `#[from]` 收敛为 `Error::Io`，绝不 panic。
-- 库不打印错误；用 `tracing` 记录，展示交给上层。
-- 单个条目提取失败不中断整包：上层捕获、记录、继续。
-
----
-
-## 8. 添加一个格式
-
-1. 在对应域 crate（如 `nvlens-archive/src/<engine>/<name>.rs`）建文件，顶部英文 doc 注释注明格式结构。
-2. 定义 `#[derive(Default)] struct XxxFormat;` 实现 `Format` + `ArchiveFormat`（或 Image/Audio）。
-3. 定义持状态的 `struct XxxArchive { view, entries, key, ... }` 实现 `Archive`。
-4. 在 `try_open` 中：校验签名/版本不符即 `Ok(None)`；条目数用 `is_sane_count` 校验；每个条目做边界与名称校验（`check_placement` + `has_valid_name`）。一切字节读取经 `nvlens-io`（`ArcView` 或 `BinaryReader`）。
-5. 在 `open_entry` 中按需解压/解密，纯算法调用 `nvlens-crypto`，读长度前缀等仍走 `nvlens-io`。
-6. 文件末尾 `register_archive!(XxxFormat);`。
-7. 补测试：至少覆盖签名判定；有样本时加集成测试。
-
-数值与位运算准则：
-- 明确整型宽度与符号；回绕语义用 `wrapping_*`，算术右移显式用有符号类型。
-- 魔法常数保守直译并加注释，不做“看似等价”的化简。
-
----
-
-## 9. 测试
-
-- **单元测试**：与代码同文件 `#[cfg(test)] mod tests`，覆盖签名判定、边界、压缩算法（已知输入/输出向量）。
-- **集成测试**：对应域 crate 的 `tests/`，跑真实样本。
-- **fixture**：受版权限制的游戏原始资源不入库；仅提交经许可或自造的最小样本，或用下载脚本，无法入库者用 `#[ignore]` 并在文档说明获取方式。
-- **黄金测试**：解码结果（如像素哈希）与已知正确值比对，防回归。
-- **fuzz**：探测/解析入口用 `cargo-fuzz`，保证任意字节流不 panic、不 OOM、不无限循环。
-- CI 强制：`fmt --check`、`clippy -D warnings`、`test`。
-
----
-
-## 10. 性能与安全
-
-- **零拷贝**：解析索引直接在 mmap 的 `&[u8]` 上切片，避免整文件 `read_to_end`。
-- **分配前设限**：任何来自文件的计数/长度，分配前先用 `is_sane_count`（如 `0 < n < 0x40000`）或与 `view.len()` 比对上限。
-- **不可信输入三铁律**：读前边界检查；分配前上限检查；循环有明确终止条件（防解压炸弹与环形索引）。
-- 批量提取可用 `rayon` 并行；含可变解密状态的归档需保证 `Sync` 或每线程独立实例。
-
----
-
-## 11. CLI 约定（nvlens）
-
-`clap` 子命令：
-
-- `nvlens list <archive>` — 列出条目。
-- `nvlens extract <archive> [--out DIR] [--filter GLOB] [--raw]` — 提取，默认图像转 PNG、音频转 WAV，`--raw` 保留原始字节。
-- `nvlens info <file>` — 显示探测到的格式与元信息。
-- `nvlens formats` — 列出已注册格式。
-- 加密归档用 `--game <title>` 或交互选择提供密钥。
-
-退出码 `0` 成功、非 `0` 失败；`--json` 输出机器可读；日志走 `tracing`，`-v/-vv` 调级别。
-
----
-
-## 12. 提交检查清单
-
-- [ ] `cargo fmt --all --check` 通过。
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` 零告警。
-- [ ] `cargo test --all` 通过。
-- [ ] 库正常路径无 `unwrap/expect/panic`。
-- [ ] 新格式已 `register_*!` 注册，文件头有结构说明，位运算已核对。
-- [ ] 不可信输入路径具备边界检查、分配上限、循环终止三项。
-- [ ] 界面类型未渗入 `io/core` 及各域格式 crate。
-- [ ] 注释/日志/错误信息均为英文；`lib.rs` 无业务逻辑；字节读写全部经 `nvlens-io`。
-- [ ] 依赖方向无回环。
-
-Commit 用祈使句聚焦单一改动，新增格式建议 `formats(<engine>): add <format> archive`；一个 PR 聚焦一个引擎或一组相关格式。
+- 格式失败先运行 `cargo fmt --all`；Clippy 零告警、workspace 测试全部通过。新增格式同时确认注册和对应样本测试。
+- GUI 交互由用户自行测试。代理不主动启动或操作 GUI，不进行界面截图、点击、播放等交互验证；继续执行编译、静态检查、库层测试和不启动界面的数据处理测试。
+- 修改 key 复制、外部资产路径或 build script 后，追加 `cargo clean -p nvlens-bin`、`cargo test -p nvlens-bin`，确认产物同级 `bin/<engine>/*.bin` 层级与加载正常，不能只依赖源码 fallback。
+- 纯文档修改核对路径、命令和实现，执行 `git diff --check -- <修改的文档>`，无需运行 Rust 测试。未执行或失败的检查如实说明。
+
+## 8. 文档与交付
+
+- README 只写如何构建和支持的封包，不写使用方法或增加其它章节；构建方式和支持范围变化时同步更新，不把规划写成现有能力。
+- 保留已有未提交改动，不执行丢弃或隐藏它们的 checkout/restore/reset/stash/clean；未经明确要求不提交或推送。
+- 不提交 target、测试输出、提取结果和受限样本。源 key 放 `crates/nvlens-bin/keys/`，发布 bin 为构建产物；外部代码和数据保留必要许可证与署名。
+- 提交使用 `type(scope): summary`，scope 为 crate 或引擎，summary 用英文祈使句；一个提交聚焦单一改动，一个 PR 聚焦一个引擎或一组相关格式。
+- 交付说明变更内容、验证结果和未完成检查；新增依赖、MSRV 或资产布局变化写明理由。
