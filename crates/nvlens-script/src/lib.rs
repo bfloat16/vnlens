@@ -1,9 +1,19 @@
-//! nvlens script-format decoders and text extractors.
+//! nvlens script-format decoders and text extractors (organized by engine).
 //!
-//! Placeholder crate: implementations land here as engines are ported. Keeps
-//! `lib.rs` limited to public exposure; logic will live in separate modules.
+//! `lib.rs` only exposes the public surface; logic lives in per-engine modules.
 #![forbid(unsafe_code)]
 
-/// Forces this crate to be linked so its future format registrations are
-/// included in the final binary.
+mod ages_mk2;
+mod emote;
+mod format;
+pub mod ir;
+pub mod yuris;
+pub use format::{ScriptFormat, ScriptRegistration, disassemble_as};
+
+pub use ages_mk2::epk;
+pub use emote::mdf;
+pub use emote::psb;
+
+/// Forces this crate to be linked so its format registrations are included in
+/// the final binary.
 pub fn init() {}
