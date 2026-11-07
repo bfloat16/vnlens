@@ -5,43 +5,35 @@ use std::sync::Arc;
 
 use nvlens_io::ArcView;
 
-use crate::{Entry, Result};
+use crate::{ArchiveOptions, Entry, Result};
 
 /// Shared metadata for every format handler.
+///
+/// The metadata methods are declared in a fixed order — tag, signatures, extensions,
+/// description — and every implementation must state all of them (there are no
+/// defaults) so that each format documents its own identifying data.
 pub trait Format: Sync + Send {
     /// Unique short tag, usually the primary extension, e.g. `"arc/willv2"`.
     fn tag(&self) -> &'static str;
 
+    /// Possible first-4-byte magic signatures (little-endian `u32`). Return
+    /// `&[0]` when the format has no fixed magic and is recognized by
+    /// structure instead.
+    fn signatures(&self) -> &'static [u32];
+
+    /// Associated extensions (lowercase, no dot), used for metadata. Archive
+    /// dispatch uses an identified route rather than these extensions.
+    fn extensions(&self) -> &'static [&'static str];
+
     /// Human-readable description (engine / origin).
     fn description(&self) -> &'static str;
-
-    /// Possible first-4-byte signatures (little-endian `u32`); `0` means the
-    /// signature is not fixed, and the format is tried as a fallback.
-    fn signatures(&self) -> &'static [u32] {
-        &[0]
-    }
-
-    /// Associated extensions (lowercase, no dot), used for probe ordering and
-    /// type inference.
-    fn extensions(&self) -> &'static [&'static str];
 }
 
-/// An archive format: probes a raw view and opens it into enumerable entries.
+/// A directed archive reader. Engine identification selects exactly one reader.
 pub trait ArchiveFormat: Format {
-    /// Whether the archive may contain subdirectories.
-    fn is_hierarchic(&self) -> bool {
-        false
-    }
-
-    /// Probes and opens the archive.
-    ///
-    /// - `Ok(Some(_))`: matched and opened successfully;
-    /// - `Ok(None)`: not this format, the probe layer tries the next candidate;
-    /// - `Err(_)`: this format, but the data is corrupt.
-    ///
-    /// Implementations may `Arc::clone` the view into the returned [`Archive`]
-    /// to support later reads.
-    fn try_open(&self, view: &Arc<ArcView>) -> Result<Option<Box<dyn Archive>>>;
+    /// Opens the selected format with resolved engine parameters. Structural
+    /// mismatches are errors; they never trigger another format reader.
+    fn open(&self, view: &Arc<ArcView>, options: &ArchiveOptions) -> Result<Box<dyn Archive>>;
 }
 
 /// An opened archive instance, owning its state (index, keys, view handle).
@@ -52,6 +44,29 @@ pub trait Archive: Send {
     /// Opens an entry's content. Stored entries borrow the mapping with zero
     /// copy; transformed entries return an owned buffer.
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>>;
+
+    /// Opens an entry's raw stored content when a format can expose it.
+    ///
+    /// The default preserves compatibility for formats without a distinct raw
+    /// path. Container formats may override this to skip decompression,
+    /// decryption, decoding, or nested shell conversion.
+    fn open_entry_raw(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
+        self.open_entry(entry)
+    }
+
+    /// Resolves optional original script paths, indexed by `entries()` position.
+    /// Called only when the host explicitly requests virtual paths. Implementations
+    /// may read the necessary mapping metadata, but must not scan entry payloads.
+    /// Unmapped entries retain their stored names; reading always uses the original entry.
+    fn virtual_paths(&self) -> Result<Vec<(usize, String)>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Resolves a format's named companion resource on demand.
+/// Implementations must not preload unrelated entries during construction.
+pub trait ResourceResolver {
+    fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>>;
 }
 
 /// A registration record for an archive format. Each implementation submits one

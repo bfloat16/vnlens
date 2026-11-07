@@ -6,8 +6,8 @@ pub enum Error {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Data does not match any known format. Not usually surfaced directly; the
-    /// probing layer expresses "not this format" with `Ok(None)`.
+    /// Data does not match the selected format. Directed archive dispatch never
+    /// uses this error to fall back to another reader.
     #[error("invalid format")]
     InvalidFormat,
 

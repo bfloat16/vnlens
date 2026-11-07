@@ -9,11 +9,14 @@ mod catalog;
 mod entry;
 mod error;
 mod format;
+mod routing;
 
 pub use catalog::{Catalog, Opened};
-pub use entry::{Entry, Packed, ResourceKind, is_sane_count};
+pub use entry::{Entry, Packed, ResourceKind};
 pub use error::{Error, Result};
+pub use format::ResourceResolver;
 pub use format::{Archive, ArchiveFormat, ArchiveRegistration, Format};
+pub use routing::{ArchiveOptions, ArchiveRoute, Secret};
 
 // Referenced by the `register_archive!` macro when expanded in downstream
 // crates, so they do not need a direct dependency on `inventory`.

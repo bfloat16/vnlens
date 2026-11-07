@@ -3,7 +3,7 @@
 /// A single file entry inside an archive.
 #[derive(Clone, Debug)]
 pub struct Entry {
-    /// Relative path within the archive; absolute paths and `..` are rejected.
+    /// Name as stored by the format; the output layer maps it to a local path.
     pub name: String,
     /// Resource category.
     pub kind: ResourceKind,
@@ -38,6 +38,7 @@ pub enum ResourceKind {
 impl ResourceKind {
     /// Roughly guesses the category from a file name extension. Used only for
     /// display and defaults; format implementations may override it.
+    #[must_use]
     pub fn guess_from_name(name: &str) -> Self {
         let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         match ext.as_str() {
@@ -53,23 +54,8 @@ impl ResourceKind {
 impl Entry {
     /// Whether the entry lies fully within `[0, max_offset)` (guards against
     /// out-of-range offsets and integer overflow).
+    #[must_use]
     pub fn check_placement(&self, max_offset: u64) -> bool {
-        self.offset < max_offset && self.size <= max_offset && self.offset <= max_offset - self.size
+        self.offset <= max_offset && self.size <= max_offset - self.offset
     }
-
-    /// Whether the entry name is safe: non-empty, not absolute, no `..` traversal.
-    pub fn has_valid_name(&self) -> bool {
-        let n = &self.name;
-        !n.is_empty()
-            && !n.starts_with('/')
-            && !n.starts_with('\\')
-            && n.get(1..2) != Some(":") // drive letter
-            && !n.split(['/', '\\']).any(|part| part == "..")
-    }
-}
-
-/// Whether an archive entry count is within a sane range. Used to cap
-/// allocations and reject corrupt or malicious indexes before allocating.
-pub fn is_sane_count(count: i64) -> bool {
-    count > 0 && count < 0x40000
 }
