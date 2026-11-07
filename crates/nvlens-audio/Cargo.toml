@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+nvlens-core.workspace = true
+nvlens-crypto.workspace = true
+nvlens-io.workspace = true
+lewton.workspace = true
+rustfft.workspace = true
 
 [lints]
 workspace = true
