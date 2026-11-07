@@ -13,10 +13,6 @@ use super::CompressError;
 
 const FRAME_SIZE: usize = 0x1000;
 const FRAME_MASK: usize = FRAME_SIZE - 1;
-/// Initial preallocation cap, to keep a corrupt header from triggering a huge
-/// allocation; the buffer grows on demand if this is not enough.
-const MAX_PREALLOC: usize = 1 << 24;
-
 /// Decompresses LZSS data prefixed with a little-endian `u32` unpacked length.
 pub fn decompress_prefixed(input: &[u8]) -> Result<Vec<u8>, CompressError> {
     let mut reader = BinaryReader::new(input);
@@ -31,7 +27,7 @@ pub fn decompress_prefixed(input: &[u8]) -> Result<Vec<u8>, CompressError> {
 
 /// Decompresses `input`, whose unpacked length is known to be `unpacked` bytes.
 pub fn decompress(input: &[u8], unpacked: usize) -> Result<Vec<u8>, CompressError> {
-    let mut out = Vec::with_capacity(unpacked.min(MAX_PREALLOC));
+    let mut out = Vec::new();
     let mut frame = [0u8; FRAME_SIZE];
     let mut frame_pos: usize = 1;
     let mut src = 0usize;
