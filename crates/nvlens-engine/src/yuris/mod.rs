@@ -24,7 +24,7 @@ fn resolve(
             return Err(Error::Cancelled);
         }
         let view = ArcView::open(path)?;
-        if let Some(key) = key::from_pe(view.slice(0, view.len())?)? {
+        if let Some(key) = key::from_pe(view.slice(0, view.len())?, cancelled)? {
             if found.as_ref().is_some_and(|previous| previous != &key) {
                 return Err(Error::UnknownScheme(Some("Conflicting YU-RIS keys".into())));
             }

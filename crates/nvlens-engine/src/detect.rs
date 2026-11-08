@@ -1,6 +1,6 @@
 //! PE evidence precedes directory-layout evidence; no archive is opened here.
 
-use crate::{Engine, Identification};
+use crate::{Engine, Identification, emote};
 use nvlens_core::{ArchiveOptions, Error, Result};
 use nvlens_io::{ArcView, BinaryReader, pe::PeImage};
 use std::{
@@ -29,9 +29,12 @@ pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identifica
         path.parent().unwrap_or(path)
     };
     if root.file_name().is_some_and(|name| {
-        ["pac", "data", "plugin", "plugins"]
-            .iter()
-            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        [
+            "pac", "data", "archive", "plugin", "plugins", "g00", "gan", "bgm", "wav", "koe",
+            "mov", "dat", "res", "rld",
+        ]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
     }) {
         root = root.parent().unwrap_or(root);
     }
@@ -58,15 +61,18 @@ pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identifica
     }
     executables.sort();
     let mut matches = Vec::new();
+    let mut has_emote = false;
     for executable in &executables {
         if cancelled.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
         let view = ArcView::open(executable)?;
         let data = view.slice(0, view.len())?;
-        let Some(pe) = PeImage::parse(data).ok().flatten() else {
+        let Some(mut pe) = PeImage::parse(data).ok().flatten() else {
             continue;
         };
+        nvlens_unpack::steamstub::unpack(&mut pe, cancelled)?;
+        has_emote |= emote::pe(&pe)?;
         for detector in nvlens_core::inventory::iter::<Detector>() {
             if (detector.pe)(&pe)? {
                 matches.push((
@@ -108,6 +114,9 @@ pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identifica
         },
         cancelled,
     )?;
+    let emote = (has_emote || emote::layout(&root))
+        .then(emote::options)
+        .transpose()?;
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
@@ -116,6 +125,7 @@ pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identifica
         engine: detector.engine,
         evidence: evidence.clone(),
         options,
+        emote,
     }))
 }
 
@@ -260,5 +270,95 @@ mod tests {
         let game = identify(&dir.0, &cancel).unwrap().unwrap();
         assert_eq!(game.engine, Engine::Will);
         assert_eq!(game.evidence, "Game directory layout");
+    }
+    #[test]
+    fn bgi_pe_routes_arc_and_asset_directory_uses_game_context() {
+        let dir = temp();
+        let cancel = AtomicBool::new(false);
+        fs::write(
+            dir.0.join("renamed.exe"),
+            pe_bytes(b"Ethornell - BURIKO General Interpreter\0BURIKO ARC20\0"),
+        )
+        .unwrap();
+        fs::create_dir(dir.0.join("Archive")).unwrap();
+        fs::write(dir.0.join("Archive/data.arc"), b"broken archive").unwrap();
+        let game = identify(&dir.0.join("Archive/data.arc"), &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(game.engine, Engine::Bgi);
+        assert_eq!(game.route("data.arc").unwrap().tag, "arc/bgi");
+        assert_eq!(game.script_format(), Some("script/bgi"));
+        assert!(game.route("unrelated.ypf").is_none());
+        fs::remove_file(dir.0.join("renamed.exe")).unwrap();
+        for name in ["system.arc", "sysprg.arc", "sysgrp.arc"] {
+            fs::write(dir.0.join(name), []).unwrap();
+        }
+        assert_eq!(
+            identify(&dir.0, &cancel).unwrap().unwrap().engine,
+            Engine::Bgi
+        );
+    }
+    #[test]
+    fn exhibit_requires_pe_identity_and_resolved_bitmap_parameters() {
+        let dir = temp();
+        let cancel = AtomicBool::new(false);
+        fs::write(dir.0.join("resources.grp"), b"AiFS").unwrap();
+        assert!(identify(&dir.0, &cancel).unwrap().is_none());
+        fs::write(dir.0.join("ExHIBIT.ini"), b"[setting]\nSYSVER=1\n").unwrap();
+        fs::write(
+            dir.0.join("renamed.exe"),
+            pe_bytes(b"ExHIBIT.ini\0RetouchSendExHIBIT\0"),
+        )
+        .unwrap();
+        assert!(matches!(
+            identify(&dir.0, &cancel),
+            Err(Error::UnknownScheme(_))
+        ));
+        fs::create_dir(dir.0.join("res")).unwrap();
+        assert!(matches!(
+            identify(&dir.0.join("res"), &cancel),
+            Err(Error::UnknownScheme(_))
+        ));
+        fs::write(dir.0.join("other.exe"), pe_bytes(b"AdvHD\0WillPlus\0")).unwrap();
+        assert!(matches!(
+            identify(&dir.0, &cancel),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn emote_attaches_to_host_and_never_identifies_an_engine() {
+        let dir = temp();
+        let cancel = AtomicBool::new(false);
+        fs::create_dir(dir.0.join("plugin")).unwrap();
+        fs::write(
+            dir.0.join("plugin/psbfile.dll"),
+            pe_bytes(b"PSBFile\0psbfile.dll\0"),
+        )
+        .unwrap();
+        assert!(identify(&dir.0, &cancel).unwrap().is_none());
+        fs::write(dir.0.join("host.exe"), pe_bytes(b"AdvHD\0WillPlus\0")).unwrap();
+        let game = identify(&dir.0, &cancel).unwrap().unwrap();
+        assert_eq!(game.engine, Engine::Will);
+        assert_eq!(game.route("data.arc").unwrap().tag, "arc/willv2");
+        assert_eq!(game.route("body.psb").unwrap().tag, "psb/emote-resources");
+        assert_eq!(
+            game.route("pack_info.psb.m").unwrap().tag,
+            "psb/emote-archive-info"
+        );
+        fs::write(
+            dir.0.join("hxv4.dll"),
+            pe_bytes(b"Hxv4\0PARAMS\0FilterManager\0"),
+        )
+        .unwrap();
+        assert!(matches!(
+            identify(&dir.0, &cancel),
+            Err(Error::Unsupported(_))
+        ));
+        fs::remove_file(dir.0.join("host.exe")).unwrap();
+        assert!(matches!(
+            identify(&dir.0, &cancel),
+            Err(Error::UnknownScheme(_))
+        ));
     }
 }

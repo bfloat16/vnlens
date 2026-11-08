@@ -10,6 +10,8 @@ nvlens-core.workspace = true
 nvlens-io.workspace = true
 nvlens-crypto.workspace = true
 nvlens-bin.workspace = true
+nvlens-unpack.workspace = true
+iced-x86.workspace = true
 
 [lints]
 workspace = true

@@ -1,21 +1,14 @@
 //! PSBFile plugin identity, distinct from games merely embedding EmotePlayer.
-use crate::{
-    Engine,
-    detect::{Detector, has},
-};
+use crate::detect::has;
 use nvlens_core::{ArchiveOptions, Error, Result, Secret};
 use nvlens_io::{BinaryWriter, pe::PeImage};
-fn pe(pe: &PeImage<'_>) -> Result<bool> {
+pub(crate) fn pe(pe: &PeImage<'_>) -> Result<bool> {
     Ok(has(pe, b"PSBFile")? && has(pe, b"psbfile.dll")?)
 }
-fn layout(root: &std::path::Path) -> bool {
+pub(crate) fn layout(root: &std::path::Path) -> bool {
     root.join("plugin/psbfile.dll").is_file() && root.join("data").is_dir()
 }
-fn resolve(
-    _: &std::path::Path,
-    _: &[std::path::PathBuf],
-    _: &std::sync::atomic::AtomicBool,
-) -> Result<ArchiveOptions> {
+pub(crate) fn options() -> Result<ArchiveOptions> {
     let mut options = ArchiveOptions::default();
     if let Ok(key) = std::env::var("NVLENS_MDF_KEY")
         && !key.is_empty()
@@ -43,4 +36,3 @@ fn resolve(
     }
     Ok(options)
 }
-nvlens_core::inventory::submit! { Detector { pe, layout, engine: Engine::Emote, resolve } }
