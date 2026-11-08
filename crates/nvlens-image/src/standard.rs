@@ -24,6 +24,11 @@ impl Format for Raster {
 }
 impl ImageFormat for Raster {
     fn metadata(&self, data: &[u8]) -> Result<Option<ImageMeta>> {
+        // A DWQ envelope starts with "BMP ", which image::guess_format
+        // mistakes for a BM file. Its embedded BMP begins after the envelope.
+        if data.starts_with(b"BMP ") && data.get(48..57) == Some(b"PACKTYPE=") {
+            return Ok(None);
+        }
         let Ok(format) = image::guess_format(data) else {
             return Ok(None);
         };

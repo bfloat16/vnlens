@@ -1,13 +1,14 @@
-//! TLG5 raw images, as specified by KiriKiri's LoadTLG.cpp/SaveTLG5.cpp.
+//! TLG5/6 images, as specified by KiriKiri's LoadTLG.cpp/SaveTLG5.cpp.
 //! Planar residuals use a shared slide dictionary, green decorrelation, then
 //! horizontal and vertical predictors modulo 256. TLG0 tags carry pixel offsets.
+mod tlg6;
 use crate::{Image, ImageFormat, ImageMeta, ImageRegistration, OffsetUnit, PixelBuffer};
 use nvlens_core::{Error, Format, Result};
 use nvlens_crypto::compress::tlg::Slide;
 use nvlens_io::BinaryReader;
 const RAW: &[u8; 11] = b"TLG5.0\0raw\x1a";
 const SDS: &[u8; 11] = b"TLG0.0\0sds\x1a";
-const SIGNATURES: &[u32] = &[0x35474c54, 0x30474c54];
+const SIGNATURES: &[u32] = &[0x35474c54, 0x36474c54, 0x30474c54];
 #[derive(Debug, Default)]
 struct Tlg;
 impl Format for Tlg {
@@ -21,7 +22,7 @@ impl Format for Tlg {
         &["tlg"]
     }
     fn description(&self) -> &'static str {
-        "KiriKiri TLG5 image"
+        "KiriKiri TLG5/6 image"
     }
 }
 fn corrupt(reason: &str) -> Error {
@@ -120,14 +121,20 @@ fn header(raw: &[u8], x: i32, y: i32) -> Result<(ImageMeta, usize)> {
 }
 impl ImageFormat for Tlg {
     fn metadata(&self, data: &[u8]) -> Result<Option<ImageMeta>> {
-        if !data.starts_with(b"TLG5") && !data.starts_with(b"TLG0") {
+        if !data.starts_with(b"TLG5") && !data.starts_with(b"TLG6") && !data.starts_with(b"TLG0") {
             return Ok(None);
         }
         let (raw, x, y) = source(data)?;
+        if raw.starts_with(tlg6::MAGIC) {
+            return tlg6::header(raw, x, y).map(|(meta, _)| Some(meta));
+        }
         header(raw, x, y).map(|(meta, _)| Some(meta))
     }
     fn decode(&self, data: &[u8]) -> Result<Image> {
         let (raw, x, y) = source(data)?;
+        if raw.starts_with(tlg6::MAGIC) {
+            return tlg6::decode(raw, x, y);
+        }
         let (meta, block_height) = header(raw, x, y)?;
         let width = meta.width as usize;
         let height = meta.height as usize;
