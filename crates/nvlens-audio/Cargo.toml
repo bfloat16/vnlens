@@ -10,6 +10,8 @@ nvlens-core.workspace = true
 nvlens-crypto.workspace = true
 nvlens-io.workspace = true
 lewton.workspace = true
+ogg.workspace = true
+opus1.workspace = true
 rustfft.workspace = true
 
 [lints]

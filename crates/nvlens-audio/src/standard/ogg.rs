@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 fn reader(data: &[u8]) -> Result<OggStreamReader<Cursor<&[u8]>>> {
     OggStreamReader::new(Cursor::new(data)).map_err(|e| corrupt(&e.to_string()))
 }
-pub fn metadata(data: &[u8]) -> Result<AudioMeta> {
+pub(crate) fn metadata(data: &[u8]) -> Result<AudioMeta> {
     let reader = reader(data)?;
     let channels = u16::from(reader.ident_hdr.audio_channels);
     let sample_rate = reader.ident_hdr.audio_sample_rate;
@@ -48,7 +48,7 @@ pub fn metadata(data: &[u8]) -> Result<AudioMeta> {
         frames,
     })
 }
-pub fn decode(data: &[u8], cancelled: &AtomicBool) -> Result<Pcm> {
+pub(crate) fn decode(data: &[u8], cancelled: &AtomicBool) -> Result<Pcm> {
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }

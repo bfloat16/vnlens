@@ -1,5 +1,6 @@
 //! Standard audio carried by engine archives, including YU-RIS Ogg/WAV.
-mod ogg;
+pub(crate) mod ogg;
+mod opus;
 mod wav;
 use crate::{AudioFormat, AudioMeta, AudioRegistration, Pcm};
 use nvlens_core::{Format, Result};
@@ -18,13 +19,17 @@ impl Format for StandardAudio {
         &["ogg", "wav"]
     }
     fn description(&self) -> &'static str {
-        "Ogg Vorbis and PCM WAV audio"
+        "Ogg Vorbis, Ogg Opus and PCM WAV audio"
     }
 }
 impl AudioFormat for StandardAudio {
     fn metadata(&self, data: &[u8]) -> Result<Option<AudioMeta>> {
         if data.starts_with(b"OggS") {
-            ogg::metadata(data).map(Some)
+            if opus::recognizes(data)? {
+                opus::metadata(data).map(Some)
+            } else {
+                ogg::metadata(data).map(Some)
+            }
         } else if (data.starts_with(b"RIFF") || data.starts_with(b"RF64"))
             && data.get(8..12) == Some(b"WAVE")
         {
@@ -38,7 +43,11 @@ impl AudioFormat for StandardAudio {
     }
     fn decode_cancellable(&self, data: &[u8], cancelled: &AtomicBool) -> Result<Pcm> {
         if data.starts_with(b"OggS") {
-            ogg::decode(data, cancelled)
+            if opus::recognizes(data)? {
+                opus::decode(data, cancelled)
+            } else {
+                ogg::decode(data, cancelled)
+            }
         } else {
             wav::decode(data, cancelled)
         }

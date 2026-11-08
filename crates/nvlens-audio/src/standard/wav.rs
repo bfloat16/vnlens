@@ -87,10 +87,10 @@ fn parse(data: &[u8]) -> Result<(AudioMeta, u16, u16, Vec<&[u8]>)> {
     );
     Ok((meta, codec, bits, chunks))
 }
-pub fn metadata(data: &[u8]) -> Result<AudioMeta> {
+pub(crate) fn metadata(data: &[u8]) -> Result<AudioMeta> {
     Ok(parse(data)?.0)
 }
-pub fn decode(data: &[u8], cancelled: &AtomicBool) -> Result<Pcm> {
+pub(crate) fn decode(data: &[u8], cancelled: &AtomicBool) -> Result<Pcm> {
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }

@@ -4,9 +4,11 @@
 #![forbid(unsafe_code)]
 
 mod ages_mk2;
+pub mod bgi;
 mod format;
 pub mod levels;
 mod model;
+mod siglus;
 pub mod spectrogram;
 mod standard;
 
