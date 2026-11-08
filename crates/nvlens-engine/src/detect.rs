@@ -31,7 +31,7 @@ pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identifica
     if root.file_name().is_some_and(|name| {
         [
             "pac", "data", "archive", "plugin", "plugins", "g00", "gan", "bgm", "wav", "koe",
-            "mov", "dat", "res", "rld",
+            "mov", "dat", "res", "rld", "dwq", "cdvaw", "vaw", "wgq", "spt", "init2", "nya",
         ]
         .iter()
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
@@ -52,7 +52,9 @@ pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identifica
             let path = entry.path();
             if entry.file_type()?.is_file()
                 && path.extension().is_some_and(|ext| {
-                    ext.eq_ignore_ascii_case("exe") || ext.eq_ignore_ascii_case("dll")
+                    ext.eq_ignore_ascii_case("exe")
+                        || ext.eq_ignore_ascii_case("dll")
+                        || ext.eq_ignore_ascii_case("tpm")
                 })
             {
                 executables.push(path);
@@ -90,6 +92,14 @@ pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identifica
             }
         }
     }
+    // Hxv4 is a protected KiriKiri host, so its generic host strings are not
+    // conflicting evidence. Resolution must still succeed without fallback.
+    if matches
+        .iter()
+        .any(|(d, _, _)| d.engine == Engine::KrkrzHxv4)
+    {
+        matches.retain(|(d, _, _)| d.engine != Engine::Krkr);
+    }
     let Some((detector, evidence, _)) = matches.first() else {
         return Ok(None);
     };
@@ -107,7 +117,7 @@ pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identifica
         .collect();
     let options = (detector.resolve)(
         &root,
-        if matched.is_empty() {
+        if matched.is_empty() || detector.engine == Engine::Krkr {
             &executables
         } else {
             &matched
@@ -203,6 +213,66 @@ mod tests {
         BinaryWriter::u32_le(0x200, &mut bytes[0x18c..]);
         bytes[0x200..].copy_from_slice(text);
         bytes
+    }
+    #[test]
+    fn systemnnn_pe_routes_split_archives_and_script_dialects() {
+        let dir = temp();
+        let cancel = AtomicBool::new(false);
+        fs::create_dir(dir.0.join("dwq")).unwrap();
+        let package = dir.0.join("dwq/bg0.gpk");
+        fs::write(&package, b"NNNCommonGameByTinyan").unwrap();
+        assert!(identify(&package, &cancel).unwrap().is_none());
+        fs::write(
+            dir.0.join("renamed.exe"),
+            pe_bytes(b"NNNCommonGameByTinyan\0NNNUtilLib :\0NNNLib :"),
+        )
+        .unwrap();
+        let game = identify(&package, &cancel).unwrap().unwrap();
+        assert_eq!(game.engine, Engine::SystemNnn);
+        assert_eq!(game.route("BG0.GPK").unwrap().tag, "gpk/systemnnn");
+        assert_eq!(game.route("aa.vpk").unwrap().tag, "vpk/systemnnn");
+        assert!(game.route("aa.vtb").is_none());
+        assert!(game.route("data.xp3").is_none());
+        assert_eq!(game.script_format_for("sys.spt"), Some("spt/systemnnn"));
+        assert_eq!(game.script_format_for("game.fxf"), Some("fxf/systemnnn"));
+        assert_eq!(
+            game.script_format_for("function.xtx"),
+            Some("text/systemnnn")
+        );
+        assert!(game.script_format_for("bg.dwq").is_none());
+        fs::write(dir.0.join("other.exe"), pe_bytes(b"AdvHD\0WillPlus\0")).unwrap();
+        assert!(matches!(
+            identify(&package, &cancel),
+            Err(Error::Unsupported(_))
+        ));
+    }
+    #[test]
+    fn escude_requires_host_evidence_and_routes_pseudo_c_as_text() {
+        let dir = temp();
+        let cancel = AtomicBool::new(false);
+        fs::write(dir.0.join("script.bin"), b"ESC-ARC2").unwrap();
+        fs::write(dir.0.join("configure.cfg"), b"Company=ESCUDE").unwrap();
+        assert!(identify(&dir.0, &cancel).unwrap().is_none());
+        fs::write(
+            dir.0.join("renamed.exe"),
+            pe_bytes(b"ESCUDE_GAMES_VIEW\0ESCUDE_GAMES_FRAME\0ESCUDE_GAMES_MUTEX\0ESC-ARC2\0"),
+        )
+        .unwrap();
+        let game = identify(&dir.0, &cancel).unwrap().unwrap();
+        assert_eq!(game.engine, Engine::Escude);
+        assert_eq!(game.route("DATA.BIN").unwrap().tag, "bin/escude");
+        assert!(game.route("other.xp3").is_none());
+        for name in ["main.c", "acpx.h", "misc/script.inc", "credit.txt"] {
+            assert_eq!(game.script_format_for(name), Some("text/escude"));
+        }
+        assert_eq!(game.script_format_for("scene.bin"), Some("script/escude"));
+        assert_eq!(game.script_format_for("preset.sfx"), Some("sfx/escude"));
+        assert!(game.script_format_for("image.png").is_none());
+        fs::write(dir.0.join("other.exe"), pe_bytes(b"AdvHD\0WillPlus\0")).unwrap();
+        assert!(matches!(
+            identify(&dir.0, &cancel),
+            Err(Error::Unsupported(_))
+        ));
     }
     #[test]
     fn pe_strings_precede_layout_and_archive_bytes_are_not_evidence() {
@@ -359,6 +429,40 @@ mod tests {
         assert!(matches!(
             identify(&dir.0, &cancel),
             Err(Error::UnknownScheme(_))
+        ));
+    }
+
+    #[test]
+    fn krkr_requires_host_evidence_and_hxv4_resolution_never_falls_back() {
+        let dir = temp();
+        let cancel = AtomicBool::new(false);
+        fs::write(dir.0.join("data.xp3"), b"XP3").unwrap();
+        assert!(identify(&dir.0, &cancel).unwrap().is_none());
+        fs::write(
+            dir.0.join("renamed.exe"),
+            pe_bytes(b"TVP(KIRIKIRI)\0tTVPXP3Archive\0"),
+        )
+        .unwrap();
+        let game = identify(&dir.0, &cancel).unwrap().unwrap();
+        assert_eq!(game.engine, Engine::Krkr);
+        assert_eq!(game.route("DATA.XP3").unwrap().tag, "xp3/krkr");
+        assert!(game.resource_options().numbers.is_empty());
+        assert_eq!(game.script_format_for("scene.ks"), Some("script/krkr"));
+        assert!(game.route("other.arc").is_none());
+        fs::write(
+            dir.0.join("extra.tpm"),
+            pe_bytes(b"Hxv4\0PARAMS\0FilterManager\0"),
+        )
+        .unwrap();
+        assert!(matches!(
+            identify(&dir.0, &cancel),
+            Err(Error::UnknownScheme(_))
+        ));
+        fs::remove_file(dir.0.join("extra.tpm")).unwrap();
+        fs::write(dir.0.join("other.exe"), pe_bytes(b"AdvHD\0WillPlus\0")).unwrap();
+        assert!(matches!(
+            identify(&dir.0, &cancel),
+            Err(Error::Unsupported(_))
         ));
     }
 }

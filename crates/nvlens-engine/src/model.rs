@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
+    Escude,
+    SystemNnn,
     Exhibit,
     Yuris,
     Will,
     AgesMk2,
     Bgi,
     Siglus,
+    Krkr,
     KrkrzHxv4,
 }
 
@@ -41,6 +44,22 @@ impl Identification {
                 None
             };
         }
+        if self.engine == Engine::SystemNnn {
+            return match ext.to_ascii_lowercase().as_str() {
+                "spt" => Some("spt/systemnnn"),
+                "fxf" => Some("fxf/systemnnn"),
+                "xtx" | "mml" => Some("text/systemnnn"),
+                _ => None,
+            };
+        }
+        if self.engine == Engine::Escude {
+            return match ext.to_ascii_lowercase().as_str() {
+                "c" | "h" | "inc" | "txt" | "cfg" | "001" => Some("text/escude"),
+                "bin" | "lsf" | "mot" => Some("script/escude"),
+                "sfx" => Some("sfx/escude"),
+                _ => None,
+            };
+        }
         self.script_format()
     }
     /// Parameters shared with resource decoders; Debug redacts all keys.
@@ -52,11 +71,12 @@ impl Identification {
     #[must_use]
     pub fn script_format(&self) -> Option<&'static str> {
         match self.engine {
+            Engine::Escude => Some("script/escude"),
             Engine::Exhibit => Some("rld/exhibit"),
             Engine::Yuris => Some("ybn/yuris"),
             Engine::Bgi => Some("script/bgi"),
             Engine::Siglus => Some("script/siglus"),
-            Engine::KrkrzHxv4 => Some("script/krkr"),
+            Engine::Krkr | Engine::KrkrzHxv4 => Some("script/krkr"),
             _ => None,
         }
     }
@@ -83,9 +103,12 @@ impl Identification {
             }
         }
         let tag = match self.engine {
+            Engine::Escude if extension == "bin" => "bin/escude",
+            Engine::SystemNnn if extension == "gpk" => "gpk/systemnnn",
+            Engine::SystemNnn if extension == "vpk" => "vpk/systemnnn",
             Engine::Exhibit if extension == "grp" => "grp/exhibit",
             Engine::Yuris if extension == "ypf" => "ypf/yuris",
-            Engine::KrkrzHxv4 if extension == "xp3" => "xp3/krkr",
+            Engine::Krkr | Engine::KrkrzHxv4 if extension == "xp3" => "xp3/krkr",
             Engine::Will if matches!(extension, "arc" | "ar2") => "arc/willv2",
             Engine::Bgi if extension == "arc" => "arc/bgi",
             Engine::Siglus if extension == "pck" => "pck/siglus",

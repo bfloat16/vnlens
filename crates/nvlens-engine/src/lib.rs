@@ -5,10 +5,13 @@ mod ages_mk2;
 mod bgi;
 mod detect;
 mod emote;
+mod escude;
 mod exhibit;
+mod krkr;
 mod krkrz_hxv4;
 mod model;
 mod siglus;
+mod systemnnn;
 mod will;
 mod yuris;
 
