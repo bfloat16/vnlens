@@ -1,0 +1,109 @@
+//! ExHIBIT GYU compression: Okumura LZSS and an interleaved MSB LZ stream.
+//! Layout follows GARbro GyuReader, checked against Ux image readers.
+
+use nvlens_io::{BinaryIo, BinaryReader, BitOrder, BitReader};
+use std::io;
+
+pub fn lzss(input: &[u8], size: usize) -> io::Result<Vec<u8>> {
+    let mut r = BinaryReader::new(input);
+    let mut ring = [0; 4096];
+    let mut position = 0xfee;
+    let mut out = Vec::new();
+    while out.len() < size {
+        let flags = r.read_u8()?;
+        for bit in 0..8 {
+            if out.len() == size {
+                break;
+            }
+            if flags & (1 << bit) != 0 {
+                let byte = r.read_u8()?;
+                ring[position] = byte;
+                position = (position + 1) & 4095;
+                out.push(byte);
+            } else {
+                let word = usize::from(r.read_u16_le()?);
+                let source = (word & 255) | ((word >> 4) & 0xf00);
+                let count = ((word >> 8) & 15) + 3;
+                if count > size - out.len() {
+                    return Err(BinaryIo::invalid_input("GYU LZSS match exceeds image"));
+                }
+                for i in 0..count {
+                    let byte = ring[(source + i) & 4095];
+                    ring[position] = byte;
+                    position = (position + 1) & 4095;
+                    out.push(byte);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn gyu(input: &[u8], size: usize) -> io::Result<Vec<u8>> {
+    let mut header = BinaryReader::new(input);
+    header.read_u32_le()?;
+    let mut bits = BitReader::new(header.read_bytes(header.remaining())?, BitOrder::Msb);
+    let mut out = Vec::new();
+    if size != 0 {
+        out.push(bits.read_raw_bytes(1)?[0]);
+    }
+    while out.len() < size {
+        if bits.read_bit()? != 0 {
+            out.push(bits.read_raw_bytes(1)?[0]);
+            continue;
+        }
+        let (distance, count) = if bits.read_bit()? != 0 {
+            let word = usize::from(BinaryReader::u16_be(bits.read_raw_bytes(2)?));
+            let count = if word & 7 != 0 {
+                (word & 7) + 2
+            } else {
+                let count = usize::from(bits.read_raw_bytes(1)?[0]);
+                if count == 0 {
+                    return Err(BinaryIo::unexpected_eof("GYU stream ended before image"));
+                }
+                count + 1
+            };
+            (8192 - (word >> 3), count)
+        } else {
+            let count = bits.read_bits(2)? as usize + 2;
+            (256 - usize::from(bits.read_raw_bytes(1)?[0]), count)
+        };
+        if distance > out.len() || count > size - out.len() {
+            return Err(BinaryIo::invalid_input(
+                "GYU match exceeds image history or dimensions",
+            ));
+        }
+        for _ in 0..count {
+            out.push(out[out.len() - distance]);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lzss_ring_overlap_and_zero_history() {
+        assert_eq!(lzss(&[1, b'A', 0xee, 0xf2], 6).unwrap(), b"AAAAAA");
+        assert_eq!(lzss(&[0, 0, 0], 3).unwrap(), [0; 3]);
+        assert!(lzss(&[0, 0], 3).is_err());
+        assert!(lzss(&[0, 0, 0], 2).is_err());
+    }
+
+    #[test]
+    fn gyu_interleaved_literals_short_and_long_matches() {
+        assert_eq!(
+            gyu(&[0, 0, 0, 0, b'A', 0x80, b'B', 255], 4).unwrap(),
+            b"ABBB"
+        );
+        assert_eq!(
+            gyu(&[0, 0, 0, 0, b'A', 0x40, 255, 249], 4).unwrap(),
+            b"AAAA"
+        );
+        assert!(gyu(&[0, 0, 0, 0, b'A', 0, 0], 3).is_err());
+        assert!(gyu(&[0, 0, 0, 0, b'A', 0x80], 3).is_err());
+    }
+}

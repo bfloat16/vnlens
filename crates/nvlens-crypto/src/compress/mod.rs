@@ -1,6 +1,10 @@
 //! Decompression routines.
 
+pub mod bgi;
+pub mod exhibit;
 pub mod lzss;
+pub mod siglus;
+pub mod tlg;
 pub mod zlib;
 
 /// Decompression error.

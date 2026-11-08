@@ -6,7 +6,7 @@
 //! passed in as parameters rather than embedded. Byte framing (e.g. a length
 //! prefix) is read through [`nvlens_io`], keeping it the single source of
 //! binary I/O.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod checksum;
 pub mod cipher;

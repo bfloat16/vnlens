@@ -1,6 +1,8 @@
 //! Cipher primitives.
 
+pub mod aes;
 pub mod blowfish;
+pub mod hxv4;
 pub mod mdf;
 pub mod psb_stream;
 pub mod scramble;
@@ -17,3 +19,6 @@ pub enum CipherError {
     #[error("scramble base table must be exactly {expected} bytes, got {got}")]
     BadScrambleBase { expected: usize, got: usize },
 }
+
+pub mod exhibit;
+mod mt19937;

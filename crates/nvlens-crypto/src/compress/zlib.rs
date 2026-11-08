@@ -7,6 +7,7 @@ use flate2::read::ZlibDecoder;
 use super::CompressError;
 
 /// Opens a streaming zlib decoder. Reads produce only the requested output.
+#[must_use]
 pub fn decoder<R: Read>(reader: R) -> ZlibDecoder<R> {
     ZlibDecoder::new(reader)
 }

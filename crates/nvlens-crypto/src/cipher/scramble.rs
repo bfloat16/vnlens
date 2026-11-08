@@ -21,7 +21,7 @@ use super::CipherError;
 const KEYSTREAM_LEN: usize = 0x1_0000;
 
 /// Per-block CRC salt seed used by `initScramble`.
-pub const SEED: u32 = 0x73FB_CBBE;
+const SEED: u32 = 0x73FB_CBBE;
 
 /// A built 64 KiB keystream for one scramble key.
 pub struct Keystream(Box<[u8; KEYSTREAM_LEN]>);

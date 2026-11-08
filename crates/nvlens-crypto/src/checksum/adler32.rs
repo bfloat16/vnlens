@@ -5,14 +5,8 @@ const MOD_ADLER: u32 = 65_521;
 /// Computes Adler-32 with the standard initial value.
 #[must_use]
 pub fn checksum(data: &[u8]) -> u32 {
-    update(1, data)
-}
-
-/// Updates an existing Adler-32 checksum with more bytes.
-#[must_use]
-pub fn update(seed: u32, data: &[u8]) -> u32 {
-    let mut a = seed & 0xFFFF;
-    let mut b = seed >> 16;
+    let mut a = 1u32;
+    let mut b = 0u32;
 
     for chunk in data.chunks(5_552) {
         for &byte in chunk {
