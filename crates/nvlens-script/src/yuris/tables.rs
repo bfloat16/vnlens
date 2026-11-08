@@ -3,7 +3,8 @@
 //! 0x45E97C (YSLB), and variable initialization at 0x45293C (YSVR).
 //! Table headers differ; record boundaries are not inferred from a shared header.
 
-use super::{expression, ybn::*};
+use super::{attribute, c_string, corrupt, expression, opcode, operand, section};
+use crate::ir::DataOperation;
 use crate::ir::*;
 use nvlens_core::{Error, Result};
 use nvlens_io::BinaryReader;
@@ -41,15 +42,12 @@ pub fn script_paths(data: &[u8]) -> Result<Vec<(u32, String)>> {
         .instructions
         .into_iter()
         .filter_map(|record| {
-            record
-                .operands
-                .into_iter()
-                .find_map(|field| match field.value {
-                    Value::Text(path) if field.name == "source_path" => {
-                        Some((record.opcode.code, path))
-                    }
-                    _ => None,
-                })
+            record.args.into_iter().find_map(|field| match field.value {
+                Value::Text(path) if field.name == ArgName::SourcePath => {
+                    Some((record.opcode.code, path))
+                }
+                _ => None,
+            })
         })
         .collect())
 }
@@ -64,20 +62,20 @@ pub(super) fn labels(data: &[u8]) -> Result<Vec<Label>> {
     for record in table
         .instructions
         .iter()
-        .filter(|record| record.opcode.mnemonic.as_deref() == Some("LABEL"))
+        .filter(|record| record.opcode.variant == Some(Qualifier::Label))
     {
         let mut label = Label {
             name: String::new(),
             instruction: 0,
             script: 0,
         };
-        for field in &record.operands {
-            match (field.name.as_str(), &field.value) {
-                ("name", Value::Text(name)) => label.name = name.clone(),
-                ("instruction", Value::InstructionTarget(target)) => {
+        for field in &record.args {
+            match (field.name, &field.value) {
+                (ArgName::Name, Value::Text(name)) => label.name = name.clone(),
+                (ArgName::Instruction, Value::InstructionTarget(target)) => {
                     label.instruction = *target as u32
                 }
-                ("script_id", Value::Unsigned(id)) => label.script = *id as u16,
+                (ArgName::ScriptId, Value::Unsigned(id)) => label.script = *id as u16,
                 _ => {}
             }
         }
@@ -138,7 +136,8 @@ pub(super) fn commands(data: &[u8]) -> Result<(Vec<Command>, usize)> {
 struct Record<'a> {
     reader: BinaryReader<'a>,
     start: usize,
-    fields: Vec<Operand>,
+    fields: Vec<Arg>,
+    namespace: String,
 }
 impl<'a> Record<'a> {
     fn new(data: &'a [u8], offset: usize) -> Result<Self> {
@@ -146,9 +145,13 @@ impl<'a> Record<'a> {
             reader: BinaryReader::new_at(data, offset)?,
             start: offset,
             fields: Vec::new(),
+            namespace: format!(
+                "yuris.table.{}",
+                String::from_utf8_lossy(&data[..4]).to_ascii_lowercase()
+            ),
         })
     }
-    fn field(&mut self, name: &str, start: usize, value: Value) {
+    fn field(&mut self, name: ArgName, start: usize, value: Value) {
         self.fields.push(operand(
             name,
             Span {
@@ -158,31 +161,31 @@ impl<'a> Record<'a> {
             value,
         ));
     }
-    fn unsigned(&mut self, name: &str, size: usize) -> Result<u64> {
+    fn unsigned(&mut self, name: ArgName, size: usize) -> Result<u64> {
         let start = self.reader.position();
         let value = BinaryReader::compact_u64_le(self.reader.read_bytes(size)?)?;
         self.field(name, start, Value::Unsigned(value));
         Ok(value)
     }
-    fn text(&mut self, name: &str, size: usize) -> Result<()> {
+    fn text(&mut self, name: ArgName, size: usize) -> Result<()> {
         let start = self.reader.position();
         let value = expression::text(self.reader.read_bytes(size)?, start as u64)?;
         self.field(name, start, Value::Text(value));
         Ok(())
     }
-    fn string(&mut self, name: &str) -> Result<()> {
+    fn string(&mut self, name: ArgName) -> Result<()> {
         let start = self.reader.position();
         let value = c_string(&mut self.reader)?;
         self.field(name, start, Value::Text(value));
         Ok(())
     }
-    fn bytes(&mut self, name: &str, size: usize) -> Result<()> {
+    fn bytes(&mut self, name: ArgName, size: usize) -> Result<()> {
         let start = self.reader.position();
         let value = self.reader.read_bytes(size)?.to_vec();
         self.field(name, start, Value::Bytes(value));
         Ok(())
     }
-    fn finish(&mut self, script: &mut Script, code: u32, name: &str) {
+    fn finish(&mut self, script: &mut Script, code: u32, name: Qualifier) {
         script.instructions.push(Instruction {
             id: script.instructions.len() as u64,
             span: Span {
@@ -190,8 +193,14 @@ impl<'a> Record<'a> {
                 size: (self.reader.position() - self.start) as u64,
             },
             source_line: None,
-            opcode: opcode(code, Some(name.into())),
-            operands: std::mem::take(&mut self.fields),
+            opcode: Opcode {
+                namespace: self.namespace.clone(),
+                code,
+                operation: Operation::Data(DataOperation::Record),
+                variant: Some(name),
+                native_mnemonic: None,
+            },
+            args: std::mem::take(&mut self.fields),
             attributes: Vec::new(),
         });
         self.start = self.reader.position();
@@ -213,26 +222,33 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
     r.start = 0;
     match magic {
         b"YSCM" => {
-            r.unsigned("command_count", 4)?;
-            r.unsigned("reserved", 4)?;
-            r.finish(&mut script, 0, "YSCM");
+            r.unsigned(ArgName::CommandCount, 4)?;
+            r.unsigned(ArgName::Reserved, 4)?;
+            r.finish(&mut script, 0, Qualifier::CommandTable);
             let (definitions, end) = commands(data)?;
             for (id, definition) in definitions.into_iter().enumerate() {
                 script.instructions.push(Instruction {
                     id: script.instructions.len() as u64,
                     span: definition.span,
                     source_line: None,
-                    opcode: opcode(id as u32, Some(definition.name)),
-                    operands: definition
+                    opcode: Opcode {
+                        namespace: "yuris.command_definition".into(),
+                        code: id as u32,
+                        operation: Operation::Data(DataOperation::Record),
+                        variant: Some(Qualifier::Command),
+                        native_mnemonic: Some(definition.name),
+                    },
+                    args: definition
                         .arguments
                         .into_iter()
                         .enumerate()
-                        .map(|(id, arg)| Operand {
-                            name: arg.name,
+                        .map(|(arg_id, arg)| Arg {
+                            name: opcode::argument(id as u32, arg_id as u8, arg_id as u8, false),
+                            native_name: Some(arg.name),
                             span: arg.span,
                             value: Value::Unsigned(u64::from(arg.kind)),
                             attributes: vec![
-                                attribute("id", id as u64),
+                                attribute("id", arg_id as u64),
                                 attribute("rule", arg.rule),
                             ],
                         })
@@ -244,140 +260,140 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
             r.start = end;
             // The loader consumes 37 errno messages followed by a 256-byte key map.
             for id in 0..37 {
-                r.string("message")?;
-                r.finish(&mut script, id, "SYSTEM_ERROR");
+                r.string(ArgName::Message)?;
+                r.finish(&mut script, id, Qualifier::SystemError);
             }
             for id in 0..256 {
-                r.unsigned("virtual_key", 1)?;
-                r.finish(&mut script, id, "KEY_MAPPING");
+                r.unsigned(ArgName::VirtualKey, 1)?;
+                r.finish(&mut script, id, Qualifier::KeyMapping);
             }
         }
         b"YSER" => {
-            let count = r.unsigned("error_count", 4)? as usize;
-            r.unsigned("reserved", 4)?;
-            r.finish(&mut script, 0, "YSER");
+            let count = r.unsigned(ArgName::ErrorCount, 4)? as usize;
+            r.unsigned(ArgName::Reserved, 4)?;
+            r.finish(&mut script, 0, Qualifier::ErrorTable);
             r.count(count, 5)?;
             for _ in 0..count {
-                let code = r.unsigned("code", 4)? as u32;
-                r.string("message")?;
-                r.finish(&mut script, code, "ERROR_MESSAGE");
+                let code = r.unsigned(ArgName::Code, 4)? as u32;
+                r.string(ArgName::Message)?;
+                r.finish(&mut script, code, Qualifier::ErrorMessage);
             }
         }
         b"YSTD" => {
-            r.unsigned("maximum_variable_id", 4)?;
-            r.unsigned("return_code_count", 4)?;
-            r.finish(&mut script, 0, "SCRIPT_METADATA");
+            r.unsigned(ArgName::MaximumVariableId, 4)?;
+            r.unsigned(ArgName::ReturnCodeCount, 4)?;
+            r.finish(&mut script, 0, Qualifier::ScriptMetadata);
         }
         b"YSTL" => {
-            let count = r.unsigned("script_count", 4)? as usize;
-            r.finish(&mut script, 0, "YSTL");
+            let count = r.unsigned(ArgName::ScriptCount, 4)? as usize;
+            r.finish(&mut script, 0, Qualifier::ScriptTable);
             r.count(count, 28)?;
             for _ in 0..count {
-                let id = r.unsigned("script_id", 4)? as u32;
-                let size = r.unsigned("path_length", 4)? as usize;
-                r.text("source_path", size)?;
+                let id = r.unsigned(ArgName::ScriptId, 4)? as u32;
+                let size = r.unsigned(ArgName::PathLength, 4)? as usize;
+                r.text(ArgName::SourcePath, size)?;
                 // The runtime skips the first four words; retain their actual order.
                 for name in [
-                    "source_stamp_0",
-                    "source_stamp_1",
-                    "source_field_0",
-                    "source_field_1",
-                    "runtime_flags",
+                    ArgName::SourceStamp(0),
+                    ArgName::SourceStamp(1),
+                    ArgName::SourceField(0),
+                    ArgName::SourceField(1),
+                    ArgName::RuntimeFlags,
                 ] {
                     r.unsigned(name, 4)?;
                 }
-                r.finish(&mut script, id, "SCRIPT_FILE");
+                r.finish(&mut script, id, Qualifier::ScriptFile);
             }
         }
         b"YSLB" => {
-            let count = r.unsigned("label_count", 4)? as usize;
-            r.finish(&mut script, 0, "YSLB");
+            let count = r.unsigned(ArgName::LabelCount, 4)? as usize;
+            r.finish(&mut script, 0, Qualifier::LabelTable);
             for id in 0..256 {
-                let first = r.unsigned("first_label", 4)?;
+                let first = r.unsigned(ArgName::FirstLabel, 4)?;
                 if first > count as u64 {
                     return Err(corrupt(r.start, "Label bucket exceeds label table"));
                 }
-                r.finish(&mut script, id, "HASH_BUCKET");
+                r.finish(&mut script, id, Qualifier::HashBucket);
             }
             r.count(count, 13)?;
             for id in 0..count {
-                let size = r.unsigned("name_length", 1)? as usize;
+                let size = r.unsigned(ArgName::NameLength, 1)? as usize;
                 let start = r.reader.position();
                 let raw = r.reader.read_bytes(size)?;
                 r.field(
-                    "name",
+                    ArgName::Name,
                     start,
                     Value::Text(expression::text(raw, start as u64)?),
                 );
-                let hash = r.unsigned("name_hash", 4)?;
+                let hash = r.unsigned(ArgName::NameHash, 4)?;
                 if hash != u64::from(nvlens_crypto::hash::murmur2::hash(raw, 0)) {
                     return Err(corrupt(start, "Label name hash mismatch"));
                 }
                 let start = r.reader.position();
                 let target = r.reader.read_u32_le()?;
                 r.field(
-                    "instruction",
+                    ArgName::Instruction,
                     start,
                     Value::InstructionTarget(u64::from(target)),
                 );
-                r.unsigned("script_id", 2)?;
-                r.unsigned("conditional_depth", 1)?;
-                r.unsigned("loop_depth", 1)?;
-                r.finish(&mut script, id as u32, "LABEL");
+                r.unsigned(ArgName::ScriptId, 2)?;
+                r.unsigned(ArgName::ConditionalDepth, 1)?;
+                r.unsigned(ArgName::LoopDepth, 1)?;
+                r.finish(&mut script, id as u32, Qualifier::Label);
             }
         }
         b"YSVR" => {
-            let count = r.unsigned("variable_count", 2)? as usize;
-            r.finish(&mut script, 0, "YSVR");
+            let count = r.unsigned(ArgName::VariableCount, 2)? as usize;
+            r.finish(&mut script, 0, Qualifier::VariableTable);
             r.count(count, 8)?;
             for _ in 0..count {
-                r.unsigned("scope", 1)?;
-                r.unsigned("storage", 1)?;
-                r.unsigned("script_id", 2)?;
-                let id = r.unsigned("variable_id", 2)? as u32;
-                let ty = r.unsigned("type", 1)?;
-                let dimensions = r.unsigned("dimensions", 1)? as usize;
+                r.unsigned(ArgName::Scope, 1)?;
+                r.unsigned(ArgName::Storage, 1)?;
+                r.unsigned(ArgName::ScriptId, 2)?;
+                let id = r.unsigned(ArgName::VariableId, 2)? as u32;
+                let ty = r.unsigned(ArgName::Type, 1)?;
+                let dimensions = r.unsigned(ArgName::Dimensions, 1)? as usize;
                 r.count(dimensions, 4)?;
                 for i in 0..dimensions {
-                    r.unsigned(&format!("dimension_{i}"), 4)?;
+                    r.unsigned(ArgName::Dimension(i as u64), 4)?;
                 }
                 let start = r.reader.position();
                 match ty {
                     1 => {
                         let value = r.reader.read_i64_le()?;
-                        r.field("initial", start, Value::Integer(value));
+                        r.field(ArgName::InitialValue, start, Value::Integer(value));
                     }
                     2 => {
                         let bits = r.reader.read_u64_le()?;
-                        r.field("initial", start, Value::Float64Bits(bits));
+                        r.field(ArgName::InitialValue, start, Value::Float64Bits(bits));
                     }
                     3 => {
-                        let size = r.unsigned("initial_length", 2)? as usize;
+                        let size = r.unsigned(ArgName::InitialLength, 2)? as usize;
                         let start = r.reader.position();
                         let tokens = expression::decode(r.reader.read_bytes(size)?, start as u64)?;
-                        r.field("initial", start, Value::Expression(tokens));
+                        r.field(ArgName::InitialValue, start, Value::Expression(tokens));
                     }
                     _ => {} // The loader consumes no initializer for other type tags.
                 }
-                r.finish(&mut script, id, "VARIABLE");
+                r.finish(&mut script, id, Qualifier::Variable);
             }
         }
         b"YSCF" => {
-            r.unsigned("reserved_0", 4)?;
-            r.unsigned("reserved_1", 4)?;
-            r.finish(&mut script, 0, "YSCF");
-            r.unsigned("width", 4)?;
-            r.unsigned("height", 4)?;
-            r.unsigned("window_option", 4)?;
-            r.bytes("resource_priority_0", 8)?;
-            r.bytes("resource_priority_1", 4)?;
+            r.unsigned(ArgName::ReservedAt(0), 4)?;
+            r.unsigned(ArgName::ReservedAt(1), 4)?;
+            r.finish(&mut script, 0, Qualifier::ConfigurationTable);
+            r.unsigned(ArgName::Width, 4)?;
+            r.unsigned(ArgName::Height, 4)?;
+            r.unsigned(ArgName::WindowOption, 4)?;
+            r.bytes(ArgName::ResourcePriority(0), 8)?;
+            r.bytes(ArgName::ResourcePriority(1), 4)?;
             for i in 0..8 {
-                r.unsigned(&format!("option_{i}"), 4)?;
+                r.unsigned(ArgName::Option(i as u64), 4)?;
             }
-            r.unsigned("reserved_2", 4)?;
-            let size = r.unsigned("title_length", 2)? as usize;
-            r.text("title", size)?;
-            r.finish(&mut script, 0, "CONFIGURATION");
+            r.unsigned(ArgName::ReservedAt(2), 4)?;
+            let size = r.unsigned(ArgName::TitleLength, 2)? as usize;
+            r.text(ArgName::Title, size)?;
+            r.finish(&mut script, 0, Qualifier::Configuration);
         }
         _ => return Err(Error::InvalidFormat),
     }
@@ -459,15 +475,15 @@ mod tests {
         assert_eq!(ir.instructions[1].span.offset, 10);
         assert_eq!(ir.instructions[1].opcode.code, 0x1234);
         assert!(matches!(
-            ir.instructions[1].operands.last().unwrap().value,
+            ir.instructions[1].args.last().unwrap().value,
             Value::Integer(-1)
         ));
         assert!(matches!(
-            ir.instructions[2].operands.last().unwrap().value,
+            ir.instructions[2].args.last().unwrap().value,
             Value::Float64Bits(0x8000_0000_0000_0000)
         ));
         assert!(
-            matches!(&ir.instructions[3].operands.last().unwrap().value, Value::Expression(t) if matches!(&t[0].value,Some(Value::Text(s)) if s == "x"))
+            matches!(&ir.instructions[3].args.last().unwrap().value, Value::Expression(t) if matches!(&t[0].args.first().map(|arg| &arg.value),Some(Value::Text(s)) if s == "x"))
         );
     }
 
@@ -487,7 +503,15 @@ mod tests {
         complete(&bytes);
         let ir = parse(&bytes);
         assert_eq!(ir.instructions.len(), 258);
-        assert!(ir.instructions.last().unwrap().operands.iter().any(|p| p.name == "instruction" && matches!(p.value, Value::InstructionTarget(42))));
+        assert!(
+            ir.instructions
+                .last()
+                .unwrap()
+                .args
+                .iter()
+                .any(|p| p.name == ArgName::Instruction
+                    && matches!(p.value, Value::InstructionTarget(42)))
+        );
         let length = bytes.len();
         bytes[length - 12] ^= 1;
         assert!(super::super::ybn::disassemble(&bytes, None).is_err());
@@ -506,7 +530,7 @@ mod tests {
         complete(&bytes);
         let ir = parse(&bytes);
         assert_eq!(ir.instructions[1].span.offset, 12);
-        assert_eq!(ir.instructions[1].operands.len(), 8);
+        assert_eq!(ir.instructions[1].args.len(), 8);
         assert_eq!(script_paths(&bytes).unwrap(), [(7, "main.yst".into())]);
         for end in 0..bytes.len() {
             assert!(script_paths(&bytes[..end]).is_err());
@@ -528,7 +552,14 @@ mod tests {
         complete(&bytes);
         let ir = parse(&bytes);
         assert_eq!(ir.instructions.len(), 295);
-        assert_eq!(ir.instructions[1].opcode.mnemonic.as_deref(), Some("TEST"));
+        assert_eq!(
+            ir.instructions[1].opcode.native_mnemonic.as_deref(),
+            Some("TEST")
+        );
+        assert_eq!(
+            ir.instructions[1].opcode.operation,
+            Operation::Data(DataOperation::Record)
+        );
         assert_eq!(ir.instructions.last().unwrap().opcode.code, 255);
     }
 
@@ -541,9 +572,10 @@ mod tests {
         complete(&config);
         assert!(
             parse(&config).instructions[1]
-                .operands
+                .args
                 .iter()
-                .any(|p| p.name == "title" && matches!(&p.value,Value::Text(s) if s == "Game"))
+                .any(|p| p.name == ArgName::Title
+                    && matches!(&p.value,Value::Text(s) if s == "Game"))
         );
         let mut metadata = header(b"YSTD");
         number(&mut metadata, 0x1234, 4);

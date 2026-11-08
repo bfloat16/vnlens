@@ -2,11 +2,14 @@
 //! Verified at 0x426744 and dispatch initialization 0x464658. Disassembly keeps
 //! stack operations and unknown tokens intact rather than evaluating the VM.
 
-use crate::ir::{Opcode, Operand, Span, Token, Value};
+use crate::ir::ArgName;
+use crate::ir::Qualifier;
+use crate::ir::StorageOperation;
+use crate::ir::{Arg, Opcode, Operation, Span, Token, Value};
 use nvlens_core::{Error, Result};
 use nvlens_io::BinaryReader;
 
-pub fn decode(data: &[u8], offset: u64) -> Result<Vec<Token>> {
+pub(super) fn decode(data: &[u8], offset: u64) -> Result<Vec<Token>> {
     let mut reader = BinaryReader::new(data);
     offset
         .checked_add(data.len() as u64)
@@ -27,7 +30,7 @@ pub fn decode(data: &[u8], offset: u64) -> Result<Vec<Token>> {
             b'I' => Some(4),
             b'L' | b'F' => Some(8),
             b'H' | b'V' | b'v' => Some(3),
-            _ if operator(code).is_some() => Some(0),
+            _ if super::opcode::expression(code).is_some() => Some(0),
             _ => None,
         };
         if expected.is_some_and(|expected| expected != length) {
@@ -36,42 +39,50 @@ pub fn decode(data: &[u8], offset: u64) -> Result<Vec<Token>> {
                 reason: format!("Invalid payload size for expression token 0x{code:02X}"),
             });
         }
-        let (mnemonic, value) = match (code, length) {
+        let (operation, variant, value) = match (code, length) {
             (b'B', 1) => (
-                Some("push.i8"),
+                Operation::Storage(StorageOperation::Push),
+                Some(Qualifier::Integer),
                 Some(Value::Integer(BinaryReader::compact_i64_le(raw)?)),
             ),
             (b'W', 2) => (
-                Some("push.i16"),
+                Operation::Storage(StorageOperation::Push),
+                Some(Qualifier::Integer),
                 Some(Value::Integer(i64::from(BinaryReader::i16_le(raw)))),
             ),
             (b'I', 4) => (
-                Some("push.i32"),
+                Operation::Storage(StorageOperation::Push),
+                Some(Qualifier::Integer),
                 Some(Value::Integer(i64::from(BinaryReader::i32_le(raw)))),
             ),
             (b'L', 8) => (
-                Some("push.i64"),
+                Operation::Storage(StorageOperation::Push),
+                Some(Qualifier::Integer),
                 Some(Value::Integer(BinaryReader::i64_le(raw))),
             ),
             (b'F', 8) => (
-                Some("push.f64"),
+                Operation::Storage(StorageOperation::Push),
+                Some(Qualifier::Float64),
                 Some(Value::Float64Bits(BinaryReader::u64_le(raw))),
             ),
             (b'M', _) => (
-                Some("push.string"),
+                Operation::Storage(StorageOperation::Push),
+                Some(Qualifier::Text),
                 Some(Value::Text(string(raw, address)?)),
             ),
             (b'H' | b'V' | b'v', 3) => {
-                let mnemonic = match code {
-                    b'H' => "load.variable",
-                    b'V' => "index.begin",
-                    _ => "reference.variable",
+                let operation = match code {
+                    b'H' => Operation::Storage(StorageOperation::Load),
+                    b'V' => Operation::Storage(StorageOperation::IndexBegin),
+                    _ => Operation::Storage(StorageOperation::Reference),
                 };
                 (
-                    Some(mnemonic),
-                    Some(Value::Fields(vec![
-                        Operand {
-                            name: "sigil".into(),
+                    operation,
+                    Some(Qualifier::Variable),
+                    Some(Value::Group(vec![
+                        Arg {
+                            name: ArgName::Sigil,
+                            native_name: None,
                             span: Span {
                                 offset: address,
                                 size: 1,
@@ -79,8 +90,9 @@ pub fn decode(data: &[u8], offset: u64) -> Result<Vec<Token>> {
                             value: Value::Text(char::from(raw[0]).to_string()),
                             attributes: Vec::new(),
                         },
-                        Operand {
-                            name: "id".into(),
+                        Arg {
+                            name: ArgName::VariableId,
+                            native_name: None,
                             span: Span {
                                 offset: address + 1,
                                 size: 2,
@@ -91,51 +103,54 @@ pub fn decode(data: &[u8], offset: u64) -> Result<Vec<Token>> {
                     ])),
                 )
             }
-            (b')', 1) => (Some("index.end"), Some(Value::Unsigned(u64::from(raw[0])))),
-            (_, 0) if operator(code).is_some() => (operator(code), None),
-            _ => (None, Some(Value::Bytes(raw.to_vec()))),
+            (b')', 1) => (
+                Operation::Storage(StorageOperation::IndexEnd),
+                None,
+                Some(Value::Unsigned(u64::from(raw[0]))),
+            ),
+            (_, 0) if super::opcode::expression(code).is_some() => {
+                let (operation, variant) =
+                    super::opcode::expression(code).unwrap_or((Operation::Unknown, None));
+                (operation, variant, None)
+            }
+            _ => (Operation::Unknown, None, Some(Value::Bytes(raw.to_vec()))),
         };
         tokens.push(Token {
             opcode: Opcode {
                 namespace: "yuris.expression".into(),
                 code: u32::from(code),
-                mnemonic: mnemonic.map(str::to_owned),
+                operation,
+                variant,
+                native_mnemonic: None,
             },
             span: Span {
                 offset: offset + start as u64,
                 size: (3 + length) as u64,
             },
-            value,
+            args: match value {
+                Some(Value::Group(fields)) => fields,
+                Some(value) => vec![Arg {
+                    name: if operation == Operation::Unknown {
+                        ArgName::Unknown(0)
+                    } else if code == b')' {
+                        ArgName::Index
+                    } else {
+                        ArgName::Value
+                    },
+                    native_name: None,
+                    span: Span {
+                        offset: address,
+                        size: length as u64,
+                    },
+                    value,
+                    attributes: Vec::new(),
+                }],
+                None => Vec::new(),
+            },
             raw: raw.to_vec(),
         });
     }
     Ok(tokens)
-}
-
-fn operator(code: u8) -> Option<&'static str> {
-    Some(match code {
-        b'+' => "add",
-        b'-' => "subtract",
-        b'*' => "multiply",
-        b'/' => "divide",
-        b'%' => "remainder",
-        b'R' => "negate",
-        b'=' => "equal",
-        b'!' => "not.equal",
-        b'<' => "less",
-        b'>' => "greater",
-        b'S' => "less.or.equal",
-        b'Z' => "greater.or.equal",
-        b'&' => "logical.and",
-        b'|' => "logical.or",
-        b'A' => "bitwise.and",
-        b'O' => "bitwise.or",
-        b'^' => "bitwise.xor",
-        b's' => "to.string",
-        b'i' => "to.number",
-        b',' => "index.separator",
-        _ => return None,
-    })
 }
 
 /// Decode the quoted byte string exactly as the VM's 0x426930 handler does.
@@ -185,7 +200,7 @@ fn string(raw: &[u8], offset: u64) -> Result<String> {
     })
 }
 
-pub fn text(bytes: &[u8], offset: u64) -> Result<String> {
+pub(super) fn text(bytes: &[u8], offset: u64) -> Result<String> {
     encoding_rs::SHIFT_JIS
         .decode_without_bom_handling_and_without_replacement(bytes)
         .map(|s| s.into_owned())
@@ -213,7 +228,9 @@ mod tests {
         let raw = b"\"a\\nb\\tc\\\\d\x83\x5c\"";
         let bytes = token(b'M', raw);
         let tokens = decode(&bytes, 0x100).unwrap();
-        assert!(matches!(&tokens[0].value, Some(Value::Text(s)) if s == "a\nb\tc\\dソ"));
+        assert!(
+            matches!(&tokens[0].args.first().map(|arg| &arg.value), Some(Value::Text(s)) if s == "a\nb\tc\\dソ")
+        );
         assert_eq!(tokens[0].raw, raw);
         assert_eq!(tokens[0].span.offset, 0x100);
         assert_eq!(string(b"'quote: \"'", 0).unwrap(), "quote: \"");
@@ -235,42 +252,45 @@ mod tests {
         let mut raw = vec![b'@', 0, 0];
         BinaryWriter::u16_le(0x1234, &mut raw[1..]);
         let tokens = decode(&token(b'H', &raw), 0x80).unwrap();
-        assert!(matches!(&tokens[0].value, Some(Value::Fields(fields))
-            if matches!(fields[1].value, Value::Unsigned(0x1234)) && fields[1].span.offset == 0x84));
+        assert!(matches!(tokens[0].args[1].value, Value::Unsigned(0x1234)));
+        assert_eq!(tokens[0].args[1].span.offset, 0x84);
         for (code, name) in [
-            (b'!', "not.equal"),
-            (b'&', "logical.and"),
-            (b'|', "logical.or"),
-            (b'A', "bitwise.and"),
-            (b'O', "bitwise.or"),
+            (b'!', "not_equal"),
+            (b'&', "logical_and"),
+            (b'|', "logical_or"),
+            (b'A', "bit_and"),
+            (b'O', "bit_or"),
             (b'R', "negate"),
-            (b'S', "less.or.equal"),
-            (b'Z', "greater.or.equal"),
+            (b'S', "less_equal"),
+            (b'Z', "greater_equal"),
         ] {
             assert_eq!(
                 decode(&token(code, &[]), 0).unwrap()[0]
                     .opcode
-                    .mnemonic
-                    .as_deref(),
-                Some(name)
+                    .operation
+                    .name(),
+                name
             );
         }
         assert!(decode(&token(b'H', &[1, 2]), 0).is_err());
         assert!(decode(&token(b'+', &[1]), 0).is_err());
         let unknown = decode(&token(0xfe, &[1, 2]), 0).unwrap();
-        assert!(unknown[0].opcode.mnemonic.is_none());
+        assert_eq!(unknown[0].opcode.operation, Operation::Unknown);
         assert_eq!(unknown[0].raw, [1, 2]);
     }
 
     #[test]
     fn keeps_signed_constants_and_exact_float_bits() {
         let signed = decode(&token(b'B', &[0xff]), 0).unwrap();
-        assert!(matches!(signed[0].value, Some(Value::Integer(-1))));
+        assert!(matches!(
+            signed[0].args.first().map(|arg| &arg.value),
+            Some(Value::Integer(-1))
+        ));
         let bits = 0x7ff8_0000_0000_0042;
         let mut raw = [0; 8];
         BinaryWriter::u64_le(bits, &mut raw);
         assert!(
-            matches!(decode(&token(b'F', &raw), 0).unwrap()[0].value, Some(Value::Float64Bits(v)) if v == bits)
+            matches!(decode(&token(b'F', &raw), 0).unwrap()[0].args.first().map(|arg| &arg.value), Some(Value::Float64Bits(v)) if *v == bits)
         );
     }
 }
