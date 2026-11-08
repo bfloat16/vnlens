@@ -17,6 +17,14 @@ impl Default for Slide {
     }
 }
 impl Slide {
+    /// Creates a decoder with the format's initial dictionary and cursor zero.
+    #[must_use]
+    pub fn with_dictionary(dictionary: [u8; 4096]) -> Self {
+        Self {
+            dictionary,
+            position: 0,
+        }
+    }
     /// Decodes exactly the plane size supplied by its image dimensions.
     /// Truncation, excess output and trailing tokens are errors.
     pub fn decode(&mut self, bytes: &[u8], size: usize) -> io::Result<Vec<u8>> {
