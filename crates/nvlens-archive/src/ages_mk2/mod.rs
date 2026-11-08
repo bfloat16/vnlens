@@ -6,5 +6,3 @@
 //! algorithms from [`nvlens_crypto`].
 
 mod fpd;
-
-pub use fpd::FpdArc;

@@ -8,7 +8,7 @@ use std::sync::Arc;
 const SIGNATURES: &[u32] = &[0x0046_5059];
 
 #[derive(Debug, Default)]
-pub struct YpfArchiveFormat;
+struct YpfArchiveFormat;
 
 impl Format for YpfArchiveFormat {
     fn tag(&self) -> &'static str {

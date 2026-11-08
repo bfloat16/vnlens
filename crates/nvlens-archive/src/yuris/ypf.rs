@@ -25,7 +25,7 @@ const LENGTH_SWAPS: &[(u8, u8)] = &[
     (46, 50),
 ];
 
-pub struct YpfArchive {
+pub(super) struct YpfArchive {
     view: Arc<ArcView>,
     entries: Vec<Entry>,
     checksums: Vec<u32>,
@@ -42,7 +42,7 @@ impl std::fmt::Debug for YpfArchive {
 }
 
 impl YpfArchive {
-    pub fn open(view: Arc<ArcView>, script_key: [u8; 4], name_key: u8) -> Result<Self> {
+    pub(super) fn open(view: Arc<ArcView>, script_key: [u8; 4], name_key: u8) -> Result<Self> {
         let header = view.slice(0, 32)?;
         let version = BinaryReader::u32_le(&header[4..]);
         if version != 0x1ee {

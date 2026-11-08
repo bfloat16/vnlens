@@ -21,7 +21,7 @@ const SIGNATURES: &[u32] = &[0x0042_5350, 0x0066_646D];
 
 /// Standalone PSB resource-chunk archive view.
 #[derive(Debug, Default)]
-pub struct EmotePsbResources;
+struct EmotePsbResources;
 
 impl Format for EmotePsbResources {
     fn tag(&self) -> &'static str {
@@ -163,7 +163,7 @@ mod tests {
 
     use nvlens_core::Catalog;
     use nvlens_io::BinaryWriter;
-    use nvlens_script::psb::{PsbHeader, PsbResource, PsbValue};
+    use nvlens_script::psb::{PsbResource, PsbValue};
 
     use super::*;
 
@@ -171,22 +171,6 @@ mod tests {
     fn builds_raw_resource_entries() {
         let psb = Psb {
             data_len: 3,
-            header: PsbHeader {
-                version: 3,
-                header_encrypt: 0,
-                header_length: 44,
-                offset_names: 44,
-                offset_strings: 0,
-                offset_strings_data: 0,
-                offset_chunk_offsets: 0,
-                offset_chunk_lengths: 0,
-                offset_chunk_data: 0,
-                offset_entries: 0,
-                checksum: None,
-                offset_extra_chunk_offsets: None,
-                offset_extra_chunk_lengths: None,
-                offset_extra_chunk_data: None,
-            },
             names: Vec::new(),
             strings: Vec::new(),
             resources: vec![PsbResource {

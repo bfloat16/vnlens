@@ -9,7 +9,7 @@
 //! ```
 //! Entry transforms:
 //! - scripts (`.ws2` / `.json`) are byte-wise rotated right by 2 bits, unless
-//!   the archive name contains "Model";
+//!   the archive name contains "Model"; the final eight WS2 bytes stay plaintext;
 //! - `.psp` entries are length-prefixed LZSS;
 //! - everything else is raw bytes.
 
@@ -27,7 +27,7 @@ const INDEX_START: u64 = 8;
 
 /// The `ARC/WillV2` archive format.
 #[derive(Debug, Default)]
-pub struct WillV2Arc;
+struct WillV2Arc;
 
 impl Format for WillV2Arc {
     fn tag(&self) -> &'static str {
@@ -138,7 +138,17 @@ impl Archive for WillV2Archive {
         // (matching engine behavior).
         let is_model = self.view.file_name().contains("Model");
         if is_script(&entry.name) && !is_model {
-            let data = raw.iter().map(|b| b.rotate_right(2)).collect();
+            let mut data = raw.to_vec();
+            let end = if has_ext(&entry.name, "ws2") {
+                data.len()
+                    .checked_sub(8)
+                    .ok_or_else(|| nvlens_io::BinaryIo::unexpected_eof("WS2 footer is missing"))?
+            } else {
+                data.len()
+            };
+            for byte in &mut data[..end] {
+                *byte = byte.rotate_right(2);
+            }
             return Ok(Cow::Owned(data));
         }
         if has_ext(&entry.name, "psp") {
@@ -229,8 +239,12 @@ mod tests {
         )));
         fs::create_dir_all(&dir.0).unwrap();
 
-        let ws2_plain = b"script";
-        let ws2_stored: Vec<u8> = ws2_plain.iter().map(|b| b.rotate_left(2)).collect();
+        let ws2_plain = b"script\x01\x02\x04\x08\x10\x20\x40\x80";
+        let ws2_stored: Vec<u8> = ws2_plain
+            .iter()
+            .enumerate()
+            .map(|(i, b)| if i < 6 { b.rotate_left(2) } else { *b })
+            .collect();
         let psp_valid = [3, 0, 0, 0, 0b0000_0111, b'A', b'B', b'C'];
         let bytes = build_arc(&[
             ("scene.ws2", &ws2_stored),

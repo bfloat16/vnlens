@@ -19,7 +19,7 @@ const DEFAULT_MDF_KEY_LEN: usize = 0x83;
 
 /// Emote archive-info PSB format.
 #[derive(Debug, Default)]
-pub struct EmoteArchiveInfo;
+struct EmoteArchiveInfo;
 
 impl Format for EmoteArchiveInfo {
     fn tag(&self) -> &'static str {
@@ -171,7 +171,7 @@ fn decode_entry_mdf(
     key_len: usize,
 ) -> Result<Vec<u8>> {
     if let Some(base_key) = mdf_base_key {
-        for file_name in psb::archive_info_possible_file_names(entry_name, suffix, false) {
+        for file_name in psb::archive_info_possible_file_names(entry_name, suffix) {
             let key = format!("{base_key}{file_name}");
             match mdf::decode(
                 raw,

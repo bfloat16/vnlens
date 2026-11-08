@@ -16,8 +16,7 @@
 //! [`nvlens_bin`]; the scramble key is supplied by engine identification.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use nvlens_audio::fcd;
 use nvlens_bin::keys;
@@ -37,7 +36,7 @@ const ENTRY_SIZE: usize = 0x20;
 
 /// The FPD archive format.
 #[derive(Debug, Default)]
-pub struct FpdArc;
+struct FpdArc;
 
 impl Format for FpdArc {
     fn tag(&self) -> &'static str {
@@ -92,7 +91,14 @@ impl ArchiveFormat for FpdArc {
         }
         let enc = view.slice(HEADER_SIZE, payload_len)?;
 
-        let keystream = get_keystream(key.bytes())?;
+        let base = nvlens_bin::load(keys::ages_mk2::SCRAMBLE_BASE)?;
+        let keystream =
+            Arc::new(
+                Keystream::new(&base, key.bytes()).map_err(|e| Error::Corrupt {
+                    offset: 0,
+                    reason: e.to_string(),
+                })?,
+            );
         let mut index = enc.to_vec();
         keystream.descramble(&mut index, 0);
         let entries = parse_index(version, entry_count, index_size, view.len(), &index)
@@ -106,31 +112,6 @@ impl ArchiveFormat for FpdArc {
             entries,
         }))
     }
-}
-
-/// Cache of built keystreams, keyed by the scramble-key bytes. Building a
-/// keystream costs 0x1000 MD5 rounds, so it is shared across archives.
-fn keystream_cache() -> &'static Mutex<HashMap<Vec<u8>, Arc<Keystream>>> {
-    static CACHE: OnceLock<Mutex<HashMap<Vec<u8>, Arc<Keystream>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn get_keystream(key: &[u8]) -> Result<Arc<Keystream>> {
-    if let Ok(guard) = keystream_cache().lock()
-        && let Some(ks) = guard.get(key)
-    {
-        return Ok(Arc::clone(ks));
-    }
-    let base = nvlens_bin::load(keys::ages_mk2::SCRAMBLE_BASE)?;
-    let keystream = Keystream::new(&base, key).map_err(|e| Error::Corrupt {
-        offset: 0,
-        reason: e.to_string(),
-    })?;
-    let keystream = Arc::new(keystream);
-    if let Ok(mut guard) = keystream_cache().lock() {
-        guard.insert(key.to_vec(), Arc::clone(&keystream));
-    }
-    Ok(keystream)
 }
 
 /// Parse the descrambled index into entries; `None` if it does not look valid
@@ -306,7 +287,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("fixture.fpd");
-        let stream = get_keystream(b"11f32b0d98cfe8395fe4deeb75fff578").unwrap();
+        let base = nvlens_bin::load(keys::ages_mk2::SCRAMBLE_BASE).unwrap();
+        let stream = Keystream::new(&base, b"11f32b0d98cfe8395fe4deeb75fff578").unwrap();
         let names = b"good.bin\0bad.bin\0";
         let index_size = HEADER_SIZE as usize + ENTRY_SIZE * 2 + names.len();
         let mut bytes = vec![0; index_size];

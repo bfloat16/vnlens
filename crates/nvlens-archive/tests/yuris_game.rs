@@ -5,7 +5,8 @@
 
 use nvlens_core::{Archive, Catalog, ResourceResolver, Result};
 use nvlens_io::BinaryReader;
-use nvlens_script::ir::{Instruction, Operand, Script, Token, Value};
+use nvlens_script::ir::StorageOperation;
+use nvlens_script::ir::{Arg, ArgName, Instruction, Operation, Script, Token, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -49,7 +50,7 @@ fn validates_game_indices_and_every_script() -> std::result::Result<(), Box<dyn 
             let mut scripts = BTreeMap::new();
             let mut references = Vec::new();
             let mut tables = BTreeMap::new();
-            let mut operands = 0;
+            let mut args = 0;
             let mut tokens = 0;
             let mut variable_references = Vec::new();
             let mut variable_limit = None;
@@ -76,16 +77,15 @@ fn validates_game_indices_and_every_script() -> std::result::Result<(), Box<dyn 
                     decoded.extend_from_slice(&bytes);
                     let (params, expression_tokens) =
                         check_bytecode(&ir, &bytes, &commands, &mut dialogue);
-                    operands += params;
+                    args += params;
                     tokens += expression_tokens;
                     for instruction in &ir.instructions {
-                        for operand in &instruction.operands {
+                        for operand in &instruction.args {
                             if let Value::Expression(tokens) = &operand.value {
                                 for token in tokens {
-                                    if matches!(token.opcode.code, 72 | 86 | 118)
-                                        && let Some(Value::Fields(fields)) = &token.value
-                                    {
-                                        variable_references.push(unsigned(fields, "id")?);
+                                    if matches!(token.opcode.code, 72 | 86 | 118) {
+                                        variable_references
+                                            .push(unsigned(&token.args, ArgName::VariableId)?);
                                     }
                                 }
                             }
@@ -96,24 +96,25 @@ fn validates_game_indices_and_every_script() -> std::result::Result<(), Box<dyn 
                     tables.insert(magic, ir.instructions.len());
                     if bytes.starts_with(b"YSTD") {
                         variable_limit = Some(unsigned(
-                            &ir.instructions[0].operands,
-                            "maximum_variable_id",
+                            &ir.instructions[0].args,
+                            ArgName::MaximumVariableId,
                         )?);
                     }
                     if bytes.starts_with(b"YSVR") {
                         for variable in ir.instructions.iter().skip(1) {
-                            variable_references.push(unsigned(&variable.operands, "variable_id")?);
+                            variable_references
+                                .push(unsigned(&variable.args, ArgName::VariableId)?);
                         }
                     }
                 }
                 for instruction in &ir.instructions {
                     assert!(
-                        instruction.opcode.mnemonic.is_some(),
+                        instruction.opcode.operation != Operation::Unknown,
                         "{}: unknown opcode",
                         entry.name
                     );
-                    assert_ne!(instruction.opcode.mnemonic.as_deref(), Some("DATA"));
-                    for field in &instruction.operands {
+                    assert_eq!(ir.ir_version, nvlens_script::ir::VERSION);
+                    for field in &instruction.args {
                         if let Value::ResourceInstructionTarget {
                             resource,
                             instruction,
@@ -124,11 +125,15 @@ fn validates_game_indices_and_every_script() -> std::result::Result<(), Box<dyn 
                         }
                     }
                     if bytes.starts_with(b"YSLB")
-                        && instruction.opcode.mnemonic.as_deref() == Some("LABEL")
+                        && instruction
+                            .opcode
+                            .variant
+                            .map(nvlens_script::ir::Qualifier::name)
+                            == Some("label")
                     {
-                        let script = unsigned(&instruction.operands, "script_id")?;
+                        let script = unsigned(&instruction.args, ArgName::ScriptId)?;
                         let target = instruction
-                            .operands
+                            .args
                             .iter()
                             .find_map(|field| match field.value {
                                 Value::InstructionTarget(target) => Some(target),
@@ -160,7 +165,7 @@ fn validates_game_indices_and_every_script() -> std::result::Result<(), Box<dyn 
             if hex(&digest) == "946436d78465939589bc36d5dd77b0f3" {
                 assert_eq!(scripts.len(), 220);
                 assert_eq!(scripts.values().sum::<usize>(), 151_212);
-                assert_eq!(operands, 538_467);
+                assert_eq!(args, 538_467);
                 assert_eq!(tokens, 670_399);
                 assert_eq!(
                     hex(&nvlens_crypto::hash::md5::digest(&decoded)),
@@ -183,7 +188,7 @@ fn validates_game_indices_and_every_script() -> std::result::Result<(), Box<dyn 
                 }
             }
             println!(
-                "Disassembled {} files, {instructions} IR records; {operands} operands, {tokens} expression tokens, {} verified cross-script references",
+                "Disassembled {} files, {instructions} IR records; {args} args, {tokens} expression tokens, {} verified cross-script references",
                 entries.len(),
                 references.len()
             );
@@ -196,7 +201,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn unsigned(fields: &[Operand], name: &str) -> std::result::Result<u64, &'static str> {
+fn unsigned(fields: &[Arg], name: ArgName) -> std::result::Result<u64, &'static str> {
     fields
         .iter()
         .find_map(|field| match field.value {
@@ -237,26 +242,32 @@ fn check_bytecode(
         assert_eq!(instruction.id, id as u64);
         assert_eq!(instruction.span.offset, (32 + id * 4) as u64);
         assert_eq!(instruction.opcode.code, u32::from(bytes[32 + id * 4]));
-        if instruction.opcode.code != 54 {
-            assert_eq!(
-                instruction.opcode.mnemonic.as_ref(),
-                commands.get(instruction.opcode.code as usize)
-            );
-        } else {
+        assert_eq!(
+            instruction.opcode.native_mnemonic.as_ref(),
+            commands.get(instruction.opcode.code as usize)
+        );
+        if instruction.opcode.code == 54 {
             let operation = [
                 "assign",
-                "add",
-                "subtract",
-                "multiply",
-                "divide",
-                "remainder",
-                "bitwise_and",
-                "bitwise_or",
-                "bitwise_xor",
+                "add_assign",
+                "subtract_assign",
+                "multiply_assign",
+                "divide_assign",
+                "remainder_assign",
+                "bit_and_assign",
+                "bit_or_assign",
+                "bit_xor_assign",
             ];
             assert_eq!(
-                instruction.opcode.mnemonic.as_deref(),
-                Some(format!("LET.{}", operation[usize::from(bytes[descriptor + 3])]).as_str())
+                instruction.opcode.operation,
+                Operation::Storage(StorageOperation::Store)
+            );
+            assert_eq!(
+                instruction
+                    .opcode
+                    .variant
+                    .map(nvlens_script::ir::Qualifier::name),
+                Some(operation[usize::from(bytes[descriptor + 3])])
             );
         }
         assert_eq!(
@@ -264,7 +275,7 @@ fn check_bytecode(
             Some(BinaryReader::u32_le(&bytes[lines + id * 4..]))
         );
         let original = instruction
-            .operands
+            .args
             .iter()
             .filter(|p| !p.attributes.is_empty())
             .collect::<Vec<_>>();
@@ -272,7 +283,7 @@ fn check_bytecode(
         for operand in original {
             assert_eq!(operand.span.offset, descriptor as u64);
             descriptor += 12;
-            if matches!(operand.value, Value::Fields(_)) {
+            if matches!(operand.value, Value::Group(_)) {
                 continue;
             }
             let at = operand.span.offset as usize;
@@ -306,9 +317,16 @@ fn check_bytecode(
                             token.raw,
                             bytes[token_offset + 3..token_offset + 3 + token.raw.len()]
                         );
-                        assert!(token.opcode.mnemonic.is_some(), "Unknown expression token");
+                        assert_ne!(
+                            token.opcode.operation,
+                            Operation::Unknown,
+                            "Unknown expression token"
+                        );
                         assert!(
-                            !matches!(token.value, Some(Value::Bytes(_))),
+                            !matches!(
+                                token.args.first().map(|arg| &arg.value),
+                                Some(Value::Bytes(_))
+                            ),
                             "Unparsed expression payload"
                         );
                         check_token_value(token);
@@ -366,45 +384,45 @@ fn check_token_value(token: &Token) {
         b'B' | b'W' | b'I' | b'L' => {
             let expected = BinaryReader::compact_i64_le(raw);
             assert!(
-                matches!(expected, Ok(value) if matches!(token.value, Some(Value::Integer(actual)) if actual == value))
+                matches!(expected, Ok(value) if matches!(token.args.first().map(|arg| &arg.value), Some(Value::Integer(actual)) if *actual == value))
             );
-            match token.opcode.code as u8 {
-                b'B' => "push.i8",
-                b'W' => "push.i16",
-                b'I' => "push.i32",
-                _ => "push.i64",
-            }
+            assert_eq!(
+                token.opcode.variant.map(nvlens_script::ir::Qualifier::name),
+                Some("integer")
+            );
+            "push"
         }
         b'F' => {
             assert!(
-                matches!(token.value, Some(Value::Float64Bits(bits)) if bits == BinaryReader::u64_le(raw))
+                matches!(token.args.first().map(|arg| &arg.value), Some(Value::Float64Bits(bits)) if *bits == BinaryReader::u64_le(raw))
             );
-            "push.f64"
+            "push"
         }
         b'H' | b'V' | b'v' => {
-            assert!(matches!(token.value, Some(Value::Fields(_))));
-            if let Some(Value::Fields(fields)) = &token.value {
+            assert_eq!(token.args.len(), 2);
+            {
+                let fields = &token.args;
                 assert!(
                     matches!(&fields[0].value, Value::Text(sigil) if sigil == &char::from(raw[0]).to_string())
                 );
                 assert_eq!(
-                    unsigned(fields, "id").ok(),
+                    unsigned(fields, ArgName::VariableId).ok(),
                     Some(u64::from(BinaryReader::u16_le(&raw[1..])))
                 );
             }
             match token.opcode.code as u8 {
-                b'H' => "load.variable",
-                b'V' => "index.begin",
-                _ => "reference.variable",
+                b'H' => "load",
+                b'V' => "index_begin",
+                _ => "reference",
             }
         }
         b')' => {
             assert!(
-                matches!(token.value, Some(Value::Unsigned(value)) if value == u64::from(raw[0]))
+                matches!(token.args.first().map(|arg| &arg.value), Some(Value::Unsigned(value)) if *value == u64::from(raw[0]))
             );
-            "index.end"
+            "index_end"
         }
-        b'M' => "push.string",
+        b'M' => "push",
         b'+' => "add",
         b'-' => "subtract",
         b'*' => "multiply",
@@ -412,27 +430,27 @@ fn check_token_value(token: &Token) {
         b'%' => "remainder",
         b'R' => "negate",
         b'=' => "equal",
-        b'!' => "not.equal",
+        b'!' => "not_equal",
         b'<' => "less",
         b'>' => "greater",
-        b'S' => "less.or.equal",
-        b'Z' => "greater.or.equal",
-        b'&' => "logical.and",
-        b'|' => "logical.or",
-        b'A' => "bitwise.and",
-        b'O' => "bitwise.or",
-        b'^' => "bitwise.xor",
-        b's' => "to.string",
-        b'i' => "to.number",
-        b',' => "index.separator",
+        b'S' => "less_equal",
+        b'Z' => "greater_equal",
+        b'&' => "logical_and",
+        b'|' => "logical_or",
+        b'A' => "bit_and",
+        b'O' => "bit_or",
+        b'^' => "bit_xor",
+        b's' => "convert",
+        b'i' => "convert",
+        b',' => "index_separator",
         _ => "unknown",
     };
-    assert_eq!(token.opcode.mnemonic.as_deref(), Some(name));
+    assert_eq!(token.opcode.operation.name(), name);
 }
 
 fn check_control_targets(instruction: &Instruction, bytes: &[u8], count: usize) {
-    for operand in &instruction.operands {
-        if let Value::Fields(fields) = &operand.value {
+    for operand in &instruction.args {
+        if let Value::Group(fields) = &operand.value {
             for field in fields {
                 if let Value::InstructionTarget(target) = field.value {
                     assert!(target <= count as u64);
