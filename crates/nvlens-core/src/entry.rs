@@ -42,10 +42,12 @@ impl ResourceKind {
     pub fn guess_from_name(name: &str) -> Self {
         let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         match ext.as_str() {
-            "png" | "pna" | "bmp" | "jpg" | "jpeg" | "tga" | "psb" | "psd" | "wip" => Self::Image,
-            "ogg" | "wav" | "mp3" | "flac" => Self::Audio,
-            "ws2" | "json" | "scr" | "txt" | "ini" => Self::Script,
-            "mpg" | "mp4" | "wmv" | "avi" => Self::Video,
+            "png" | "pna" | "bmp" | "jpg" | "jpeg" | "tga" | "psb" | "psd" | "wip" | "g00"
+            | "gyu" | "dlt" | "mos" => Self::Image,
+            "ogg" | "wav" | "mp3" | "flac" | "nwa" => Self::Audio,
+            "json" | "scr" | "txt" | "ini" | "ss" | "gan" | "tjs" | "ks" | "scn" | "rld"
+            | "rnf" | "ws2" | "lua" | "luac" => Self::Script,
+            "mpg" | "mp4" | "wmv" | "avi" | "omv" | "ogv" => Self::Video,
             _ => Self::Unknown,
         }
     }
