@@ -3,6 +3,23 @@ use nvlens_core::{Error, Result};
 use nvlens_io::BinaryWriter;
 use std::io::Cursor;
 
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+mod simd;
+
+/// Swaps red and blue channels in complete four-byte pixels; trailing bytes
+/// are untouched. Used for BGRA PNG export and GPU preview texture preparation.
+pub fn swap_red_blue(bytes: &mut [u8]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        simd::swap_red_blue(bytes);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    for pixel in bytes.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OffsetUnit {
     #[default]
@@ -70,9 +87,7 @@ impl Image {
                 }
                 let rgba = if matches!(self.pixels, PixelBuffer::Bgra8(_)) {
                     let mut bytes = bytes.clone();
-                    for pixel in bytes.as_chunks_mut::<4>().0 {
-                        pixel.swap(0, 2);
-                    }
+                    swap_red_blue(&mut bytes);
                     std::borrow::Cow::Owned(bytes)
                 } else {
                     std::borrow::Cow::Borrowed(bytes.as_slice())

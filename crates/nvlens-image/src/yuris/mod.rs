@@ -4,7 +4,7 @@ use crate::{Image, ImageFormat, ImageMeta, ImageRegistration};
 use nvlens_core::{Error, Format, Result};
 const SIGNATURES: &[u32] = &[0x0047_4359];
 #[derive(Debug, Default)]
-pub struct YcgImage;
+struct YcgImage;
 impl Format for YcgImage {
     fn tag(&self) -> &'static str {
         "ycg/yuris"

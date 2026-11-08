@@ -4,7 +4,7 @@ use crate::{Image, ImageMeta, PixelBuffer};
 use nvlens_core::{Error, Result};
 use nvlens_io::BinaryReader;
 
-pub fn metadata(data: &[u8]) -> Result<ImageMeta> {
+pub(super) fn metadata(data: &[u8]) -> Result<ImageMeta> {
     let mut r = BinaryReader::new(data);
     r.read_bytes(4)?;
     let width = r.read_u32_le()?;
@@ -25,7 +25,7 @@ pub fn metadata(data: &[u8]) -> Result<ImageMeta> {
     meta.rgba_size()?;
     Ok(meta)
 }
-pub fn decode(data: &[u8]) -> Result<Image> {
+pub(super) fn decode(data: &[u8]) -> Result<Image> {
     let meta = metadata(data)?;
     let expected = meta.rgba_size()?;
     let method = BinaryReader::u32_le(&data[16..]);

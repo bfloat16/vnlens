@@ -1,4 +1,5 @@
 //! Standard raster formats, including PNG files stored directly in YPF.
+mod animation;
 use crate::{Image, ImageFormat, ImageMeta, ImageRegistration, OffsetUnit, PixelBuffer};
 use nvlens_core::{Error, Format, Result};
 use nvlens_io::BinaryReader;
@@ -6,7 +7,7 @@ use std::io::Cursor;
 
 const SIGNATURES: &[u32] = &[0x474e_5089, 0xe0ff_d8ff, 0x3846_4947, 0];
 #[derive(Debug, Default)]
-struct Raster;
+pub(crate) struct Raster;
 impl Format for Raster {
     fn tag(&self) -> &'static str {
         "image/standard"
@@ -69,6 +70,23 @@ impl ImageFormat for Raster {
         };
         Ok(Image { meta, pixels })
     }
+    fn frame_count(&self, data: &[u8]) -> Result<usize> {
+        animation::count(data)
+    }
+    fn decode_frame(&self, data: &[u8], frame: usize) -> Result<Image> {
+        if let Some(pixels) = animation::decode(data, frame)? {
+            let mut meta = self.metadata(data)?.ok_or(Error::InvalidFormat)?;
+            meta.bpp = 32;
+            return Ok(Image {
+                meta,
+                pixels: PixelBuffer::Rgba8(pixels),
+            });
+        }
+        if frame != 0 {
+            return Err(Error::Unsupported("Image frame is out of range".into()));
+        }
+        self.decode(data)
+    }
 }
 fn png_offset(data: &[u8]) -> Result<(i32, i32, OffsetUnit)> {
     let mut r = BinaryReader::new_at(data, 8)?;
@@ -111,6 +129,26 @@ nvlens_core::inventory::submit! {ImageRegistration(||Box::new(Raster))}
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gif_frame_count_and_selected_frame_export() -> Result<()> {
+        let mut data = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut data);
+            for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+                let buffer = image::RgbaImage::from_pixel(2, 1, image::Rgba(color));
+                encoder
+                    .encode_frame(image::Frame::new(buffer))
+                    .map_err(error)?;
+            }
+        }
+        assert_eq!(Raster.frame_count(&data)?, 2);
+        let second = Raster.decode_frame(&data, 1)?;
+        assert!(matches!(second.pixels,PixelBuffer::Rgba8(ref p) if p==&[0,255,0,255,0,255,0,255]));
+        assert!(Raster.decode_frame(&data, 2).is_err());
+        assert!(Raster.frame_count(&data[..data.len() - 1]).is_err());
+        Ok(())
+    }
 
     #[test]
     fn decodes_png_with_offsets_and_rejects_invalid_offset_unit() {
