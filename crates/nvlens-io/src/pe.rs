@@ -10,6 +10,7 @@ use std::io;
 pub struct Section {
     pub name: [u8; 8],
     pub virtual_address: u32,
+    pub virtual_size: u32,
     pub raw_offset: u32,
     pub raw_size: u32,
     pub executable: bool,
@@ -23,6 +24,7 @@ pub struct PeImage<'a> {
     pub sections: Vec<Section>,
     header_size: u32,
     pe32_plus: bool,
+    exports: Option<(u32, u32)>,
     resources: Option<(u32, u32)>,
     tls: Option<(u32, u32)>,
     replacements: BTreeMap<u32, Vec<u8>>,
@@ -76,7 +78,7 @@ impl<'a> PeImage<'a> {
         fields.set_position(60)?;
         let header_size = fields.read_u32_le()?;
         let directory_count_offset = if kind == 0x10b { 92 } else { 108 };
-        let (resources, tls) = if optional.len() >= directory_count_offset + 4 {
+        let (exports, resources, tls) = if optional.len() >= directory_count_offset + 4 {
             fields.set_position(directory_count_offset)?;
             let count = fields.read_u32_le()?;
             let mut directory = |index: u32| -> io::Result<Option<(u32, u32)>> {
@@ -88,9 +90,9 @@ impl<'a> PeImage<'a> {
                 let size = fields.read_u32_le()?;
                 Ok((rva != 0 && size != 0).then_some((rva, size)))
             };
-            (directory(2)?, directory(9)?)
+            (directory(0)?, directory(2)?, directory(9)?)
         } else {
-            (None, None)
+            (None, None, None)
         };
         let table_size = count
             .checked_mul(40)
@@ -100,7 +102,7 @@ impl<'a> PeImage<'a> {
         for _ in 0..count {
             let mut name = [0; 8];
             name.copy_from_slice(table.read_bytes(8)?);
-            table.read_u32_le()?;
+            let virtual_size = table.read_u32_le()?;
             let virtual_address = table.read_u32_le()?;
             let raw_size = table.read_u32_le()?;
             let raw_offset = table.read_u32_le()?;
@@ -115,6 +117,7 @@ impl<'a> PeImage<'a> {
             sections.push(Section {
                 name,
                 virtual_address,
+                virtual_size,
                 raw_offset,
                 raw_size,
                 executable: flags & 0x2000_0000 != 0,
@@ -128,6 +131,7 @@ impl<'a> PeImage<'a> {
             sections,
             header_size,
             pe32_plus: kind == 0x20b,
+            exports,
             resources,
             tls,
             replacements: BTreeMap::new(),
@@ -166,6 +170,84 @@ impl<'a> PeImage<'a> {
     #[must_use]
     pub fn at_rva(&self, rva: u32) -> Option<&[u8]> {
         self.at_va(self.image_base.checked_add(u64::from(rva))?)
+    }
+
+    /// Reads an initial PE word, including the zero-filled tail of a section.
+    /// File-backed bytes use the current section replacements when present.
+    pub fn u32_at_va(&self, address: u64) -> io::Result<u32> {
+        let mut word = [0; 4];
+        for (i, byte) in word.iter_mut().enumerate() {
+            let address = address
+                .checked_add(i as u64)
+                .ok_or_else(|| BinaryIo::unexpected_eof("PE word address overflow"))?;
+            if let Some(value) = self.at_va(address).and_then(|b| b.first()) {
+                *byte = *value;
+            } else if !self.sections.iter().any(|section| {
+                address
+                    .checked_sub(self.image_base)
+                    .and_then(|rva| rva.checked_sub(u64::from(section.virtual_address)))
+                    .is_some_and(|offset| {
+                        offset >= u64::from(section.raw_size)
+                            && offset < u64::from(section.virtual_size)
+                    })
+            }) {
+                return Err(BinaryIo::unexpected_eof("PE word exceeds mapped sections"));
+            }
+        }
+        Ok(BinaryReader::u32_le(&word))
+    }
+
+    /// Resolves a named local export to its VA. Forwarded exports have no
+    /// implementation in this image and return None; malformed tables fail.
+    pub fn export(&self, name: &[u8]) -> io::Result<Option<u64>> {
+        let Some((rva, size)) = self.exports else {
+            return Ok(None);
+        };
+        let mapped = |rva| {
+            self.at_rva(rva)
+                .ok_or_else(|| BinaryIo::unexpected_eof("PE export table exceeds section"))
+        };
+        let mut directory = BinaryReader::new(mapped(rva)?);
+        directory.read_bytes(20)?;
+        let functions = directory.read_u32_le()?;
+        let names = directory.read_u32_le()?;
+        let addresses_rva = directory.read_u32_le()?;
+        let names_rva = directory.read_u32_le()?;
+        let ordinals_rva = directory.read_u32_le()?;
+        if names == 0 {
+            return Ok(None);
+        }
+        let mut addresses = BinaryReader::new(mapped(addresses_rva)?);
+        let mut strings = BinaryReader::new(mapped(names_rva)?);
+        let mut ordinals = BinaryReader::new(mapped(ordinals_rva)?);
+        for _ in 0..names {
+            let string = mapped(strings.read_u32_le()?)?;
+            let end = string
+                .iter()
+                .position(|&b| b == 0)
+                .ok_or_else(|| BinaryIo::unexpected_eof("Unterminated PE export name"))?;
+            let ordinal = ordinals.read_u16_le()?;
+            if u32::from(ordinal) >= functions {
+                return Err(BinaryIo::invalid_input(
+                    "PE export ordinal exceeds address table",
+                ));
+            }
+            if &string[..end] != name {
+                continue;
+            }
+            addresses.set_position(usize::from(ordinal) * 4)?;
+            let target = addresses.read_u32_le()?;
+            if target == 0 || target.checked_sub(rva).is_some_and(|offset| offset < size) {
+                return Ok(None);
+            }
+            mapped(target)?;
+            return self
+                .image_base
+                .checked_add(u64::from(target))
+                .map(Some)
+                .ok_or_else(|| BinaryIo::invalid_input("PE export address overflow"));
+        }
+        Ok(None)
     }
 
     /// Reads the first TLS callback VA, including PE32+ pointer widths. The
@@ -378,6 +460,64 @@ mod tests {
                 io::ErrorKind::UnexpectedEof
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn exports_check_ordinals_forwarders_and_table_bounds() -> io::Result<()> {
+        for base in [0x400000, 0x610000] {
+            let mut bytes = fixture(base);
+            for (at, value) in [
+                (0xf8, 0x1100),
+                (0xfc, 0x80),
+                (0x314, 1),
+                (0x318, 1),
+                (0x31c, 0x1140),
+                (0x320, 0x1144),
+                (0x324, 0x1148),
+                (0x340, 0x1200),
+                (0x344, 0x1150),
+            ] {
+                BinaryWriter::u32_le(value, &mut bytes[at..]);
+            }
+            bytes[0x350..0x357].copy_from_slice(b"V2Link\0");
+            let image = PeImage::parse(&bytes)?.unwrap();
+            assert_eq!(image.export(b"V2Link")?, Some(u64::from(base) + 0x1200));
+            assert_eq!(image.export(b"absent")?, None);
+            BinaryWriter::u32_le(0x1160, &mut bytes[0x340..]);
+            assert_eq!(PeImage::parse(&bytes)?.unwrap().export(b"V2Link")?, None);
+            BinaryWriter::u16_le(1, &mut bytes[0x348..]);
+            assert!(PeImage::parse(&bytes)?.unwrap().export(b"V2Link").is_err());
+            BinaryWriter::u16_le(0, &mut bytes[0x348..]);
+            BinaryWriter::u32_le(0x13ff, &mut bytes[0x320..]);
+            assert_eq!(
+                PeImage::parse(&bytes)?
+                    .unwrap()
+                    .export(b"V2Link")
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn initial_words_include_only_the_declared_zero_filled_tail() -> io::Result<()> {
+        let mut bytes = fixture(0x400000);
+        BinaryWriter::u32_le(0x800, &mut bytes[0x180..]);
+        bytes[0x5ff] = 0xab;
+        let image = PeImage::parse(&bytes)?.unwrap();
+        assert_eq!(image.u32_at_va(0x4013ff)?, 0xab);
+        assert_eq!(image.u32_at_va(0x401400)?, 0);
+        assert_eq!(
+            image.u32_at_va(0x4017fd).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            image.u32_at_va(u64::MAX).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
         Ok(())
     }
 }

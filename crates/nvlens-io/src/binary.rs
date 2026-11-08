@@ -65,6 +65,15 @@ pub struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
+    /// Returns the next byte index and bit offset, excluding buffered lookahead.
+    #[must_use]
+    pub fn position(&self) -> (usize, u8) {
+        (
+            self.byte - usize::from(self.available.div_ceil(8)),
+            (8 - self.available % 8) % 8,
+        )
+    }
+
     #[must_use]
     pub fn new(data: &'a [u8], order: BitOrder) -> Self {
         Self {
@@ -143,6 +152,18 @@ impl<'a> BitReader<'a> {
         } else {
             value.reverse_bits() >> (32 - count)
         })
+    }
+
+    /// Reads an LSB-significant field up to the width of a u64.
+    pub fn read_bits_le_u64(&mut self, count: u8) -> std::io::Result<u64> {
+        if count > 64 {
+            return Err(BinaryIo::invalid_input("Bit field exceeds u64"));
+        }
+        let low = u64::from(self.read_bits_le(count.min(32))?);
+        if count <= 32 {
+            return Ok(low);
+        }
+        Ok(low | (u64::from(self.read_bits_le(count - 32)?) << 32))
     }
 }
 
@@ -562,6 +583,24 @@ mod tests {
             BinaryReader::new(&[0x82, 0x02]).read_tagged_sleb64(2)?,
             (2, 64)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bit_positions_exclude_lookahead_and_wide_fields_preserve_order() -> std::io::Result<()> {
+        let mut bytes = [0; 9];
+        BinaryWriter::u64_le(0xfedc_ba98_7654_3210, &mut bytes);
+        bytes[8] = 0xab;
+        let mut bits = BitReader::new(&bytes, BitOrder::Lsb);
+        assert_eq!(bits.position(), (0, 0));
+        assert_eq!(bits.read_bits_le(4)?, 0);
+        assert!(bits.peek_byte().is_some());
+        assert_eq!(bits.position(), (0, 4));
+        assert_eq!(bits.read_bits_le_u64(64)?, 0xbfed_cba9_8765_4321);
+        assert_eq!(bits.position(), (8, 4));
+        assert_eq!(bits.read_bits_le(4)?, 0xa);
+        assert_eq!(bits.position(), (9, 0));
+        assert!(bits.read_bit().is_err());
         Ok(())
     }
 
