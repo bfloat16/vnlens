@@ -5,7 +5,6 @@
 mod archive;
 mod browser;
 mod icons;
-mod input;
 mod playback;
 mod preferences;
 mod resource;
@@ -26,7 +25,6 @@ fn main() {
     Application::new()
         .with_assets(icons::Assets)
         .run(move |cx: &mut App| {
-            input::bind_keys(cx);
             workspace::bind_keys(cx);
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {

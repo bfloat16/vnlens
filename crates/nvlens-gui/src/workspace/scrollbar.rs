@@ -70,7 +70,7 @@ impl Scrollbar {
                 if !visible && measure_grab.get().is_none() {
                     return None;
                 }
-                // This runs after the list's prepaint, so filtering, window
+                // This runs after the list's prepaint, so item loading, window
                 // resizing and scrolling use the same frame's geometry.
                 let thumb = Thumb::new(
                     bounds.size.along(axis),

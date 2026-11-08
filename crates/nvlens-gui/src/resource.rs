@@ -7,21 +7,29 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[derive(Debug)]
 pub struct Resource {
     pub bytes: Arc<[u8]>,
     pub script: Option<nvlens_script::ir::Script>,
-    pub image: Option<Vec<u8>>,
+    pub image: Option<nvlens_image::Image>,
     pub audio: bool,
 }
 
-struct Resources<'a>(&'a dyn Archive);
+struct Resources<'a>(&'a dyn Archive, &'a [String]);
 impl ResourceResolver for Resources<'_> {
     fn read_resource(&self, name: &str) -> nvlens_core::Result<Option<Vec<u8>>> {
         self.0
             .entries()
             .iter()
-            .find(|entry| entry.name.replace('\\', "/").eq_ignore_ascii_case(name))
-            .map(|entry| self.0.open_entry(entry).map(|data| data.into_owned()))
+            .enumerate()
+            .find(|(i, entry)| {
+                entry.name.replace('\\', "/").eq_ignore_ascii_case(name)
+                    || self
+                        .1
+                        .get(*i)
+                        .is_some_and(|path| path.replace('\\', "/").eq_ignore_ascii_case(name))
+            })
+            .map(|(_, entry)| self.0.open_entry(entry).map(|data| data.into_owned()))
             .transpose()
     }
 }
@@ -69,27 +77,50 @@ pub fn read(target: &Target, raw: bool, cancel: &AtomicBool) -> Result<Resource>
     if raw || cancel.load(Ordering::Relaxed) {
         return Ok(resource);
     }
+    // Video containers have no pixel/audio preview decoder yet. Preserve their
+    // encoded stream without passing Ogg Theora to the Vorbis audio reader.
+    if nvlens_core::ResourceKind::guess_from_name(&target.name())
+        == nvlens_core::ResourceKind::Video
+    {
+        return Ok(resource);
+    }
+    let script_tag = match target {
+        Target::Entry { archive, .. } => archive.game.script_format_for(&target.name()),
+        Target::File(_, game) => game.script_format_for(&target.name()),
+        _ => None,
+    };
     if let Target::Entry { archive, .. } = target
-        && let Some(tag) = archive.game.script_format()
+        && let Some(tag) = script_tag
     {
         let opened = archive
             .source
             .lock()
             .map_err(|_| anyhow!("Archive reader is unavailable"))?;
-        resource.script = nvlens_script::disassemble_as(
+        resource.script = nvlens_script::disassemble_with_options_as(
             tag,
             &resource.bytes,
-            Some(&Resources(&*opened.archive)),
+            Some(&Resources(&*opened.archive, &archive.paths)),
+            archive.game.resource_options(),
         )?;
     } else if let Target::File(path, game) = target
-        && let Some(tag) = game.script_format()
+        && let Some(tag) = script_tag
     {
-        resource.script =
-            nvlens_script::disassemble_as(tag, &resource.bytes, Some(&FileResources(path)))?;
+        resource.script = nvlens_script::disassemble_with_options_as(
+            tag,
+            &resource.bytes,
+            Some(&FileResources(path)),
+            game.resource_options(),
+        )?;
     }
     if resource.script.is_none() {
+        if let Some(tag) = script_tag
+            && let Some(text) = nvlens_script::decode_text_as(tag, &resource.bytes)?
+        {
+            resource.bytes = text.into_bytes().into();
+            return Ok(resource);
+        }
         if let Some(image) = nvlens_image::decode(&resource.bytes)? {
-            resource.image = Some(image.to_png()?);
+            resource.image = Some(image);
         } else {
             resource.audio = nvlens_audio::metadata(&resource.bytes)?.is_some();
         }
@@ -97,7 +128,7 @@ pub fn read(target: &Target, raw: bool, cancel: &AtomicBool) -> Result<Resource>
     Ok(resource)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ExportKind {
     Png,
     Wav,
@@ -117,9 +148,10 @@ pub fn convert(
     bytes: &[u8],
     kind: ExportKind,
     script: Option<&nvlens_script::ir::Script>,
+    frame: usize,
 ) -> Result<Vec<u8>> {
     match kind {
-        ExportKind::Png => Ok(nvlens_image::decode(bytes)?
+        ExportKind::Png => Ok(nvlens_image::decode_frame(bytes, frame)?
             .ok_or_else(|| anyhow!("No image decoder matched"))?
             .to_png()?),
         ExportKind::Wav => Ok(nvlens_audio::decode(bytes)?
@@ -173,8 +205,11 @@ mod tests {
                 .script
                 .as_ref()
                 .ok_or_else(|| anyhow!("Script not recognized"))?;
-            let exported = convert(&resource.bytes, ExportKind::Ir, Some(script))?;
-            assert!(std::str::from_utf8(&exported)?.contains("\"ir_version\": 2"));
+            let exported = convert(&resource.bytes, ExportKind::Ir, Some(script), 0)?;
+            assert!(
+                std::str::from_utf8(&exported)?
+                    .contains(&format!("\"ir_version\": {}", nvlens_script::ir::VERSION))
+            );
             assert_eq!(
                 script
                     .sections

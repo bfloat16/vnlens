@@ -14,6 +14,7 @@ impl Workspace {
         let progress = ease_in_out(progress);
         let position = if enabled { progress } else { 1. - progress };
         div()
+            .relative()
             .size_full()
             .bg(rgb(BACKGROUND))
             .text_color(rgb(0xf5f5f7))
@@ -56,6 +57,7 @@ impl Workspace {
                                 .size(px(22.)).rounded_full().bg(rgb(0xffffff)).shadow_sm()))
                 )
             )
+            .child(self.status_dock(px(0.), window, cx))
             .with_animation(
                 "settings-enter",
                 Animation::new(Duration::from_millis(160)).with_easing(ease_in_out),
@@ -65,12 +67,10 @@ impl Workspace {
 
     fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let scroll = self.preview_scroll.0.borrow().base_handle.clone();
-        let scrollable = !self.preview_loading
-            && self.preview_error.is_none()
-            && self
-                .preview
-                .as_ref()
-                .is_some_and(|preview| preview.image.is_none());
+        let scrollable = self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.image.is_none());
         div()
             .size_full()
             .overflow_hidden()
@@ -116,20 +116,18 @@ impl Workspace {
                         )
                     }),
             )
-            .map(|view| scroll::wheel(view, Some(scroll.clone()), Some(scroll)))
+            .map(|view| {
+                if scrollable {
+                    scroll::wheel(view, Some(scroll.clone()), Some(scroll)).into_any_element()
+                } else {
+                    view.into_any_element()
+                }
+            })
     }
 
     fn preview_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.preview_loading {
-            return message("Preparing preview…").into_any_element();
-        }
-        if let Some(error) = &self.preview_error {
-            return message(error.clone())
-                .text_color(rgb(0xff8a82))
-                .into_any_element();
-        }
         let Some(preview) = &self.preview else {
-            return message("No preview loaded").into_any_element();
+            return div().into_any_element();
         };
         if let Some(table) = &preview.ir_table {
             return self.script_table(table, cx).into_any_element();
@@ -137,18 +135,8 @@ impl Workspace {
         if let Some(audio) = &preview.audio {
             return self.audio_view(audio, cx).into_any_element();
         }
-        if let Some(image) = &preview.image {
-            return div()
-                .flex_1()
-                .min_h_0()
-                .p_3()
-                .child(
-                    img(image.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::Contain)
-                        .with_fallback(|| message("Image decoding failed").into_any_element()),
-                )
-                .into_any_element();
+        if preview.image.is_some() {
+            return self.image_preview(cx);
         }
         let text = preview.lines.is_some();
         let count = if text {
@@ -211,140 +199,6 @@ impl Workspace {
             )
             .into_any_element()
     }
-
-    fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        browser_view::glass()
-            .id("activity-panel")
-            .absolute()
-            .right(px(12.))
-            .top(px(58.))
-            .w(px(500.))
-            .rounded(px(14.))
-            .overflow_hidden()
-            .occlude()
-            .when(self.extracting, |view| {
-                view.child(
-                    div().h(px(3.)).bg(rgb(BORDER)).child(
-                        div()
-                            .h_full()
-                            .w(relative(if self.progress.total == 0 {
-                                0.
-                            } else {
-                                self.progress.completed as f32 / self.progress.total as f32
-                            }))
-                            .bg(rgb(ACCENT)),
-                    ),
-                )
-            })
-            .child(
-                div()
-                    .h(px(42.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().size(px(6.)).rounded_full().bg(rgb(
-                        if self.extracting || self.pending > 0 {
-                            ACCENT
-                        } else {
-                            0x30d158
-                        },
-                    )))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(rgb(SECONDARY))
-                            .child(if self.pending > 0 {
-                                "Opening…".into()
-                            } else if self.extracting {
-                                format!(
-                                    "Extracting {} / {} · {} failed",
-                                    self.progress.completed,
-                                    self.progress.total,
-                                    self.progress.failed
-                                )
-                            } else if self.converting {
-                                "Exporting…".into()
-                            } else {
-                                self.status.clone()
-                            }),
-                    )
-                    .when(self.extracting, |view| {
-                        view.child(button("cancel", "Cancel", false, true).on_click(
-                            cx.listener(|this, _, window, cx| this.cancel(&Cancel, window, cx)),
-                        ))
-                    })
-                    .when_some(self.output.as_ref(), |view, path| {
-                        let path = path.clone();
-                        view.child(
-                            button("output", "Show output", false, true)
-                                .on_click(move |_, _, cx| cx.open_with_system(&path)),
-                        )
-                    })
-                    .child(
-                        button(
-                            "errors",
-                            format!("Errors ({})", self.errors.len()),
-                            self.show_errors,
-                            !self.errors.is_empty(),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_errors = !this.show_errors;
-                            cx.notify();
-                        })),
-                    )
-                    .when(
-                        !self.extracting && !self.converting && self.pending == 0,
-                        |view| {
-                            view.child(button("close-activity", "×", false, true).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.show_activity = false;
-                                    this.show_errors = false;
-                                    cx.notify();
-                                }),
-                            ))
-                        },
-                    ),
-            )
-            .when(self.show_errors && !self.errors.is_empty(), |view| {
-                view.child(
-                    uniform_list(
-                        "error-list",
-                        self.errors.len(),
-                        cx.processor(|this, range: Range<usize>, _, cx| {
-                            range
-                                .map(|index| {
-                                    div()
-                                        .id(("error", index))
-                                        .h(px(28.))
-                                        .px_3()
-                                        .text_color(rgb(0xff8a82))
-                                        .truncate()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                this.errors[index].clone(),
-                                            ))
-                                        }))
-                                        .child(this.errors[index].clone())
-                                })
-                                .collect()
-                        }),
-                    )
-                    .track_scroll(self.error_scroll.clone())
-                    .h(px(140.))
-                    .map(|view| {
-                        scroll::wheel(
-                            view,
-                            Some(self.error_scroll.0.borrow().base_handle.clone()),
-                            None,
-                        )
-                    }),
-                )
-            })
-    }
 }
 
 impl Render for Workspace {
@@ -377,9 +231,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(|this, _: &Export, _, cx| this.export_dialog(false, cx)))
-            .on_action(cx.listener(|this, _: &Search, window, cx| {
-                this.focus_filter(this.active, window, cx)
-            }))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.open_paths(paths.paths().to_vec(), cx)
             }))
@@ -480,36 +331,7 @@ impl Render for Workspace {
                         )
                     }),
             )
-            .when(
-                self.show_activity || self.extracting || self.pending > 0 || self.converting,
-                |view| view.child(self.footer(cx)),
-            )
-            .when(!self.columns[0].folder.items.is_empty(), |view| {
-                view.child(
-                    div()
-                        .absolute()
-                        .left(px(12.))
-                        .right(px(12.))
-                        .bottom(px(12.))
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(self.path_bar(window, cx))
-                        .child(div().flex_1().min_w_0())
-                        .when(inset > px(0.) && self.selection.is_some(), |view| {
-                            view.child(
-                                button(
-                                    "export-preview",
-                                    "Export…",
-                                    false,
-                                    !self.extracting && !self.converting && !self.preview_loading,
-                                )
-                                .occlude()
-                                .on_click(cx.listener(|this, _, _, cx| this.export_preview(cx))),
-                            )
-                        }),
-                )
-            })
+            .child(self.status_dock(inset, window, cx))
             .when(self.show_export_menu, |view| {
                 view.child(self.export_menu(cx))
             })
@@ -549,10 +371,6 @@ pub(super) fn button(
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         })
         .child(label.into())
-}
-
-fn message(label: impl Into<SharedString>) -> Div {
-    div().p_4().text_color(rgb(SECONDARY)).child(label.into())
 }
 
 pub(super) fn bytes_label(size: u64) -> String {

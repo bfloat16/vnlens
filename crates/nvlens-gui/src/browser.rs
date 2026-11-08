@@ -88,9 +88,7 @@ impl Target {
     pub fn archive_hint(&self) -> bool {
         match self {
             Self::File(path, game) => game.route_path(path).is_some(),
-            Self::Entry { archive, index } => {
-                archive.game.route(&archive.entries[*index].name).is_some()
-            }
+            Self::Entry { archive, index } => archive.game.route(&archive.paths[*index]).is_some(),
             _ => false,
         }
     }
@@ -99,8 +97,17 @@ impl Target {
             return Err(nvlens_core::Error::Cancelled.into());
         }
         match self {
-            Self::File(path, _) => {
-                std::fs::read(path).with_context(|| format!("Reading {}", path.display()))
+            Self::File(path, game) => {
+                let bytes =
+                    std::fs::read(path).with_context(|| format!("Reading {}", path.display()))?;
+                if !raw
+                    && let Some(tag) = game.script_format_for(&self.name())
+                    && let std::borrow::Cow::Owned(decoded) =
+                        nvlens_script::decode_as(tag, &bytes, game.resource_options())?
+                {
+                    return Ok(decoded);
+                }
+                Ok(bytes)
             }
             Self::Entry { archive, index } => {
                 archive::read_entry(&archive.source, *index, raw, cancel)
@@ -149,7 +156,17 @@ impl Item {
                 ResourceKind::Archive,
                 Some(archive.directories[*directory].items.len()),
             ),
-            Target::Entry { archive, index } => (archive.entries[*index].kind, None),
+            Target::Entry { archive, index } => {
+                let kind = ResourceKind::guess_from_name(&archive.paths[*index]);
+                (
+                    if kind == ResourceKind::Unknown {
+                        archive.entries[*index].kind
+                    } else {
+                        kind
+                    },
+                    None,
+                )
+            }
             _ => (ResourceKind::guess_from_name(&name), None),
         };
         Self {
@@ -258,12 +275,12 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
             )
         }
         Target::Entry { archive, index } => {
-            if archive.game.route(&archive.entries[*index].name).is_none() {
+            if archive.game.route(&archive.paths[*index]).is_none() {
                 return Ok(None);
             }
             let bytes = target.read(false, cancel)?;
             Ok(MountedArchive::open_nested(
-                &archive.entries[*index].name,
+                &archive.paths[*index],
                 &bytes,
                 virtual_paths,
                 archive.game.clone(),

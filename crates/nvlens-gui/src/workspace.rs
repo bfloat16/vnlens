@@ -13,16 +13,18 @@ use gpui::{prelude::*, *};
 
 use crate::archive::{self, Progress};
 use crate::browser::{self, Folder, Item, Target};
-use crate::input::{Changed, TextInput};
 
 mod audio_view;
 mod browser_view;
 mod filename;
+mod image_view;
 mod layout;
 mod level_meter;
+mod names;
 mod script_view;
 mod scroll;
 mod scrollbar;
+mod status_view;
 mod view;
 
 const BACKGROUND: u32 = 0x1c1c1e;
@@ -45,7 +47,6 @@ actions!(
         OpenFolder,
         Export,
         Back,
-        Search,
         Inspector,
         Settings,
         MoveUp,
@@ -63,7 +64,6 @@ pub fn bind_keys(cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new(&format!("{modifier}-o"), Open, Some("Workspace")),
             KeyBinding::new(&format!("{modifier}-e"), Export, Some("Workspace")),
-            KeyBinding::new(&format!("{modifier}-f"), Search, Some("Workspace")),
             KeyBinding::new(&format!("{modifier}-i"), Inspector, Some("Workspace")),
             KeyBinding::new(&format!("{modifier}-,"), Settings, Some("Workspace")),
             KeyBinding::new(&format!("{modifier}-c"), CopyInstruction, Some("Preview")),
@@ -83,63 +83,36 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", MoveDown, Some("Browser")),
         KeyBinding::new("enter", Enter, Some("Browser")),
         KeyBinding::new("escape", Cancel, Some("Workspace")),
-        KeyBinding::new("space", TogglePlayback, Some("Workspace && !TextInput")),
+        KeyBinding::new("space", TogglePlayback, Some("Workspace")),
     ]);
 }
 
 struct Column {
     id: u64,
     folder: Folder,
-    visible: Vec<usize>,
     selected: Option<usize>,
     scroll: UniformListScrollHandle,
     scrollbar: scrollbar::Scrollbar,
     hovered: bool,
-    filter: Entity<TextInput>,
-    _filter_subscription: Subscription,
-    filter_open: bool,
     width: Pixels,
     loading: bool,
     error: Option<String>,
     cancelled: Arc<AtomicBool>,
 }
 impl Column {
-    fn new(id: u64, folder: Folder, cx: &mut Context<Workspace>) -> Self {
-        let filter = cx.new(|cx| TextInput::new("Filter…", cx));
-        let subscription = cx.subscribe(&filter, move |this, input, _: &Changed, cx| {
-            if let Some(column) = this.columns.iter_mut().find(|column| column.id == id) {
-                column.refilter(input.read(cx).value());
-                column.scroll.scroll_to_item(0, ScrollStrategy::Top);
-            }
-            cx.notify();
-        });
+    fn new(id: u64, folder: Folder) -> Self {
         Self {
             id,
-            visible: (0..folder.items.len()).collect(),
             folder,
             selected: None,
             scroll: UniformListScrollHandle::new(),
             scrollbar: scrollbar::Scrollbar::default(),
             hovered: false,
-            filter,
-            _filter_subscription: subscription,
-            filter_open: false,
             width: px(COLUMN_WIDTH),
             loading: false,
             error: None,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
-    }
-    fn refilter(&mut self, query: &str) {
-        let query = query.to_lowercase();
-        self.visible = self
-            .folder
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.name.to_lowercase().contains(&query))
-            .map(|(index, _)| index)
-            .collect();
     }
 }
 impl Drop for Column {
@@ -152,7 +125,9 @@ struct Preview {
     bytes: Arc<[u8]>,
     lines: Option<Vec<Range<usize>>>,
     widest_line: usize,
-    image: Option<Arc<Image>>,
+    image: Option<Arc<RenderImage>>,
+    image_frames: usize,
+    image_frame: usize,
     script: Option<Arc<nvlens_script::ir::Script>>,
     ir_table: Option<script_view::Table>,
     audio: Option<audio_view::AudioPreview>,
@@ -165,40 +140,50 @@ impl Preview {
         }
         let bytes = resource.bytes;
         let mut widest_line = 0;
-        let lines = std::str::from_utf8(&bytes)
-            .ok()
-            .filter(|text| {
-                !text
-                    .chars()
-                    .any(|ch| ch.is_control() && !matches!(ch, '\r' | '\n' | '\t'))
-            })
-            .map(|text| {
-                let mut offset = 0;
-                let mut max_width = 0;
-                text.split_inclusive('\n')
-                    .enumerate()
-                    .map(|(index, line)| {
-                        let width: usize = line
+        let lines = (resource.script.is_none() && resource.image.is_none() && !resource.audio)
+            .then(|| {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .filter(|text| {
+                        !text
                             .chars()
-                            .map(|ch| match ch {
-                                '\t' => 4,
-                                ch if ch.is_ascii() => 1,
-                                _ => 2,
-                            })
-                            .sum();
-                        if width > max_width {
-                            max_width = width;
-                            widest_line = index;
-                        }
-                        let start = offset;
-                        offset += line.len();
-                        start..offset
+                            .any(|ch| ch.is_control() && !matches!(ch, '\r' | '\n' | '\t'))
                     })
-                    .collect()
-            });
+                    .map(|text| {
+                        let mut offset = 0;
+                        let mut max_width = 0;
+                        text.split_inclusive('\n')
+                            .enumerate()
+                            .map(|(index, line)| {
+                                let width: usize = line
+                                    .chars()
+                                    .map(|ch| match ch {
+                                        '\t' => 4,
+                                        ch if ch.is_ascii() => 1,
+                                        _ => 2,
+                                    })
+                                    .sum();
+                                if width > max_width {
+                                    max_width = width;
+                                    widest_line = index;
+                                }
+                                let start = offset;
+                                offset += line.len();
+                                start..offset
+                            })
+                            .collect()
+                    })
+            })
+            .flatten();
+        let image_frames = if resource.image.is_some() {
+            nvlens_image::frame_count(&bytes)?.unwrap_or(1)
+        } else {
+            0
+        };
         let image = resource
             .image
-            .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)));
+            .map(|image| Self::render_image(image, None))
+            .transpose()?;
         let ir_table = resource
             .script
             .as_ref()
@@ -213,17 +198,72 @@ impl Preview {
             lines,
             widest_line,
             image,
+            image_frames,
+            image_frame: 0,
             script: resource.script.map(Arc::new),
             ir_table,
             audio,
         })
     }
+
+    fn render_image(
+        image: nvlens_image::Image,
+        thumbnail: Option<(u32, u32)>,
+    ) -> anyhow::Result<Arc<RenderImage>> {
+        use nvlens_image::PixelBuffer;
+        let width = image.meta.width;
+        let height = image.meta.height;
+        let (mut bytes, swap_channels) = match image.pixels {
+            PixelBuffer::Rgba8(bytes) => (bytes, true),
+            PixelBuffer::Bgra8(bytes) => (bytes, false),
+            PixelBuffer::Rgba16(words) => {
+                let pixels =
+                    image::ImageBuffer::<image::Rgba<u16>, _>::from_raw(width, height, words)
+                        .ok_or_else(|| anyhow::anyhow!("Invalid preview pixel dimensions"))?;
+                (
+                    image::DynamicImage::ImageRgba16(pixels)
+                        .to_rgba8()
+                        .into_raw(),
+                    true,
+                )
+            }
+            _ => anyhow::bail!("Unsupported preview pixel buffer"),
+        };
+        // Prepare GPUI's BGRA texture off-thread before replacing the visible
+        // preview. Encoded images would start another asynchronous decode in img().
+        if swap_channels {
+            nvlens_image::swap_red_blue(&mut bytes);
+        }
+        let pixels = image::RgbaImage::from_raw(width, height, bytes)
+            .ok_or_else(|| anyhow::anyhow!("Invalid preview pixel dimensions"))?;
+        let pixels = if let Some((width, height)) = thumbnail {
+            image::DynamicImage::ImageRgba8(pixels)
+                .thumbnail(width, height)
+                .into_rgba8()
+        } else {
+            pixels
+        };
+        Ok(Arc::new(RenderImage::new([image::Frame::new(pixels)])))
+    }
+
+    fn release(self, cx: &mut App) {
+        if let Some(image) = self.image {
+            cx.defer(move |cx| cx.drop_image(image, None));
+        }
+        if let Some(audio) = self.audio {
+            audio.release(cx);
+        }
+    }
 }
 
 enum Event {
+    Names(names::Update),
+    NamesRefreshed(anyhow::Result<Vec<names::Refresh>>),
     Imported(Vec<anyhow::Result<Item>>),
     Folder(u64, anyhow::Result<Option<Folder>>),
     Preview(Arc<AtomicBool>, anyhow::Result<Preview>),
+    ImageFrame(Arc<AtomicBool>, usize, anyhow::Result<Arc<RenderImage>>),
+    ImageThumbnail(Arc<AtomicBool>, usize, anyhow::Result<Arc<RenderImage>>),
     Progress(Progress, Option<String>),
     Finished(anyhow::Result<archive::Extraction>),
     Converted(anyhow::Result<PathBuf>),
@@ -231,6 +271,8 @@ enum Event {
 }
 
 pub struct Workspace {
+    name_jobs: Vec<names::Job>,
+    names_refreshing: bool,
     next_column_id: u64,
     resizing: Option<(ResizeTarget, Pixels, Pixels)>,
     inspector_width: Option<Pixels>,
@@ -248,6 +290,7 @@ pub struct Workspace {
     preview_scroll: UniformListScrollHandle,
     preview_vertical_bar: scrollbar::Scrollbar,
     preview_horizontal_bar: scrollbar::Scrollbar,
+    image_view: image_view::State,
     error_scroll: UniformListScrollHandle,
     sender: mpsc::Sender<Event>,
     _events_task: Task<()>,
@@ -268,7 +311,7 @@ pub struct Workspace {
     show_export_menu: bool,
     path_menu: Option<(String, Point<Pixels>)>,
     show_errors: bool,
-    show_activity: bool,
+    show_status: bool,
     raw: bool,
     extracting: bool,
     cancel: Arc<AtomicBool>,
@@ -285,7 +328,7 @@ impl Workspace {
         preferences: crate::preferences::Preferences,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let root = Column::new(0, Folder::empty(Target::Opened), cx);
+        let root = Column::new(0, Folder::empty(Target::Opened));
         let task = cx.spawn(async move |weak, cx| {
             loop {
                 cx.background_executor()
@@ -316,6 +359,8 @@ impl Workspace {
         let focus = cx.focus_handle();
         window.focus(&browser_focus);
         Self {
+            name_jobs: Vec::new(),
+            names_refreshing: false,
             next_column_id: 1,
             resizing: None,
             inspector_width: None,
@@ -333,6 +378,7 @@ impl Workspace {
             preview_scroll: UniformListScrollHandle::new(),
             preview_vertical_bar: scrollbar::Scrollbar::default(),
             preview_horizontal_bar: scrollbar::Scrollbar::default(),
+            image_view: image_view::State::default(),
             error_scroll: UniformListScrollHandle::new(),
             sender,
             _events_task: task,
@@ -353,7 +399,7 @@ impl Workspace {
             show_export_menu: false,
             path_menu: None,
             show_errors: false,
-            show_activity: false,
+            show_status: false,
             raw: false,
             extracting: false,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -366,6 +412,8 @@ impl Workspace {
 
     fn receive(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
+            Event::Names(update) => self.receive_names(update, cx),
+            Event::NamesRefreshed(result) => self.receive_name_refresh(result, cx),
             Event::PreferencesSaved(Err(error)) => {
                 self.error(format!("Cannot save preferences: {error:#}"))
             }
@@ -374,10 +422,38 @@ impl Workspace {
             Event::Preview(request, result) if Arc::ptr_eq(&request, &self.request) => {
                 self.preview_loading = false;
                 match result {
-                    Ok(preview) => self.preview = Some(preview),
+                    Ok(preview) => {
+                        self.clear_preview(cx);
+                        self.preview = Some(preview);
+                    }
+                    Err(error) => {
+                        self.clear_preview(cx);
+                        self.preview_error = Some(format!("{error:#}"));
+                    }
+                }
+            }
+            Event::ImageFrame(request, frame, result) if Arc::ptr_eq(&request, &self.request) => {
+                self.preview_loading = false;
+                self.image_view.pending = None;
+                match result {
+                    Ok(image) => {
+                        if let Some(preview) = &mut self.preview {
+                            if let Some(old) = preview.image.replace(image) {
+                                cx.defer(move |cx| cx.drop_image(old, None));
+                            }
+                            preview.image_frame = frame;
+                        }
+                    }
                     Err(error) => self.preview_error = Some(format!("{error:#}")),
                 }
             }
+            Event::ImageFrame(_, _, Ok(image)) => {
+                cx.defer(move |cx| cx.drop_image(image, None));
+            }
+            Event::ImageThumbnail(request, frame, result) => {
+                self.image_view.frames.receive(request, frame, result, cx);
+            }
+            Event::Preview(_, Ok(preview)) => preview.release(cx),
             Event::Progress(progress, error) => {
                 self.progress = progress;
                 if let Some(error) = error {
@@ -385,7 +461,6 @@ impl Workspace {
                 }
             }
             Event::Finished(result) => {
-                self.show_activity = true;
                 self.extracting = false;
                 match result {
                     Ok(result) => {
@@ -406,7 +481,6 @@ impl Workspace {
             }
             Event::Converted(result) => {
                 self.converting = false;
-                self.show_activity = true;
                 match result {
                     Ok(path) => {
                         self.status = format!("Exported {}", path.display());
@@ -423,7 +497,7 @@ impl Workspace {
         self.status = error.clone();
         self.errors.push(error);
         self.show_errors = true;
-        self.show_activity = true;
+        self.show_status = true;
     }
 
     fn receive_imports(&mut self, results: Vec<anyhow::Result<Item>>, cx: &mut Context<Self>) {
@@ -432,6 +506,9 @@ impl Workspace {
         for result in results {
             match result {
                 Ok(item) => {
+                    if let Target::File(_, game) | Target::Directory(_, game) = &item.target {
+                        self.start_names(game.clone(), cx);
+                    }
                     let root = &mut self.columns[0];
                     let index = root
                         .folder
@@ -447,10 +524,6 @@ impl Workspace {
                 Err(error) => self.error(format!("{error:#}")),
             }
         }
-        self.columns[0]
-            .filter
-            .update(cx, |input, cx| input.clear(cx));
-        self.columns[0].refilter("");
         if let Some(row) = last {
             self.select(0, row, cx);
         }
@@ -470,15 +543,12 @@ impl Workspace {
             Ok(Some(folder)) => {
                 let column = &mut self.columns[depth];
                 column.folder = folder;
-                let query = column.filter.read(cx).value().to_owned();
-                column.refilter(&query);
                 if depth > 0 {
                     if let Some(row) = self.columns[depth - 1].selected {
                         self.columns[depth - 1].folder.items[row].container = true;
                     }
                     self.reveal_column = Some(depth);
                 }
-                self.status = format!("{} items", self.columns[depth].folder.items.len());
             }
             Ok(None) if depth > 0 => {
                 self.columns.truncate(depth);
@@ -494,22 +564,25 @@ impl Workspace {
             Ok(None) => {}
             Err(error) => {
                 self.columns[depth].error = Some(format!("{error:#}"));
-                self.status = "Cannot open folder".into();
             }
         }
+        self.refresh_names(cx);
     }
 
     fn reset_preview(&mut self, cx: &mut Context<Self>) {
         self.inspector_width = None;
         self.request.store(true, Ordering::Relaxed);
         self.request = Arc::new(AtomicBool::new(false));
-        if let Some(preview) = self.preview.take()
-            && let Some(audio) = preview.audio
-        {
-            audio.release(cx);
-        }
         self.preview_error = None;
         self.preview_loading = false;
+        self.clear_preview(cx);
+    }
+
+    fn clear_preview(&mut self, cx: &mut Context<Self>) {
+        self.image_view.frames.clear(cx);
+        if let Some(preview) = self.preview.take() {
+            preview.release(cx);
+        }
         self.ir_selected = None;
         self.playback = None;
         self.audio_position = 0.;
@@ -517,6 +590,7 @@ impl Workspace {
         self.preview_scroll = UniformListScrollHandle::new();
         self.preview_vertical_bar = scrollbar::Scrollbar::default();
         self.preview_horizontal_bar = scrollbar::Scrollbar::default();
+        self.image_view = image_view::State::default();
     }
 
     fn open_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -585,8 +659,8 @@ impl Workspace {
         self.active = depth;
         self.reveal_column = Some(depth);
         self.selection = None;
-        self.reset_preview(cx);
         if item.container {
+            self.reset_preview(cx);
             self.load_child(depth, &item, cx);
         } else {
             self.selection = Some((depth, row));
@@ -600,7 +674,7 @@ impl Workspace {
         self.columns.truncate(depth + 1);
         let id = self.next_column_id;
         self.next_column_id += 1;
-        let mut column = Column::new(id, Folder::empty(item.target.clone()), cx);
+        let mut column = Column::new(id, Folder::empty(item.target.clone()));
         column.loading = true;
         let cancel = column.cancelled.clone();
         let target = item.target.clone();
@@ -647,30 +721,25 @@ impl Workspace {
             .selected
             .filter(|&row| !self.columns[depth].folder.items[row].container)
             .map(|row| (depth, row));
-        self.reset_preview(cx);
         if self.selection.is_some() && self.show_inspector {
             self.read_selection(cx);
+        } else {
+            self.reset_preview(cx);
         }
         self.reveal_column = Some(depth);
         self.path_scroll.scroll_to_item(depth + 1);
-        cx.notify();
-    }
-    fn focus_filter(&mut self, depth: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active != depth {
-            self.activate(depth, cx);
-        }
-        if let Some(column) = self.columns.get_mut(depth) {
-            column.filter_open = true;
-            window.focus(&column.filter.focus_handle(cx));
-        }
         cx.notify();
     }
     fn read_selection(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self.selected_item().map(|item| item.target.clone()) else {
             return;
         };
-        self.reset_preview(cx);
+        self.request.store(true, Ordering::Relaxed);
+        self.request = Arc::new(AtomicBool::new(false));
+        self.preview_error = None;
         self.preview_loading = true;
+        self.image_view.pending = None;
+        self.image_view.frames.cancel();
         let request = self.request.clone();
         let sender = self.sender.clone();
         let raw = self.raw;
@@ -706,7 +775,11 @@ impl Workspace {
 
     fn export_preview(&mut self, cx: &mut Context<Self>) {
         use crate::resource::ExportKind;
-        if self.extracting || self.converting || self.preview_loading {
+        if self.extracting
+            || self.converting
+            || self.preview_loading
+            || self.preview_error.is_some()
+        {
             return;
         }
         let kind = self
@@ -743,6 +816,7 @@ impl Workspace {
         };
         let bytes = preview.bytes.clone();
         let script = preview.script.clone();
+        let image_frame = preview.image_frame;
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -761,9 +835,23 @@ impl Workspace {
                         cx.background_executor()
                             .spawn(async move {
                                 let result = (|| -> anyhow::Result<PathBuf> {
-                                    let converted =
-                                        crate::resource::convert(&bytes, kind, script.as_deref())?;
-                                    let name = format!("{name}.{}", kind.extension());
+                                    let converted = crate::resource::convert(
+                                        &bytes,
+                                        kind,
+                                        script.as_deref(),
+                                        image_frame,
+                                    )?;
+                                    let name = if matches!(kind, crate::resource::ExportKind::Png)
+                                        && image_frame != 0
+                                    {
+                                        format!(
+                                            "{name}.frame-{}.{}",
+                                            image_frame + 1,
+                                            kind.extension()
+                                        )
+                                    } else {
+                                        format!("{name}.{}", kind.extension())
+                                    };
                                     Ok(nvlens_io::filesystem::write_under(
                                         &output, &name, &converted,
                                     )?)
@@ -788,21 +876,10 @@ impl Workspace {
 
     fn enter_nested(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
         let depth = self.active;
-        if self.columns[depth]
-            .filter
-            .focus_handle(cx)
-            .is_focused(window)
-        {
-            if let Some(&row) = self.columns[depth].visible.first() {
-                self.select(depth, row, cx);
-            }
-            window.focus(&self.browser_focus);
-            return;
-        }
         if self.columns.len() > depth + 1 {
             self.activate(depth + 1, cx);
-            if let Some(&row) = self.columns[depth + 1].visible.first() {
-                self.select(depth + 1, row, cx);
+            if !self.columns[depth + 1].folder.items.is_empty() {
+                self.select(depth + 1, 0, cx);
             }
         } else if let Some(item) = self
             .columns
@@ -858,17 +935,14 @@ impl Workspace {
         let Some(column) = self.columns.get(self.active) else {
             return;
         };
-        let current = column
-            .selected
-            .and_then(|row| column.visible.iter().position(|&index| index == row));
-        let next = match (current, down) {
-            (Some(index), true) => (index + 1).min(column.visible.len().saturating_sub(1)),
+        let next = match (column.selected, down) {
+            (Some(index), true) => (index + 1).min(column.folder.items.len().saturating_sub(1)),
             (Some(index), false) => index.saturating_sub(1),
             (None, _) => 0,
         };
-        if let Some(&row) = column.visible.get(next) {
+        if next < column.folder.items.len() {
             column.scroll.scroll_to_item(next, ScrollStrategy::Center);
-            self.select(self.active, row, cx);
+            self.select(self.active, next, cx);
             window.focus(&self.browser_focus);
         }
     }
@@ -878,6 +952,7 @@ impl Workspace {
         self.inspector_width = None;
         self.reveal_column = Some(self.active);
         if !self.show_inspector {
+            self.reset_preview(cx);
             window.focus(&self.browser_focus);
         }
         if self.show_inspector && self.selection.is_some() && self.preview.is_none() {
@@ -946,26 +1021,26 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if self.show_status {
+            self.show_status = false;
+            cx.notify();
+            return;
+        }
         if self.show_inspector && self.selection.is_some() {
             self.toggle_inspector(&Inspector, window, cx);
             return;
         }
-        if self.columns[self.active].filter_open {
-            self.columns[self.active].filter_open = false;
-            self.columns[self.active]
-                .filter
-                .update(cx, |input, cx| input.clear(cx));
-            window.focus(&self.browser_focus);
-            cx.notify();
-            return;
-        }
         if self.extracting {
-            self.cancel.store(true, Ordering::Relaxed);
-            self.status = "Cancelling after the current operation…".into();
+            self.cancel_extraction(cx);
         } else {
             self.show_errors = false;
-            self.show_activity = false;
+            self.show_status = false;
         }
+        cx.notify();
+    }
+
+    fn cancel_extraction(&mut self, cx: &mut Context<Self>) {
+        self.cancel.store(true, Ordering::Relaxed);
         cx.notify();
     }
 
@@ -997,11 +1072,7 @@ impl Workspace {
             if matches!(column.folder.target, Target::Opened) {
                 return;
             }
-            column
-                .visible
-                .iter()
-                .map(|&row| column.folder.items[row].clone())
-                .collect::<Vec<_>>()
+            column.folder.items.clone()
         };
         if items.is_empty() {
             return;
@@ -1026,7 +1097,6 @@ impl Workspace {
                             total: items.len(),
                             ..Progress::default()
                         };
-                        this.status = "Extracting…".into();
                         this.output = Some(output.clone());
                         let cancel = this.cancel.clone();
                         let sender = this.sender.clone();
@@ -1071,5 +1141,52 @@ impl Drop for Workspace {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         self.request.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::prelude::rust_2024::test;
+
+    #[test]
+    fn preview_pixels_are_ready_in_bgra_without_an_image_loader() -> anyhow::Result<()> {
+        use nvlens_image::{Image, ImageMeta, OffsetUnit, PixelBuffer};
+        let meta = ImageMeta {
+            width: 1,
+            height: 1,
+            offset_x: 0,
+            offset_y: 0,
+            offset_unit: OffsetUnit::Pixels,
+            bpp: 32,
+        };
+        for (pixels, expected) in [
+            (PixelBuffer::Rgba8(vec![10, 20, 30, 40]), [30, 20, 10, 40]),
+            (PixelBuffer::Bgra8(vec![30, 20, 10, 40]), [30, 20, 10, 40]),
+            (
+                PixelBuffer::Rgba16(vec![0x1010, 0x8080, 0xffff, 0x4040]),
+                [255, 128, 16, 64],
+            ),
+        ] {
+            let image = Preview::render_image(
+                Image {
+                    meta: meta.clone(),
+                    pixels,
+                },
+                None,
+            )?;
+            assert_eq!(image.as_bytes(0), Some(expected.as_slice()));
+        }
+        assert!(
+            Preview::render_image(
+                Image {
+                    meta,
+                    pixels: PixelBuffer::Rgba8(vec![10, 20, 30]),
+                },
+                None
+            )
+            .is_err()
+        );
+        Ok(())
     }
 }

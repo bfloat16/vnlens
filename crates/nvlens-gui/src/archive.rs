@@ -13,13 +13,14 @@ use nvlens_core::{Catalog, Entry, Opened};
 #[derive(Debug)]
 pub struct MountedArchive {
     pub path: PathBuf,
+    pub source_path: PathBuf,
     pub entries: Arc<[Entry]>,
     pub paths: Vec<String>,
     pub source: Arc<Mutex<Opened>>,
     pub directories: Vec<Directory>,
     pub game: Arc<nvlens_engine::Identification>,
     // Keep temporary nested sources alive until all mapped readers are dropped.
-    _backing: Option<TemporaryArchive>,
+    _backing: Option<Arc<TemporaryArchive>>,
 }
 
 impl MountedArchive {
@@ -51,6 +52,7 @@ impl MountedArchive {
             }
         }
         Ok(Some(Self {
+            source_path: path.canonicalize()?,
             path,
             directories: directories(&paths),
             entries: opened.archive.entries().into(),
@@ -78,7 +80,7 @@ impl MountedArchive {
             return Ok(None);
         };
         opened.path = PathBuf::from(name);
-        opened._backing = Some(backing);
+        opened._backing = Some(Arc::new(backing));
         Ok(Some(opened))
     }
 
@@ -99,6 +101,65 @@ impl MountedArchive {
         }
         indices
     }
+
+    /// Builds an immutable presentation snapshot off the UI thread. Storage
+    /// entries and their reader remain shared, including nested-file lifetime.
+    pub fn with_paths(&self, paths: Vec<String>) -> Result<Self> {
+        if paths.len() != self.entries.len() {
+            bail!("Recovered path count differs from archive index");
+        }
+        Ok(Self {
+            path: self.path.clone(),
+            source_path: self.source_path.clone(),
+            entries: self.entries.clone(),
+            directories: directories(&paths),
+            paths,
+            source: self.source.clone(),
+            game: self.game.clone(),
+            _backing: self._backing.clone(),
+        })
+    }
+
+    /// A renamed hash directory can expand into several real path components.
+    /// Keep navigation at the common parent of the same original descendants.
+    pub fn renamed_directory(&self, directory: usize, newer: &Self) -> usize {
+        if directory == 0 {
+            return 0;
+        }
+        let mut common: Option<Vec<&str>> = None;
+        for index in self.descendants(directory) {
+            let parent = newer.paths[index]
+                .rsplit_once('/')
+                .map_or("", |(dir, _)| dir);
+            let parts: Vec<_> = parent.split('/').filter(|s| !s.is_empty()).collect();
+            if let Some(common) = &mut common {
+                let count = common
+                    .iter()
+                    .zip(&parts)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                common.truncate(count);
+            } else {
+                common = Some(parts);
+            }
+        }
+        let mut id = 0;
+        for part in common.unwrap_or_default() {
+            let Some(next) = newer.directories[id].items.iter().find_map(|item| {
+                if item.name == part
+                    && let Node::Directory(next) = item.node
+                {
+                    Some(next)
+                } else {
+                    None
+                }
+            }) else {
+                break;
+            };
+            id = next;
+        }
+        id
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +177,7 @@ pub struct Item {
 #[derive(Debug, Default)]
 pub struct Directory {
     pub items: Vec<Item>,
+    pub parent: Option<usize>,
 }
 
 fn directories(paths: &[String]) -> Vec<Directory> {
@@ -134,7 +196,10 @@ fn directories(paths: &[String]) -> Vec<Directory> {
                 let key = (parent, part.to_owned());
                 parent = *folders.entry(key).or_insert_with(|| {
                     let id = directories.len();
-                    directories.push(Directory::default());
+                    directories.push(Directory {
+                        items: Vec::new(),
+                        parent: Some(parent),
+                    });
                     directories[parent].items.push(Item {
                         name: part.to_owned(),
                         node: Node::Directory(id),
@@ -447,6 +512,58 @@ mod tests {
         }
         assert_eq!(archive.descendants(node), vec![0]);
         assert_eq!(archive.descendants(0), vec![0, 1]);
+    }
+
+    #[test]
+    #[ignore = "Requires NVLENS_HXV4_GAME; validates hashed browsing/export data without opening a GUI"]
+    fn hxv4_hash_directories_and_exports() -> Result<()> {
+        nvlens_archive::init();
+        let root = PathBuf::from(
+            std::env::var_os("NVLENS_HXV4_GAME").ok_or_else(|| anyhow!("Set NVLENS_HXV4_GAME"))?,
+        );
+        let game = game(&root);
+        let archive = MountedArchive::open(root.join("bgimage.xp3"), false, game.clone())?
+            .ok_or_else(|| anyhow!("No XP3 route"))?;
+        let virtual_archive = MountedArchive::open(root.join("bgimage.xp3"), true, game)?
+            .ok_or_else(|| anyhow!("No XP3 route"))?;
+        assert_eq!(archive.paths, virtual_archive.paths);
+        assert_eq!(archive.entries.len(), 892);
+        let name = &archive.entries[0].name;
+        let (directory_hash, file_hash) = name
+            .split_once('/')
+            .ok_or_else(|| anyhow!("Missing hash directory"))?;
+        assert_eq!((directory_hash.len(), file_hash.len()), (16, 64));
+        let directory_id = archive.directories[0]
+            .items
+            .iter()
+            .find_map(|item| {
+                if item.name != directory_hash {
+                    return None;
+                }
+                if let Node::Directory(id) = item.node {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| anyhow!("Missing browser directory"))?;
+        assert!(
+            archive.directories[directory_id]
+                .items
+                .iter()
+                .any(|item| item.name == file_hash && item.node == Node::Entry(0))
+        );
+        assert!(archive.descendants(directory_id).contains(&0));
+        let out = directory();
+        let cancel = AtomicBool::new(false);
+        let expected = read_entry(&archive.source, 0, false, &cancel)?;
+        let result = extract(&archive, &[0], &out.0, false, &cancel, |_, _| {})?;
+        assert_eq!(result.progress.succeeded, 1);
+        assert_eq!(
+            fs::read(out.0.join(directory_hash).join(file_hash))?,
+            expected
+        );
+        Ok(())
     }
 
     #[test]

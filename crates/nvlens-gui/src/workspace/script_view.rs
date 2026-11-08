@@ -33,7 +33,7 @@ impl Table {
                 Ok([
                     format!("{:08X}", instruction.span.offset),
                     instruction.opcode_name(),
-                    instruction.operands_disassembly(),
+                    instruction.args_disassembly(),
                 ]
                 .map(|text| -> SharedString {
                     // Keep every cell on one row without hiding control characters
@@ -175,14 +175,14 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nvlens_script::ir::{Instruction, Opcode, Operand, Span, Value};
+    use nvlens_script::ir::{Arg, Instruction, Opcode, Span, Value};
     use std::prelude::rust_2024::test;
 
     #[test]
     fn prepares_complete_cells_without_a_window_and_honors_cancellation() -> anyhow::Result<()> {
         let value = "Japanese 日本語\n\t".repeat(4096);
         let script = Script {
-            ir_version: 2,
+            ir_version: nvlens_script::ir::VERSION,
             format: "test".into(),
             format_version: 1,
             sections: Vec::new(),
@@ -196,10 +196,13 @@ mod tests {
                 opcode: Opcode {
                     namespace: "test".into(),
                     code: 255,
-                    mnemonic: None,
+                    operation: nvlens_script::ir::Operation::Unknown,
+                    variant: None,
+                    native_mnemonic: None,
                 },
-                operands: vec![Operand {
-                    name: "value".into(),
+                args: vec![Arg {
+                    native_name: None,
+                    name: nvlens_script::ir::ArgName::Value,
                     span: Span {
                         offset: 36,
                         size: 0,
@@ -213,8 +216,11 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let table = Table::new(&script, &cancelled)?;
         assert_eq!(table.rows[0][0].as_ref(), "100000020");
-        assert_eq!(table.rows[0][1].as_ref(), "op_FF");
-        assert_eq!(table.rows[0][2].as_ref(), format!("value={value:?}"));
+        assert_eq!(table.rows[0][1].as_ref(), "unknown");
+        assert_eq!(
+            table.rows[0][2].as_ref(),
+            format!("native=test:0xFF, value={value:?}")
+        );
         cancelled.store(true, Ordering::Relaxed);
         assert!(matches!(
             Table::new(&script, &cancelled),

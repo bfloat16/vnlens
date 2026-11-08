@@ -171,59 +171,17 @@ impl Workspace {
             )
             .child(
                 div()
-                    .h(px(32.))
-                    .flex_shrink_0()
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .child(
-                        div()
-                            .id(("filter", id))
-                            .size(px(24.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .text_color(rgb(if column.filter_open {
-                                0x8dbdff
-                            } else {
-                                SECONDARY
-                            }))
-                            .hover(|s| s.bg(rgba(0xffffff1f)))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if this.columns[depth].filter_open {
-                                    this.columns[depth].filter_open = false;
-                                    this.columns[depth]
-                                        .filter
-                                        .update(cx, |input, cx| input.clear(cx));
-                                    window.focus(&this.browser_focus);
-                                    cx.notify();
-                                } else {
-                                    this.focus_filter(depth, window, cx);
-                                }
-                            }))
-                            .child("⌕"),
-                    ),
-            )
-            .when(column.filter_open, |view| {
-                view.child(div().mx(px(8.)).mb(px(6.)).child(column.filter.clone()))
-            })
-            .child(
-                div()
                     .relative()
                     .flex_1()
                     .min_h_0()
                     .child(
                         uniform_list(
                             ("items", id),
-                            column.visible.len(),
+                            column.folder.items.len(),
                             cx.processor(move |this, range: Range<usize>, _, cx| {
                                 range
-                                    .map(|position| {
+                                    .map(|row| {
                                         let column = &this.columns[depth];
-                                        let row = column.visible[position];
                                         let item = &column.folder.items[row];
                                         let selected = column.selected == Some(row);
                                         let active = depth == this.active;
@@ -313,46 +271,6 @@ impl Workspace {
                         .size_full()
                         .pr(px(14.))
                         .pb(px(50.)),
-                    )
-                    .when(
-                        column.loading
-                            || column.error.is_some()
-                            || (column.visible.is_empty()
-                                && (!column.folder.items.is_empty()
-                                    || !matches!(column.folder.target, Target::Opened))),
-                        |view| {
-                            view.child(
-                                div()
-                                    .absolute()
-                                    .top(px(10.))
-                                    .left(px(12.))
-                                    .right(px(12.))
-                                    .py_4()
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(SECONDARY))
-                                    .child(column.error.clone().unwrap_or_else(|| {
-                                        if column.loading {
-                                            "Loading…"
-                                        } else if !column.filter.read(cx).value().is_empty() {
-                                            "No matching items"
-                                        } else {
-                                            "No items"
-                                        }
-                                        .into()
-                                    }))
-                                    .when(column.error.is_some(), |view| {
-                                        view.child(button("retry", "Retry", false, true).on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.retry_column(depth, cx)
-                                            }),
-                                        ))
-                                    }),
-                            )
-                        },
                     )
                     .child(
                         column

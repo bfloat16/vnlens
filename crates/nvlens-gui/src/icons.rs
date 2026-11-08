@@ -111,9 +111,9 @@ fn for_item(item: &Item) -> Icon {
         "ogg" | "oga" | "opus" | "wav" | "wave" | "mp3" | "flac" | "aac" | "m4a" | "wma"
         | "aif" | "aiff" | "mid" | "midi" | "fcd" | "nwa" | "hca" => AUDIO,
         "mp4" | "m4v" | "mkv" | "webm" | "avi" | "mov" | "wmv" | "mpg" | "mpeg" | "ogv" | "flv"
-        | "vob" | "ymv" => VIDEO,
+        | "vob" | "ymv" | "omv" => VIDEO,
         "ybn" | "ws2" | "scr" | "ks" | "scn" | "spt" | "bcs" | "rpy" | "rpyc" | "tjs" | "epk"
-        | "nut" | "nuc" => SCRIPT,
+        | "nut" | "nuc" | "ss" | "gan" => SCRIPT,
         "txt" | "md" | "markdown" | "rst" | "log" | "csv" | "tsv" | "srt" | "ass" | "vtt" => TEXT,
         "ini" | "cfg" | "conf" | "config" | "json" | "jsonc" | "json5" | "yaml" | "yml"
         | "toml" | "xml" | "properties" | "env" => CONFIG,

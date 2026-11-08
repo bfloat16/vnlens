@@ -88,7 +88,7 @@ impl Workspace {
         let resized = self.viewport_width != viewport;
         self.viewport_width = viewport;
         let reveal = self.reveal_column.take();
-        let preview = self.show_inspector && self.selection.is_some();
+        let preview = self.show_inspector && self.selection.is_some() && self.preview.is_some();
         let depth = self.selection.map(|(depth, _)| depth).unwrap_or_else(|| {
             reveal.unwrap_or_else(|| {
                 if self.active + 1 < self.columns.len() {
