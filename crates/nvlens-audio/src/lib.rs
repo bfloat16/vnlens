@@ -11,6 +11,7 @@ mod model;
 mod siglus;
 pub mod spectrogram;
 mod standard;
+mod systemnnn;
 
 pub use format::{AudioFormat, AudioRegistration, decode, decode_cancellable, metadata};
 pub use model::{AudioMeta, Pcm};

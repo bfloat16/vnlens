@@ -7,7 +7,7 @@ use nvlens_core::{Format, Result};
 use std::sync::atomic::AtomicBool;
 const SIGNATURES: &[u32] = &[0x5367_674f, 0x4646_4952, 0x3436_4652];
 #[derive(Debug, Default)]
-struct StandardAudio;
+pub(crate) struct StandardAudio;
 impl Format for StandardAudio {
     fn tag(&self) -> &'static str {
         "audio/standard"
