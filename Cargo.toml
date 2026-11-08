@@ -6,6 +6,7 @@ members = [
     "crates/nvlens-core",
     "crates/nvlens-crypto",
     "crates/nvlens-bin",
+    "crates/nvlens-unpack",
     "crates/nvlens-engine",
     "crates/nvlens-archive",
     "crates/nvlens-image",
@@ -28,6 +29,7 @@ nvlens-io = { path = "crates/nvlens-io" }
 nvlens-core = { path = "crates/nvlens-core" }
 nvlens-crypto = { path = "crates/nvlens-crypto" }
 nvlens-bin = { path = "crates/nvlens-bin" }
+nvlens-unpack = { path = "crates/nvlens-unpack" }
 nvlens-engine = { path = "crates/nvlens-engine" }
 nvlens-archive = { path = "crates/nvlens-archive" }
 nvlens-image = { path = "crates/nvlens-image" }
@@ -35,11 +37,18 @@ nvlens-audio = { path = "crates/nvlens-audio" }
 nvlens-script = { path = "crates/nvlens-script" }
 nvlens-video = { path = "crates/nvlens-video" }
 
+
 memmap2 = "0.9"
 thiserror = "2"
 anyhow = "1"
 inventory = "0.3"
 flate2 = "1"
+argon2 = "0.5.3"
+blake2 = "0.10.6"
+sha3 = "0.10"
+chacha20poly1305 = "0.10"
+aes = "0.8.4"
+iced-x86 = { version = "1.22.0", default-features = false, features = ["std", "decoder"] }
 gpui = "=0.2.2"
 unicode-segmentation = "1"
 encoding_rs = "0.8"
@@ -47,6 +56,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp"] }
 lewton = "0.10.2"
+ogg = "0.8"
+opus1 = "0.3.0"
 rustfft = { version = "6.4.1", default-features = false }
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 tracing = "0.1"

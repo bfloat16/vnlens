@@ -18,6 +18,7 @@
 | --- | --- |
 | `crates/nvlens-gui` | GPUI 桌面入口、资源浏览、预览、提取调度与结果展示。 |
 | `crates/nvlens-engine` | 游戏引擎特征识别、封包定向路由和密钥参数解析。 |
+| `crates/nvlens-unpack` | PE 包装的内存解包，仅恢复静态识别需要的节数据，不执行或保存 PE。 |
 | `crates/nvlens-io` | 二进制读写、mmap 视图、日志初始化。 |
 | `crates/nvlens-core` | 资源模型、错误、格式 trait、注册与探测。 |
 | `crates/nvlens-crypto` | 压缩、加解密、哈希与校验和。 |
@@ -28,7 +29,7 @@
 
 ## 3. 模块规范
 
-以下小节依次对应第 2 节。依赖方向为界面层 → engine/域格式 → core/crypto/bin/io，engine 不依赖域格式，core 和 crypto → io；bin 仅依赖 std 与 tracing，io 不依赖内部 crate。域之间仅允许 archive 为内嵌资源调用 audio/script，禁止反向依赖和回环。GUI 遵守同一分层，核心库不依赖 GPUI。封包目录和资源处理必须持有成功识别的引擎上下文。
+以下小节依次对应第 2 节。依赖方向为界面层 → engine/域格式 → core/crypto/bin/io，engine 可依赖 unpack，但不依赖域格式；unpack → core/crypto/io，core 和 crypto → io；bin 仅依赖 std 与 tracing，io 不依赖内部 crate。域之间仅允许 archive 为内嵌资源调用 audio/script，禁止反向依赖和回环。GUI 遵守同一分层，核心库不依赖 GPUI。封包目录和资源处理必须持有成功识别的引擎上下文。
 
 ### 3.1 `crates/nvlens-gui`
 
@@ -42,6 +43,7 @@
 ### 3.2 `crates/nvlens-engine`
 
 - 每个引擎一个模块，通过 inventory 注册识别器；优先检查 PE 内的字符串和代码特征，再检查当前游戏目录结构。识别器只读取证据及必要参数，不通过解析封包内容猜测引擎。
+- PE 中的 x86 代码统一使用 iced-x86 解码，按指令、操作数和控制流识别；不得以原始机器码字节模式匹配替代。字符串、资源记录与格式签名仍按其数据格式解析。
 - 识别结果包含引擎身份、证据、支持的封包路由及所需密钥；未知、证据冲突或必要密钥未解析时停止后续资源处理，不回退尝试其它封包格式。
 - 识别结果按游戏实例共享，嵌套封包继承同一上下文。PE 地址映射留在 io，纯算法留在 crypto，大型密钥资产由 bin 加载；密钥不得出现在 Debug、日志或错误中。
 
@@ -113,7 +115,7 @@
 ### 语言特性
 
 - 库正常路径禁止 `unwrap`、`expect`、`panic!`、`unreachable!`、`todo!`，失败返回 Result；测试确需 unwrap 时局部添加 `#[allow(clippy::unwrap_used)]`。
-- 除 io 的 mmap 最小封装外使用 `#![forbid(unsafe_code)]`；每处 unsafe 前写 `// SAFETY:` 说明不变量，新增需求须说明理由并补测试。
+- 默认使用 `#![forbid(unsafe_code)]`；确需 mmap 或 SIMD 的 crate 可使用 `#![deny(unsafe_code)]`，仅在经过审查的最小封装模块内局部允许。每处 unsafe 前写 `// SAFETY:` 说明边界、对齐、别名及 CPU 特性等不变量；新增需求说明理由并补测试，SIMD 保留标量回退并验证结果一致。
 - 文件偏移和长度用 `u64`，内存索引用 `usize`，转换优先 `TryFrom`。边界计算用 `checked_*`，协议回绕用 `wrapping_*`，饱和语义用 `saturating_*`；算术右移显式使用有符号类型。
 - 优先借用与 Cow，避免无意义 clone；公共状态用 enum/newtype，类型按需实现 Debug/Clone 等 trait，重要返回值标记 `#[must_use]`，Debug 不泄露密钥。
 
