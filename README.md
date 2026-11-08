@@ -14,15 +14,18 @@ cargo build --release
 
 | 引擎 | 封包 | 音频 | 图片 | 脚本 |
 | --- | --- | --- | --- | --- |
-| YU-RIS | YPF | Ogg Vorbis、WAV | YCG、PNG | YBN |
-| WillPlus AdvHD | ARC、AR2 | Ogg Vorbis | PNG、PNA、MOS | WS2、JSON |
-| BGI / Ethornell | PackFile、ARC20 | BW、HW | BGI Bitmap、CompressedBG v1/v2 | `_bp`、BSS |
-| AGES-MK2 | FPD、DAT | FCD | — | EPK |
-| SiglusEngine | PCK、OVK、NWK、OMV、Gameexe.dat | NWA、Ogg Vorbis | G00 | SS、GAN |
-| ExHIBIT | AiFS／GRP | Ogg Vorbis、WAV | GYU、DLT | RLD、RNF／INI |
-| krkrz_hxv4 | XP3 | Ogg Vorbis、Ogg Opus | PNG、TLG5 | TJS2、TJS／KS 文本、PSB／MDF（KS.SCN） |
+| YU-RIS | `.ypf` | `.ogg`、`.wav` | `.ycg`、`.png` | `.ybn` |
+| WillPlus AdvHD | `.arc`、`.ar2` | `.ogg` | `.png`、`.pna`、`.mos` | `.ws2`、`.json` |
+| BGI / Ethornell | `.arc` | `.bw`、`.hw`、`._bw`、`.ogg`、`head("bw  ")`、`head("hw  ")` | `.bgi`、`.bg`、`._bg`、`head("CompressedBG___\0")` | `._bp`、`.bss`、`head("BurikoCompiledScriptVer1.00\0")`、`hex("10000000")` |
+| AGES-MK2 | `.fpd`、`.dat` | `.fcd`、`head("FCD\0")` | — | `.epk` |
+| SiglusEngine | `.pck`、`.ovk`、`.nwk`、`.omv`、`.dat` | `.nwa`、`.ogg` | `.g00` | `.ss`、`.gan` |
+| ExHIBIT | `.grp` | `.ogg`、`.wav` | `.gyu`、`.lvg`、`.dlt` | `.rld`、`.rnf`、`.ini` |
+| escude | `.bin` | `.ogg` | `.png` | `.c`、`.h`、`.inc`、`.txt`、`.cfg`、`.001`、`.bin`、`.lsf`、`.mot`、`.sfx` |
+| SystemNNN | `.gpk`、`.gtb`、`.vpk`、`.vtb` | `.vaw`、`.wgq` | `.dwq` | `.spt`、`.fxf`、`.xtx`、`.mml` |
+| krkr | `.xp3` | `.ogg`、`.opus` | `.png`、`.tlg`、`.tlg5`、`.tlg6` | `.tjs`、`.ks`、`.scn`、`.asd` |
+| krkrz_hxv4 | `.xp3` | `.ogg`、`.opus` | `.png`、`.tlg`、`.tlg5`、`.tlg6` | `.tjs`、`.ks`、`.scn`、`.psb`、`.m` |
 
 | 中间件 | 封包 | 音频 | 图片 | 脚本 |
 | --- | --- | --- | --- | --- |
-| E-mote / M2 | PSB、MDF | — | — | — |
-| Lua | — | — | — | Lua 5.0–5.5 字节码 |
+| E-mote / M2 | `.psb`、`.mdf`、`.m`、`.bin` | — | — | — |
+| Lua | — | — | — | `.lua`、`.luac`、`head("\x1bLua")` |

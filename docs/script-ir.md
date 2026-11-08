@@ -1,319 +1,405 @@
-# 脚本 IR：opcode 与 args
+# 脚本 IR 规范（v5）
 
-当前结构为 IR v5。所有游戏引擎从本文件列出的公共 opcode、语义细分和 args 名称中选择；源码分别使用 `Operation`、`Qualifier`、`ArgName` 封闭枚举，不能填写自定义语义字符串。相同含义使用相同名字，不以引擎前缀或原生命令拼写创建另一套名称。旧的 `Operand`、`operands`、token 单值字段和自由参数名已移除，没有兼容别名。
+所有视觉小说引擎共用统一的封闭枚举词汇表：`Operation`（操作码）、`Qualifier`（语义限定符）与 `ArgName`（参数名），不接受自定义语义字符串或引擎前缀命名。Lua 字节码作为显式原生方言使用 `Operation::Native` 与封闭枚举 `NativeArg`，复用同一指令与参数结构。
 
-Lua 按已确定的例外保留标准字节码，不映射到游戏引擎的公共 opcode；其原生字段也使用封闭的 `NativeArg`，共享下面的参数结构。
+## 0. 数据模型
 
-## 0. 统一结构
-
-| 字段 | 格式 | 功能 |
+| 字段 | 类型 / 结构 | 定义 |
 | --- | --- | --- |
-| `opcode` | `category`、`operation`、可选 `variant` | 从统一枚举选择具体操作及已验证细分 |
-| `opcode.namespace` / `code` | 原生命名空间 / 数字编号 | 与格式版本共同保留源指令身份 |
-| `opcode.native_mnemonic` | 可选原生命令名 | 来源信息；Lua 用它显示标准指令名 |
-| `args` | 有序 `Arg[]` | 普通指令、表达式 token 与嵌入命令采用同一结构 |
-| `Arg.category` / `name` | 从 `ArgName` 推导的分类 / 固定名称 | 不允许引擎自定义或直接复制原生参数名 |
-| `Arg.index` | 可选 `u64` | 重复项或未知项的原始序号；例如 `value[0]`、`unknown[2]` |
-| `Arg.value` | `{kind, value}` | 保留整数、IEEE 位、文本、原始字节、地址、表达式或参数组 |
-| `Arg.span` | 解码后资源内 `{offset, size}` | 保留原字段位置；派生注释使用零长度 |
-| `Arg.native_name` | 可选原生名称，允许空字符串 | 仅作来源信息，不改变统一名称 |
-| `attributes` | 原生数值元信息 | 保存类型标记、字段编号、模式等编码证据，不代替公共语义 |
-| `Value::Group` | 有序 `Arg[]` | 结构化复合参数；子项继续遵循同一命名与格式 |
-| `Value::Expression` | 有序 `Token[]` | token 使用同一 Opcode 和 args；保留原求值顺序与原始字节 |
-| `Section.raw` | 原始解码字节 | 保存完整内容、填充和未解释字段 |
+| `opcode` | `{category, operation, variant?}` | `Operation`（决定 `category`）与可选 `Qualifier` |
+| `opcode.namespace` / `code` | `String` / `u32` | 原生指令命名空间与数值操作码 |
+| `opcode.native_mnemonic` | `Option<String>` | 原生助记符；`Operation::Native`（Lua）用于展示标准指令名 |
+| `args` | `Vec<Arg>` | 指令、表达式 `Token` 与内嵌命令共用的有序参数列表 |
+| `Arg.category` / `name` | `Category` / `&'static str` | 由 `ArgName` 唯一推导的分类与标准参数名 |
+| `Arg.index` | `Option<u64>` | 索引化参数的原始序号（序列化为 `name[index]`，如 `value[0]`、`unknown[2]`） |
+| `Arg.value` | `Value`（`{kind, value}`） | 参数值载荷 |
+| `Arg.span` | `Span`（`{offset, size}`） | 解码后资源内的字节区间；派生字段使用 `size = 0` |
+| `Arg.native_name` | `Option<String>` | 伴随命令表中的原生参数名（含空串），仅记录来源信息 |
+| `attributes` | `Vec<Attribute>`（`{name, value: u64}`） | 原生类型标记、字段编号、模式位等编码属性 |
+| `Value::Group` | `Vec<Arg>` | 有序复合参数组，子项递归使用 `Arg` 结构 |
+| `Value::Expression` | `Vec<Token>` | 有序表达式序列；每个 `Token` 含 `opcode`、`span`、`args`、`raw` |
+| `Section.raw` | `Vec<u8>` | 节区原始解码字节（含对齐填充与未解释数据） |
 
-参数分类与指令分类独立：例如音频命令复用共用 `duration`，条件指令复用存储类 `variable_id`。已验证角色使用固定名称，未验证角色使用 `unknown` 加原始序号；不按文件扩展名、名字相似程度或参数数量猜测语义。重复项按序保留，名称重复不会覆盖内容。
-
-统一的是名称、角色和结构，不强制改写原始数值：秒与引擎时钟、整数与浮点、字节地址与指令编号不可混同。隐含栈参数保持隐含；同一原始指令不拆成假定都会执行的多条指令。`engine_call` 表示保留原生功能，不能视为已完整归一化；尚未确认的行为使用 `unknown`。
-
-| Value 名称 | 功能 |
-| --- | --- |
-| `nil` / `boolean` | 空值与布尔值 |
-| `integer` / `unsigned` | 精确保留有符号与无符号整数 |
-| `float32_bits` / `float64_bits` | 保留 IEEE 位，包括 NaN 载荷及负零 |
-| `text` / `bytes` | 已解码文本或需原样保留的字节 |
-| `code_address` / `data_address` | 解码资源内的绝对字节地址 |
-| `instruction_target` | 当前资源内的指令编号 |
-| `resource_instruction_target` | 带资源名称和符号的跨资源指令编号 |
-| `expression` / `group` | 表达式 token 列表 / 有序参数组 |
-
-每个引擎内部维护完整的原生 opcode 和参数位置映射；有伴随命令表时保留原名作为来源信息，但不把它直接当作 IR 名称。映射入口必须覆盖所有输入：未验证的 opcode 使用 `unknown`，未验证的参数使用 `unknown[index]`，保留原编号、字段值、Span 和原始字节。空字符串、重复字段和扩展字照常占位；若未知布局导致无法确认后续边界，返回明确错误，不猜测长度后跳过。
-
-新增引擎必须复用统一定义；确有新的已验证语义时先扩展枚举和相应表格，再接入格式解析器。格式与原生执行依据写入对应源码注释，不维护引擎映射 CSV。预览继续显示具体 opcode 和 args，不增加分类列。
-
-## 1. 基础运算与共用值
-
-| opcode 名称 | 功能 | 语义说明 |
+| `Value` 变体（`kind`） | 载荷类型 | 定义 |
 | --- | --- | --- |
-| `add` | 加法 | 运算类型与溢出语义属于引擎 |
-| `subtract` | 减法 | 保留原引擎操作数顺序 |
-| `multiply` | 乘法 | 运算类型与溢出语义属于引擎 |
-| `divide` | 除法 | 舍入和除零行为属于引擎 |
-| `power` | 幂运算 | 保留原生数值类型与元方法行为 |
-| `remainder` | 余数 | 余数符号规则属于引擎 |
-| `negate` | 算术取负 | 不等同于按位取反 |
-| `bit_and` | 按位与 | 不等同于逻辑与 |
-| `bit_or` | 按位或 | 不等同于逻辑或 |
-| `bit_xor` | 按位异或 | 数值宽度属于引擎 |
-| `bit_not` | 按位取反 | 不等同于逻辑非 |
-| `shift_left` | 左移 | 移位宽度及超宽移位行为属于引擎 |
-| `shift_right` | 右移 | logical 补零；arithmetic 扩展符号位 |
-| `convert` | 类型转换 | number 不预设为整数 |
-| `concatenate` | 拼接值序列 | 范围及类型转换规则由原 VM 定义 |
-| `length` | 读取值的长度 | 字符串和容器长度语义由原 VM 定义 |
+| `nil` / `boolean` | `()` / `bool` | 空值 / 布尔值 |
+| `integer` / `unsigned` | `i64` / `u64` | 有符号整数 / 无符号整数 |
+| `float32_bits` / `float64_bits` | `u32` / `u64` | IEEE 754 原始位模式（精确保留 NaN 载荷与 `-0.0`） |
+| `text` / `bytes` | `String` / `Vec<u8>` | 已解码文本 / 原始字节序列 |
+| `code_address` / `data_address` | `u64` | 当前解码资源内的代码 / 数据绝对字节偏移 |
+| `instruction_target` | `u64` | 当前资源内的目标指令序号（`Instruction.id`） |
+| `resource_instruction_target` | `{resource, instruction, symbol}` | 跨资源目标（资源名、目标指令序号、符号名） |
+| `expression` / `group` | `Vec<Token>` / `Vec<Arg>` | 表达式 `Token` 序列 / 结构化参数组 |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+### 映射准则
+
+1. **分类正交**：`ArgName.category()` 与指令的 `Operation.category()` 相互独立，指令可按语义跨分类复用 `ArgName`（如音频指令使用 `Basic` 类的 `duration`，分支指令使用 `Storage` 类的 `variable_id`）。
+2. **无损保真**：原样保留数值单位（引擎帧/时钟 vs 秒）、数值表示（整数 vs 浮点）、寻址坐标系（字节偏移 vs 指令序号）及隐式栈约定；单条原生指令不拆分为多条假定顺序执行的 IR 指令。隐式栈实参通过零长度（`size = 0`）`Expression`（`get_argument` / `get_argument_count` / `get_arguments`，`variant = stack_argument`）标明运行期取栈位置，原始压栈、类型转换与调用指令仍按原顺序保留；各参数表列出的常量类型均允许替换为运行期取栈或求值 `Expression`。
+3. **封闭完备**：已验证语义映射为具名枚举项；引擎专属机制映射为 `engine_call`；未验证操作码映射为 `unknown`，未验证参数映射为 `unknown[index]`；未知变长结构若无法确定后续指令边界则直接返回解析错误。
+4. **按需伴随解析**：纯文本脚本（如 Escu:de `.c`/`.h`/`.inc` 伪 C 源码）直接走文本解码通道，而二进制场景与结构化资源（`@code:__`、`@mess:__`、`mdb\0`、`LSF\0`、`MOT\0`/`mot\0`、`.sfx`）生成 IR。跨文件过程表与消息表（如 Escu:de `INST_PROC` 按需读取宿主 `adv/adv.c` 注册表并校验实现词法 token 指纹，消息索引按需解析同名 `.001`）仅在词法指纹与 ABI 匹配时附加零长度派生语义字段（`procedure_id`、`arguments`、`message`），动态参数序列保留符号化 `get_arguments` 而不按运行期计数预分配条目。
+
+---
+
+## 1. 基础运算与通用参数（`basic`）
+
+| `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
+| --- | --- | --- |
+| `add` | 加法 | 操作数类型与溢出语义由源 VM 定义 |
+| `subtract` | 减法 | 保持源指令的左右操作数顺序 |
+| `multiply` | 乘法 | 操作数类型与溢出语义由源 VM 定义 |
+| `divide` | 除法 | 整除/浮点与除零行为由源 VM 定义 |
+| `power` | 乘方 | 保持源数值类型与元方法语义 |
+| `remainder` | 取模 / 求余 | 余数符号规则由源 VM 定义 |
+| `negate` | 算术取负 | 一元算术求反（区别于 `bit_not`） |
+| `bit_and` | 按位与 | 位运算（区别于 `logical_and`） |
+| `bit_or` | 按位或 | 位运算（区别于 `logical_or`） |
+| `bit_xor` | 按位异或 | 位宽由源 VM 定义 |
+| `bit_not` | 按位取反 | 一元位反（区别于 `logical_not`） |
+| `shift_left` | 左移 | 位宽与超界移位语义由源 VM 定义 |
+| `shift_right` | 右移 | `variant = logical`（逻辑右移补 0）或 `arithmetic`（算术右移保符号） |
+| `convert` | 类型转换 | 目标类型由 `variant`（如 `integer`、`float32`、`float64`、`text`、`number`）标识 |
+| `concatenate` | 序列拼接 | 字符串或值序列拼接，转换规则由源 VM 定义 |
+| `type_of` | 查询值类型 | 保留源 VM 类型编号 |
+| `absolute` | 绝对值 | 数值类型及溢出语义由源 VM 定义 |
+| `minimum` / `maximum` | 最小／最大值 | 支持隐式栈上的多值参数 |
+| `random` | 生成随机值 | 范围、端点和结果类型由原调用约定决定 |
+| `pack_color` | 合并颜色通道 | 保留原通道顺序及位宽 |
+| `length` | 长度求值 | 字符串或容器长度，由源 VM 定义 |
+
+| `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| `value` | 常量或赋值右侧 | Value | 不把存储编码混入名称 |
-| `left` | 二元运算或比较的左操作数 | Value | 按原语义保留操作数顺序 |
-| `right` | 二元运算或比较的右操作数 | Value | 按原语义保留操作数顺序 |
-| `value_type` | 类型栈或值类型 | 引擎原始类型编号 | Siglus 10=整数 20=字符串；其他类型保留原值 |
-| `left_type` | 一元或二元左侧类型 | 引擎原始类型编号 | 与 operator 共同限定运算 |
-| `right_type` | 二元右侧类型 | 引擎原始类型编号 | 允许不同左右类型 |
-| `operator` | 原生运算选择器 | u8 | 共同 operation 保留在 Opcode |
-| `count` | 元素个数 | 原始整数 | 不把 count_minus_one 当实际个数 |
-| `byte_count` | 紧随的字节数量 | 字节 | BGI compact write_bytes |
-| `mode` | 原生模式字段 | 原始整数 | BGI compiled 访存的 0/非0 分别走4字节/1字节路径；compact push 的模式不同 |
-| `flags` | 控制标志 | 原始整数 | BGI compact branch 低3位选择条件且 bit3 选择立即数目标 |
-| `duration` | 动画帧时长 | 引擎计时单位 | 不擅自解释为毫秒 |
-| `value[index]` | 常量或赋值右侧 | Value | 不把存储编码混入名称 |
+| `value` | 常量值或右值 | 任意 `Value` | 单值操作数 |
+| `values` | 动态值序列 | `Group` / `Expression` | 无法静态确定长度时保留取参表达式 |
+| `minimum` / `maximum` | 数值范围边界 | 任意 `Value` | 原值或隐式栈引用 |
+| `start_time` | 起始时间 | `Integer` / `Unsigned` / `Expression` | 原格式时间单位 |
+| `enabled` | 启用状态 | 任意 `Value` | 原状态值或隐式栈引用 |
+| `value[index]` | 第 `index` 个值操作数 | 任意 `Value` | 多值序列中的按序操作数 |
+| `left` | 二元运算左操作数 | 任意 `Value` | 保持源操作数顺序 |
+| `right` | 二元运算右操作数 | 任意 `Value` | 保持源操作数顺序 |
+| `value_type` | 值类型编码 | `Integer` / `Unsigned` | 源 VM 类型编号（如 Siglus `10` = int, `20` = str） |
+| `left_type` | 左操作数类型编码 | `Integer` / `Unsigned` | 与 `operator` 共同限定一元/二元运算重载 |
+| `right_type` | 右操作数类型编码 | `Integer` / `Unsigned` | 二元运算右操作数的源 VM 类型编号 |
+| `operator` | 原生算子编号 | `Unsigned` | 源格式内部算子选择码 |
+| `count` | 元素或操作数量 | `Integer` / `Unsigned` | 保持源字段值（如 `count - 1` 编码不预加 1） |
+| `byte_count` | 字节长度 | `Integer` / `Unsigned` | 后随内联数据的字节数（如 BGI compact `write_bytes`） |
+| `mode` | 原生模式码 | `Integer` / `Unsigned` | 指令子模式（如 BGI 访存位宽选择或压栈模式） |
+| `flags` | 控制标志位 | `Integer` / `Unsigned` | 原生位域（如 BGI compact `branch` 条件与寻址位） |
+| `duration` | 持续时长 | `Integer` / `Unsigned` | 保持源引擎计时单位（帧或时钟刻度） |
 
-## 2. 栈、变量与存储
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 2. 栈、变量与存储（`storage`）
+
+| `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
 | --- | --- | --- |
-| `push` | 向求值栈压入常量或地址 | 整数存储宽度保留在源 opcode 和 Span 中 |
-| `pop` | 丢弃栈顶值 | 保留原引擎的类型栈选择 |
-| `duplicate` | 复制栈顶值或引用组 | 引用组的边界跟随复制 |
-| `declare` | 声明存储位置 | 数组长度可能由栈提供 |
-| `load` | 读取存储位置的值 | 地址可能隐含在栈上；变量 token 显式带 sigil 和 variable_id |
-| `store` | 向目标位置写入值 | 不能混淆写入顺序或检查方式；复合赋值为读取目标再运算并写回 |
-| `reference` | 构造变量引用 | 不把引用当作已读取的值 |
-| `get_stack_pointer` | 将栈指针压入求值栈 | 栈指针单位及所属栈由引擎定义 |
-| `set_stack_pointer` | 用栈顶值设置栈指针 | 不等同于单纯弹出一个普通值 |
-| `adjust_stack_pointer` | 按有符号增量调整栈指针 | BGI compact 使用栈存储区字节增量 |
-| `get_arguments` | 读取调用参数 | BGI scrctrl._bp 将 count 个栈值按调用顺序整理 |
-| `index_begin` | 开始构造索引访问 | 保留表达式 token 顺序 |
-| `index_end` | 结束索引访问 | token 值保留原始索引控制字段 |
-| `index_separator` | 分隔索引维度 | 不等同于函数参数分隔符 |
+| `push` | 压栈 | 位宽、值域与地址类别由 `variant`（`integer`、`float32`、`text`、`message`、`return_value`、`local_address`、`code_address` 等）与 `Span` 记录 |
+| `pop` | 出栈 | 按源 VM 规则弹出对应类型栈顶元素（`variant` 可取 `many`、`return_value` 等） |
+| `duplicate` | 复制栈顶元素 | 复制单值或引用元组 |
+| `declare` | 声明变量或数组 | 维度可由字面参数或求值栈提供 |
+| `load` | 读取存储单元 | 地址可隐式取自栈，或由 `sigil` + `variable_id` 显式指定 |
+| `store` | 写入存储单元 | 复合赋值通过 `variant`（`add_assign`、`bit_or_assign` 等）标识读改写语义 |
+| `reference` | 构造存储引用 | 生成左值/引用句柄，不执行解引用求值 |
+| `get_stack_pointer` | 读取栈指针并压栈 | 栈指针单位与目标栈由源 VM 定义 |
+| `set_stack_pointer` | 将栈顶值写入栈指针 | 直接覆写栈指针寄存器 |
+| `adjust_stack_pointer` | 相对调整栈指针 | 按有符号偏移增减栈指针 |
+| `enter_frame` | 建立调用栈帧 | 保存原帧基址并分配 `count` 个局部槽位 |
+| `leave_frame` | 撤销调用栈帧 | 恢复栈顶和上一帧基址，不隐含返回 |
+| `get_argument` | 读取调用实参 | `stack_argument` 指示当前调用参数序列中的 `stack_index`；无此限定时读取原 VM 的外层调用帧 |
+| `get_argument_count` | 读取调用实参数量 | `stack_argument` 指示当前过程的参数计数槽 |
+| `get_arguments` | 提取调用参数帧 | 从栈帧整理 `count` 个调用实参（如 BGI `scrctrl._bp`） |
+| `index_begin` | 索引访问起始标记 | 表达式 `Token` 流中的下标构造起点 |
+| `index_end` | 索引访问结束标记 | 表达式 `Token` 流中的下标构造终点 |
+| `index_separator` | 多维索引分隔符 | 分隔相邻下标维度 |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+| `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| `destination` | 写入目标 | Expression 或 Group 引用 | 不得合并到右侧 value |
-| `source` | 读取来源 | Value 或 Group 引用 | 不与写入目标混淆 |
-| `variable` | 变量声明目标 | Expression | 与索引 token 的 variable_id 不同 |
-| `variable_id` | 变量表编号 | Unsigned | 保留 sigil 区分变量类别 |
-| `initial_value` | 变量初始化值 | Integer 或 Float64Bits 或 Expression | 不是当前执行结果 |
-| `sigil` | 变量类别前缀 | Text | 原字符 |
-| `local_offset` | 栈局部存储区偏移 | 字节 | BGI 从当前栈指针减去偏移 |
-| `local_descriptor` | 打包的局部变量描述符 | 原始整数 | BGI compact 低14位偏移且高2位宽度标签 |
-| `data_offset` | 引用数据位置 | DataAddress 或原始偏移字段 | Value 类型和所属记录决定坐标系 |
-| `width_tag` | 原生数据宽度标签 | 0=1字节;1=2字节;2=4字节 | 只适用于文档列出的 BGI compact 访存指令 |
-| `delta` | 栈指针增量 | 有符号字节数 | BGI compact |
-| `destination_type` | 写入位置类型 | 引擎原始类型编号 | 目标路径隐含在栈组 |
-| `register` | 当前函数中的寄存器编号 | Group 内整数 | 区别于整数立即数 |
-| `upvalue` | 当前函数中的 upvalue 编号 | Group 内整数 | 区别于寄存器编号 |
-| `function_index` | 当前函数的子函数下标 | Group 内整数 | 区别于全局 function 属性 |
-| `constant_index` | 当前函数常量池下标 | Group 内整数 | 附带解析值的 Span 长度为零 |
-| `scope` | 变量作用域编码 | 整数 | 所属格式定义含义 |
-| `storage` | 变量存储类别编码 | 整数 | 不规范化原枚举值 |
-| `dimensions` | 数组维度数量 | 整数 | 随后维度项逐项保留 |
-| `initial_length` | 初始化表达式的编码长度 | 整数 | 不等同于运行时值长度 |
-| `dimension[index]` | 数组某维的长度 | 整数 | index 标明维度序号 |
+| `destination` | 写入目标 | `Expression` / `Group` / `Value` | 赋值左值或目标位置 |
+| `source` | 读取来源 | `Value` / `Group` | 读取源位置或源操作数 |
+| `variable` | 声明目标变量 | `Expression` | 变量声明指令的目标表达式 |
+| `variable_id` | 变量表编号 | `Unsigned` / `Integer` | 配合 `sigil` 唯一定位变量槽位 |
+| `initial_value` | 初始值 | `Integer` / `Float64Bits` / `Expression` | 声明或表的静态初始值 |
+| `sigil` | 变量域前缀符 | `Text` | 源格式变量前缀字符（如 `$`、`#`、`@`） |
+| `local_offset` | 局部栈帧字节偏移 | `Integer` / `Unsigned` | 相对当前栈帧基址的偏移量 |
+| `local_index` | 局部栈帧槽位偏移 | `Integer` / `Unsigned` | 相对帧基址的元素索引，区别于字节偏移 |
+| `local_descriptor` | 打包局部变量描述符 | `Unsigned` | 如 BGI compact：`bits[0..14] = offset, bits[14..16] = width_tag` |
+| `data_offset` | 数据区偏移或地址 | `DataAddress` / `Unsigned` | 解码资源内的数据偏移 |
+| `width_tag` | 数据位宽标签 | `Unsigned` | BGI compact：`0 = 1B, 1 = 2B, 2 = 4B` |
+| `delta` | 栈指针有符号增量 | `Integer` | 栈指针调整字节数 |
+| `destination_type` | 目标值类型编码 | `Integer` / `Unsigned` | 写入目标的源 VM 类型编号 |
+| `register` | 局部变量/寄存器槽号 | `Integer` / `Unsigned` | 函数局部寄存器下标 |
+| `upvalue` | 闭包上值槽号 | `Integer` / `Unsigned` | 函数 upvalue 下标 |
+| `function_index` | 子函数原型下标 | `Integer` / `Unsigned` | 当前函数原型表中的子函数索引 |
+| `constant_index` | 常量池下标 | `Integer` / `Unsigned` | 当前函数常量池索引（附带解析值使用 `size = 0`） |
+| `scope` | 作用域编码 | `Integer` / `Unsigned` | 源格式变量作用域枚举值 |
+| `storage` | 存储类别编码 | `Integer` / `Unsigned` | 源格式存储类别枚举值 |
+| `dimensions` | 数组维度数 | `Integer` / `Unsigned` | 后随 `dimension[index]` 的数量 |
+| `initial_length` | 初始值编码长度 | `Integer` / `Unsigned` | 初始化数据在源文件中的编码长度 |
+| `dimension[index]` | 第 `index` 维大小 | `Integer` / `Unsigned` | 多维数组各维长度 |
 
-## 3. 分支判断、跳转与调用
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 3. 比较、逻辑与控制流（`control_flow`）
+
+| `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
 | --- | --- | --- |
-| `equal` | 相等比较 | 比较类型属于引擎 |
-| `not_equal` | 不等比较 | 比较类型属于引擎 |
-| `less` | 小于比较 | 有符号性属于引擎 |
-| `greater` | 大于比较 | 有符号性属于引擎 |
-| `less_equal` | 小于等于比较 | 有符号性属于引擎 |
-| `greater_equal` | 大于等于比较 | 有符号性属于引擎 |
-| `logical_and` | 逻辑与 | 不声称短路求值 |
-| `logical_or` | 逻辑或 | 不声称短路求值 |
-| `logical_not` | 逻辑非 | 保留引擎真假值定义 |
-| `jump` | 无条件转移 | 目标可以是栈值或符号；不得把字节地址与指令编号混用 |
-| `branch` | 按条件转移 | 不同引擎条件编码及分支结构保留在参数中 |
-| `call` | 调用子程序 | 参数与返回值约定属于引擎；静态目标不是必需参数 |
-| `return` | 从子程序返回 | 具名返回参数保留引擎定义 |
-| `halt` | 停止当前解释执行 | 不隐含退出整个应用 |
-| `register_exception` | 注册当前异常处理上下文 | 处理目标隐含在 VM 栈上 |
-| `unregister_exception` | 移除当前异常处理上下文 | 不等同于抛出异常 |
+| `equal` | 相等比较（`==`） | 比较类型与强弱相等规则由 `variant`（如 `strict`）及源 VM 定义 |
+| `not_equal` | 不等比较（`!=`） | 比较类型由源 VM 定义 |
+| `less` | 小于比较（`<`） | 有符号/无符号语义由源 VM 定义 |
+| `greater` | 大于比较（`>`） | 有符号/无符号语义由源 VM 定义 |
+| `less_equal` | 小于等于（`<=`） | 有符号/无符号语义由源 VM 定义 |
+| `greater_equal` | 大于等于（`>=`） | 有符号/无符号语义由源 VM 定义 |
+| `logical_and` | 逻辑与 | 布尔求值（不隐含短路控制流） |
+| `logical_or` | 逻辑或 | 布尔求值（不隐含短路控制流） |
+| `logical_xor` | 逻辑异或 | 布尔真值异或（区别于 `bit_xor`） |
+| `logical_not` | 逻辑非 | 按源 VM 真值规则求反 |
+| `jump` | 无条件跳转 | 目标可为字节偏移、指令序号、标签符号或隐式栈顶值 |
+| `branch` | 条件分支 | 条件极性可由 `variant`（`zero`、`nonzero`、`error`）或 `condition` 参数指定 |
+| `call` | 子程序调用 | 调用约定、实参传递与返回值栈由源 VM 定义 |
+| `return` | 子程序返回 | 携带可选返回值或返回码 |
+| `halt` | 终止当前脚本执行流 | 停止当前解释器上下文 |
+| `show_choices` | 展示并等待选择结果 | 可更新返回值及脚本 PC；`image` 为点击图，`script_file` 为章节选择 |
+| `add_choice` | 注册选择项 | 保存文本与选择后的跳转目标；不立即展示选择界面 |
+| `register_exception` | 注册异常处理帧 | 在 VM 异常栈压入处理上下文 |
+| `unregister_exception` | 注销异常处理帧 | 弹出当前异常处理上下文 |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+| `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| `target` | 控制转移或代码地址 | CodeAddress 或符号表达式 | 隐含栈目标不伪造 |
-| `resolved_target` | 由符号表解析的目标 | InstructionTarget 或 ResourceInstructionTarget | 原始符号表达式仍保留 |
-| `condition` | 分支条件 | 表达式或原生条件选择值 | BGI compiled 的 0/非0 选择条件并非条件表达式本身 |
-| `next_branch_target` | 下一条件分支目标 | Group 内 InstructionTarget 或 CodeAddress | WS2 零值哨兵保留整数；YU-RIS descriptor 和 data_offset 原样保留 |
-| `end_target` | 分支或循环结束目标 | Group 内 InstructionTarget 或 CodeAddress | 不能直接当字节偏移 |
-| `label_id` | 原生跳转标签编号 | 整数 | Siglus 标签表下标可解析为 CodeAddress；ExHIBIT 块编号可解析为 InstructionTarget |
-| `label` | 原生标签符号 | Text / Expression | 不自动推断跨资源地址 |
-| `callee` | 调用目标或静态求值所得调用路径 | Group 引用或路径 | 派生元信息使用零长度 Span；未知分量不猜测 |
-| `argument_count` | 参数描述数量 | u32 | 不限制嵌套层数 |
-| `named_argument_count` | 命名参数数量 | u32 | 随后保存对应编号 |
-| `return_type` | 调用返回类型 | 引擎原始类型编号 | 可用于选择返回值栈 |
-| `return_code` | 原生返回码记录 | Value 或 Group | 保持其原始字段，不把它当地址 |
-| `overload` | 原生函数重载 | u32 | 不改写为函数操作码 |
-| `descriptor` | 控制转移的原始描述字 | 整数 | 保留与目标独立的打包字段 |
-| `instruction` | 指令编号目标 | InstructionTarget | 不与字节地址混用 |
-| `conditional_depth` | 条件嵌套层数 | 整数 | 格式元信息；不是解析限制 |
-| `loop_depth` | 循环嵌套层数 | 整数 | 格式元信息；不是解析限制 |
-| `argument_type[index]` | 原始顺序中的参数类型 | u32 | Siglus FFFFFFFF 后跟嵌套参数列表 |
-| `tuple_count[index]` | 嵌套参数描述数量 | u32 | 保留文件顺序 |
-| `named_argument[index]` | 命名参数原始编号 | u32 | 顺序与描述表保持一致 |
-| `component[index]` | 调用路径的一个分量 | Value | index 标明原始顺序 |
-| `choice[index]` | 选项记录 | Group | 内部 command 使用 Expression token 保存完整指令身份和参数 |
+| `target` | 跳转目标 | `CodeAddress` / `InstructionTarget` / `Expression` | 显式编码的目标地址或符号表达式 |
+| `resolved_target` | 符号表解析后的目标 | `CodeAddress` / `InstructionTarget` / `ResourceInstructionTarget` | 由标签表或跨资源符号静态解析出的目标（`size = 0`） |
+| `condition` | 分支条件或条件选择码 | `Expression` / `Integer` / `Unsigned` | 条件表达式或原生条件判别码 |
+| `next_branch_target` | 下一分支子句目标 | `InstructionTarget` / `CodeAddress` / `Integer` | 条件链的假分支目标（零值哨兵保持原整数） |
+| `end_target` | 结构块结束目标 | `InstructionTarget` / `CodeAddress` | 分支或循环结构的汇合目标 |
+| `label_id` | 标签编号 | `Integer` / `Unsigned` | 标签表索引或块编号 |
+| `label_base` | 标签基址编号 | `Integer` / `Unsigned` | 与运行时偏移相加构成实际标签编号 |
+| `choice_id` | 选项组标识 | `Integer` / `Unsigned` | 选择点状态标识 |
+| `default_choice` | 默认/超时选项编码 | `Integer` / `Unsigned` | 保持源格式编码值（含 `0` 哨兵） |
+| `heading_count` | 前导非交互标题数 | `Integer` / `Unsigned` | 选项列表中不参与选择的标题项数 |
+| `label` | 标签名称或符号 | `Text` / `Expression` | 原生标签文本或符号表达式 |
+| `callee` | 被调目标或静态路径 | `Value` / `Group` | 函数引用或由分量拼接的静态调用路径 |
+| `arguments` | 按调用约定排列的实参 | `Group` | 衍生取栈表达式不改写原始压栈指令 |
+| `stack_index` | 参数序列中的零基索引 | `Unsigned` | Escu:de 的索引 0 对应计数槽下方第一个值 |
+| `argument_count` | 位置参数数量 | `Unsigned` / `Integer` | 实参或参数描述符个数 |
+| `named_argument_count` | 命名参数数量 | `Unsigned` / `Integer` | 后随 `named_argument[index]` 的个数 |
+| `return_type` | 返回值类型编码 | `Integer` / `Unsigned` | 被调函数的返回类型编号 |
+| `return_code` | 原生返回码记录 | `Value` / `Group` | 调用点关联的返回状态描述 |
+| `overload` | 函数重载编号 | `Unsigned` / `Integer` | 同名命令的重载形态索引 |
+| `descriptor` | 控制流打包描述字 | `Integer` / `Unsigned` | 与目标地址分离的控制标志字 |
+| `instruction` | 目标指令序号 | `InstructionTarget` | 显式指令级目标引用 |
+| `conditional_depth` | 条件嵌套深度 | `Integer` / `Unsigned` | 源格式记录的静态条件层级 |
+| `loop_depth` | 循环嵌套深度 | `Integer` / `Unsigned` | 源格式记录的静态循环层级 |
+| `argument_type[index]` | 第 `index` 个参数类型码 | `Unsigned` / `Integer` | 参数类型签名序列（如 Siglus `0xFFFFFFFF` 引导嵌套元组） |
+| `tuple_count[index]` | 第 `index` 组嵌套参数数 | `Unsigned` / `Integer` | 嵌套参数列表的元素个数 |
+| `named_argument[index]` | 第 `index` 个命名参数 ID | `Unsigned` / `Integer` | 命名参数的原生属性编号 |
+| `component[index]` | 调用路径第 `index` 分量 | 任意 `Value` | 链式成员访问路径的各级分量 |
+| `choice[index]` | 第 `index` 个选项条目 | `Group` | 单个选项的文本、条件与内嵌 `command` |
+| `case[index]` | 第 `index` 个多路分支项 | `Group` | `switch` 分支的匹配值与目标地址对 |
 
-## 4. 文本
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 4. 文本（`text`）
+
+| `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
 | --- | --- | --- |
-| `show_text` | 提交脚本文本 | 不假定等待输入或换页行为 |
-| `clear_text` | 清除当前消息内容 | 保留动画与等待等原始控制参数 |
+| `show_text` | 输出显示文本 | 可由 `variant = speaker` 区分角色名；不隐含等待输入或换页 |
+| `clear_text` | 清空消息窗口文本 | 保留原生过渡与等待控制参数 |
+| `wait_text` | 等待消息继续 | 按原格式执行消息完成与翻页等待 |
+| `configure_text` | 配置消息显示状态 | 更新后续文本输出模式或窗口状态，不触发文本输出 |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+| `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| `text` | 字符串或显示文本 | Text 或 Bytes | 不可解码的合法字节保持 Bytes |
-| `text_id` | 运行时文本标识 | u32 | 不等于字符串表下标 |
-| `message` | 消息或错误消息文本 | Text / Bytes | 消息表内容，不表示执行显示 |
-| `title` | 窗口或配置标题 | Text / Bytes | 保留原始文字 |
-| `title_length` | 标题编码长度 | 整数 | 由原格式单位决定 |
+| `text` | 文本内容 | `Text` / `Bytes` | 非法或非文本字节序列无损保留为 `Bytes` |
+| `text_id` | 文本运行期标识 | `Unsigned` / `Integer` | 消息或台词流水号（不等同于字符串池下标） |
+| `message_index` | 消息表下标 | `Unsigned` / `Integer` | 当前场景对应的消息表索引 |
+| `speaker_id` | 发言者编号 | `Unsigned` / `Integer` | 角色表下标，保留无名角色等特殊编码 |
+| `message` | 提示、台词或错误消息 | `Text` / `Bytes` / `Group` | 伴随资源解析结果使用包含 `resource` 与 `text` 的零长度 `Group` |
+| `title` | 窗口或章节标题 | `Text` / `Bytes` | 标题文本内容 |
+| `title_length` | 标题编码长度 | `Integer` / `Unsigned` | 源格式记录的标题长度字段 |
 
-## 5. 音频
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 5. 音频（`audio`）
+
+| `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
 | --- | --- | --- |
-| `play_audio` | 启动音频播放 | 资源与声道定位由格式决定；原编号和参数顺序保留 |
-| `stop_audio` | 停止或淡出音频 | 等待与淡出选项由原参数决定 |
-| `set_audio_volume` | 设置或渐变音频音量 | 不将原生音量单位换算成假定的百分比 |
-| `wait_audio` | 等待音频状态完成 | ExHIBIT 等待音量渐变结束 |
-| `control_audio` | 按原生模式控制音频 | 同一 opcode 可按参数选择播放或音量控制；不拆分和伪造执行分支 |
+| `play_audio` | 播放音频 | 音频类别由 `variant`（`music`、`voice`、`ambient`、`looping`、`ambient_voice`）细分 |
+| `stop_audio` | 停止或淡出音频 | 声道、类别（`variant`）与淡出参数由 `args` 携带 |
+| `set_audio_volume` | 设置或渐变音量 | 保持源格式音量量纲，可由 `variant` 限定通道类别 |
+| `wait_audio` | 等待音频状态结束 | `variant` 取 `fade`（等待渐变完成）或 `voice`（等待语音结束）等 |
+| `control_audio` | 多模式音频控制 | 单一原生指令按模式参数分派播放/停止/调音 |
+| `configure_audio` | 预设音频控制参数 | 配置后续音频指令的默认渐变时长、音效或通道状态 |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+| `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| `channel` | 音频通道或播放实例标识 | 原生字符串或整数 | 不能据此猜测资源文件名 |
-| `volume` | 原生音量值 | 整数或浮点数 | 不统一假设为百分比或分贝 |
+| `channel` | 音频通道或槽位标识 | `Integer` / `Unsigned` / `Text` | 声道编号或通道名 |
+| `volume` | 音量值 | `Integer` / `Unsigned` / `Float32Bits` / `Float64Bits` | 保持源格式原始量纲与范围 |
 
-## 6. 视频
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 6. 视频（`video`）
+
+| `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
 | --- | --- | --- |
-| `play_video` | 启动视频播放 | 保留原生同步和图层生命周期行为 |
-| `stop_video` | 停止或退出视频播放 | 保留等待与图层处理参数 |
+| `play_video` | 播放视频 | 同步方式与图层绑定由源参数定义 |
+| `stop_video` | 停止视频 | 保留等待与图层清理参数 |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
-| --- | --- | --- | --- |
-| 复用 共用值、图像和未知参数 | 使用上表中已确认的角色 | 保留原格式值 | 未确认的参数使用 `unknown[index]`，不创建占位语义 |
+> 视频指令参数直接复用 `image`（如 `resource`、`resource_id`、`offset_x`、`offset_y`、`width`、`height`）、`basic`（如 `mode`、`flags`、`duration`）及 `unknown[index]`。
 
-## 7. 图像
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 7. 图像（`image`）
+
+| `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
 | --- | --- | --- |
-| `draw_image` | 绘制图像或图层 | 可以携带遮罩和过渡；不推断未核实的参数角色 |
+| `configure_image` | 更新图层／动画状态 | 修改资源绑定、坐标或显示属性，不隐含提交画面 |
+| `draw_image` | 绘制图像或提交图层 | 可携带遮罩、坐标与混合参数 |
+| `load_image` | 载入图像至图层/缓冲 | 仅绑定或解码资源，不等同于上屏绘制 |
+| `clear_image` | 清除图层或图像槽位 | 释放或重置指定图层状态 |
+| `set_image_region` | 设置源裁剪区或目标矩形 | 保留源坐标系与尺寸字段 |
+| `set_image_visibility` | 设置图层可见性 | 切换图层渲染开关状态 |
+| `capture_image` | 捕获当前画面至缓冲 | 帧缓冲复制操作（非外部文件导出） |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+| `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| `resource` | 关联资源名称 | Text / Bytes | 不改写资源路径 |
-| `image_frame` | 动画引用的图像帧 | i32 | GAN 原始字段编号另行保留 |
-| `frame_count` | 动画帧数量 | 整数 | 不含非帧控制记录 |
-| `offset_x` | 图像横向偏移 | 有符号整数 | 保留原坐标系 |
-| `offset_y` | 图像纵向偏移 | 有符号整数 | 保留原坐标系 |
-| `width` | 图像或配置宽度 | 整数 | 按记录上下文解释 |
-| `height` | 图像或配置高度 | 整数 | 按记录上下文解释 |
-| `opacity` | 原生不透明度 | 整数 | 像素源数据保持不变 |
+| `layer` | 图层选择器 | 任意 `Value` | 名称、位掩码或运行时表达式 |
+| `scale_x` / `scale_y` | 横向／纵向缩放值 | 任意 `Value` | 不改变原缩放单位 |
+| `rotation` | 旋转角度 | 任意 `Value` | 保留原角度单位 |
+| `priority` | 显示优先级 | 任意 `Value` | 原排序值 |
+| `resource` | 资源名称或路径 | `Text` / `Bytes` | 保持源脚本记录的字符串 |
+| `resource_id` | 资源数值编号 | `Integer` / `Unsigned` | 资源表索引或槽位 ID |
+| `image_frame` | 动画帧索引 | `Integer` | 如 Siglus GAN 引用的图元帧号 |
+| `frame_count` | 动画总帧数 | `Integer` / `Unsigned` | 帧序列包含的帧记录数 |
+| `offset_x` | 水平坐标或偏移 | `Integer` | 源坐标系 X 分量 |
+| `offset_y` | 垂直坐标或偏移 | `Integer` | 源坐标系 Y 分量 |
+| `width` | 宽度 | `Integer` / `Unsigned` | 图像、区域或视口宽度 |
+| `height` | 高度 | `Integer` / `Unsigned` | 图像、区域或视口高度 |
+| `origin_x` / `origin_y` | 原点或中心坐标 | `Integer` | 保留相对坐标系 |
+| `rect_left` / `rect_top` / `rect_right` / `rect_bottom` | 矩形边界 | `Integer` | 原始左右上下边界，不改写成宽高 |
+| `color` | 打包颜色值 | `Unsigned` / `Integer` / `Expression` | 通道顺序由原格式定义 |
+| `opacity` | 不透明度 | `Integer` / `Unsigned` | 源格式 Alpha / 不透明度值 |
+| `red` / `green` / `blue` | 颜色通道值或偏移量 | `Integer` / `Unsigned` | 保持源格式有符号增量或通道范围 |
 
-## 8. 效果
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 8. 视觉效果（`effect`）
+
+| `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
 | --- | --- | --- |
-| `fade` | 启动画面淡入淡出或透明度过渡 | 不能与音频音量渐变混用 |
-| `stop_fade` | 结束画面淡入淡出效果 | 保留等待与完成状态参数 |
-| `blur` | 应用模糊效果 | 目标与参数由原格式定义 |
-| `stop_blur` | 结束模糊效果 | 不等于恢复任意图像状态 |
-| `shake` | 启动震屏或图层震动 | 保留原生方向幅度时长等字段 |
+| `fade` | 画面/图层淡入淡出 | 视觉渐变（音频渐变归入 `audio`） |
+| `configure_effect` | 配置效果器参数 | 绑定效果类型与控制参数 |
+| `transition` | 执行画面过渡 | 按预设或内联参数执行场景切换合成 |
+| `stop_fade` | 终止淡入淡出 | 停止当前渐变过程 |
+| `blur` | 应用模糊效果 | 关联目标图层与模糊半径等参数 |
+| `stop_blur` | 移除模糊效果 | 关闭模糊滤镜状态 |
+| `flash` | 画面闪烁 | 保留颜色与次数，不混同淡入淡出 |
+| `shake` | 震屏或图层抖动 | 携带方向、振幅、周期与时长参数 |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+| `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| 复用 共用值、图像和未知参数 | 使用上表中已确认的角色 | 保留原格式值 | 未确认的参数使用 `unknown[index]`，不创建占位语义 |
+| `effect_id` | 效果器编号 | 任意 `Value` | 原效果表索引或隐式栈引用 |
+| `easing` | 插值曲线编码 | `Integer` / `Unsigned` | 原生缓动类型及方向/周期控制位 |
+| `easing_parameter` | 插值附加参数 | `Integer` / `Unsigned` | 缓动曲线拐点、周期或系数 |
 
-## 9. 引擎运行时
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 9. 引擎运行时（`runtime`）
+
+| `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
 | --- | --- | --- |
-| `engine_call` | 调用已识别的引擎专用功能 | 保留 native_mnemonic 和原参数名；未推断更具体的通用语义 |
+| `save_game` | 保存游戏状态 | 自动／手动存档及画面捕获由源调用约定决定 |
+| `engine_call` | 调用引擎专属子系统命令 | 通过 `namespace:code` 与 `native_mnemonic` 保留原生命令身份 |
+| `wait` | 阻塞等待条件或时长 | 等待时长与中断条件由源参数定义 |
+| `yield` | 让出脚本执行权 | 向宿主循环返回执行状态码 |
+| `no_op` | 空操作 | 仅用于已验证无副作用的占位指令（未知指令使用 `unknown`） |
+| `set_frame_duration` | 设置帧周期 | 配置渲染/更新循环的时间步长 |
+| `mark_seen` | 记录已读或资源解锁状态 | `variant` 取 `image`、`script_file`、`speaker` 或 `conditional` |
+| `stop_skip` | 退出快进模式 | 终止当前快进状态 |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
-| --- | --- | --- | --- |
-| 复用 调用、存储、共用值和未知参数 | 使用上表中已确认的角色 | 保留原格式值 | 未确认的参数使用 `unknown[index]`，不创建占位语义 |
+---
 
-## 10. 数据记录与源信息
+## 10. 数据记录与源信息（`data`）
 
-| opcode 名称 | 功能 | 语义说明 |
+| `operation` | 语义 | 约束与限定（`variant`） |
 | --- | --- | --- |
-| `source_location` | 记录源码位置 | 不改变执行指令位置 |
-| `record` | 声明或辅助数据表记录 | 不是可执行指令；namespace 区分表类型 |
+| `source_location` | 源码行号或文件定位标记 | 元数据伪指令，不改变执行控制流 |
+| `record` | 结构化头部、表或声明记录 | 由 `variant` 标识：`script_metadata`、`function`、`command`、`configuration`、`key_mapping`、`error_message`、`system_error`、`hash_bucket`、`image`、`layer`、`animation`、`frame`、`bytes`、`message_table`、`resource_table`、`label_table`、`constant_table`、`return_table`、`choice_table`、`command_table`、`error_table`、`script_table`、`variable_table`、`configuration_table`、`address_table`、`word_table`、`data_table`、`block_begin`、`block_end` |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+| `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| `source_file` | 源码位置的文件名 | Text 或 Bytes | 不等同于目标资源路径 |
-| `source_line` | 源码位置的行号 | 原始整数 | 不改变指令 Span |
-| `source_path` | 源码路径 | Text / Bytes | 保持原路径内容 |
-| `path` | 函数或数据对象的路径 | Text | 保留原内容 |
-| `constants` | 常量列表 | Group | 每个子项仍使用统一 Arg |
-| `data` | 内联原始字节 | Bytes | byte_count 个字节 |
-| `id` | 原生记录或元素编号 | 整数 | 记录上下文确定编号空间 |
-| `index` | 原生索引或索引控制值 | 整数 | 不视为代码地址 |
-| `name` | 符号或记录名称 | Text / Bytes | 保留大小写与原始内容 |
-| `type` | 原生类型标记 | 整数 | 保留格式定义的类型编码 |
-| `metadata` | 原生辅助元数据 | Value | 不推断运行时语义 |
-| `code` | 原生记录码 | 整数 | 与公共 opcode 区分 |
-| `command` | 嵌入命令 | Expression | 使用同一 Opcode 与 args 结构 |
-| `command_count` | 命令定义数量 | 整数 | 按表结构解释 |
-| `error_count` | 错误消息数量 | 整数 | 按表结构解释 |
-| `maximum_variable_id` | 最大变量编号 | 整数 | 原生编号上界 |
-| `return_code_count` | 返回码数量 | 整数 | 辅助表字段 |
-| `script_count` | 脚本数量 | 整数 | 辅助表字段 |
-| `script_id` | 脚本资源编号 | 整数 | 不等同于指令编号 |
-| `path_length` | 路径编码长度 | 整数 | 原格式单位 |
-| `runtime_flags` | 运行时标志 | 整数 | 保留原位定义 |
-| `label_count` | 标签数量 | 整数 | 辅助表字段 |
-| `first_label` | 散列表桶的首标签编号 | 整数 | 不能当文件偏移 |
-| `name_length` | 名称编码长度 | 整数 | 原格式单位 |
-| `name_hash` | 名称哈希值 | 整数 | 保留格式校验算法 |
-| `variable_count` | 变量数量 | 整数 | 辅助表字段 |
-| `virtual_key` | 虚拟按键编号 | 整数 | 原始键映射 |
-| `window_option` | 窗口选项 | 整数 | 保留原始选项值 |
-| `word` | 原始指令字或辅助字 | 整数 | 不赋予未验证语义 |
-| `reserved` | 保留字段 | Value | 不丢弃原值 |
-| `constant[index]` | 一个常量记录 | Value | index 标明常量序号 |
-| `reserved[index]` | 保留字段 | Value | 不丢弃原值 |
-| `source_stamp[index]` | 源文件时间或标记字段 | 整数 | 按原序号保留 |
-| `source_field[index]` | 用途尚未细分的源文件字段 | 整数 | 按原序号保留 |
-| `resource_priority[index]` | 资源优先级表原始字段 | Bytes | 保留原顺序 |
-| `option[index]` | 原生配置选项 | 整数 | 按原序号保留 |
-| `terminator[index]` | 字符串终止字段 | 整数 | AdvHD schema 独立字段及原始编号保留 |
+| `source_file` | 源文件名 | `Text` / `Bytes` | 调试信息记录的源文件名 |
+| `source_line` | 源码行号 | `Integer` / `Unsigned` | 调试信息记录的源码行号 |
+| `source_path` | 源文件路径 | `Text` / `Bytes` | 调试信息记录的完整源路径 |
+| `path` | 对象或函数层级路径 | `Text` | 如 PSB/Lua 对象路径 |
+| `constants` | 常量表 | `Group` | 聚合 `constant[index]` 子项 |
+| `messages` | 消息表描述符 | `Group` | 消息表元信息与条目集合 |
+| `resources` | 资源表描述符 | `Group` | 引用资源名列表或表头信息 |
+| `labels` | 标签表描述符 | `Group` | 标签编号与目标地址映射集合 |
+| `targets` | 跳转目标地址表 | `Group` | 包含原始偏移与 `CodeAddress` 的表项集合 |
+| `return_targets` | 调用返回点表 | `Group` | 调用指令地址与返回恢复地址映射表 |
+| `choice_targets` | 选项恢复点表 | `Group` | 选项入口地址表 |
+| `command_targets` | 宿主命令恢复点表 | `Group` | 命令返回码与恢复地址映射表 |
+| `script_call_targets` | 跨脚本调用恢复点表 | `Group` | 当前脚本内的跨脚本调用恢复地址表 |
+| `signature` | 格式魔数与头部签名 | `Bytes` | 完整保留头部签名与填充字节 |
+| `string_pool` | 字符串池 | `Group` | 聚合 `string[index]`，保留共享后缀、重复引用与原始字节 |
+| `padding` | 对齐与填充字节 | `Bytes` | 记录间非零或零填充字节 |
+| `data` | 内联原始数据块 | `Bytes` | 由 `byte_count` 指定长度的原始字节载荷 |
+| `id` | 记录或条目编号 | `Integer` / `Unsigned` | 表内条目 ID |
+| `index` | 索引或槽位序号 | `Integer` / `Unsigned` | 表项下标或控制索引 |
+| `name` | 符号或条目名称 | `Text` / `Bytes` | 原样保留大小写与编码 |
+| `type` | 原生类型标记 | `Integer` / `Unsigned` | 格式定义的数据类型码 |
+| `metadata` | 附加元数据值 | 任意 `Value` | 格式头部或表项附带的未归类元数据 |
+| `procedure_id` | 宿主过程表编号 | `Unsigned` | 独立于原指令 opcode，原生名称保留于 `native_name`，已解析过程名同时作为 `opcode.native_mnemonic` |
+| `code` | 原生记录码或表项码 | `Integer` / `Unsigned` | 数据记录内部的原生编码值 |
+| `command` | 内嵌命令表达式 | `Expression` | 嵌套在记录或选项中的命令 `Token` |
+| `command_count` | 命令定义总数 | `Integer` / `Unsigned` | 命令表条目数 |
+| `error_count` | 错误定义总数 | `Integer` / `Unsigned` | 错误表条目数 |
+| `maximum_variable_id` | 变量编号上界 | `Integer` / `Unsigned` | 头部声明的最大变量 ID |
+| `return_code_count` | 返回码总数 | `Integer` / `Unsigned` | 返回码表条目数 |
+| `script_count` | 脚本总数 | `Integer` / `Unsigned` | 脚本表条目数 |
+| `script_id` | 脚本编号 | `Integer` / `Unsigned` | 脚本表内的资源编号 |
+| `path_length` | 路径编码长度 | `Integer` / `Unsigned` | 路径字段长度 |
+| `runtime_flags` | 运行时标志字 | `Integer` / `Unsigned` | 头部或记录中的运行时位标志 |
+| `label_count` | 标签总数 | `Integer` / `Unsigned` | 标签表条目数 |
+| `first_label` | 哈希桶首标签编号 | `Integer` / `Unsigned` | 散列桶链表头部的标签索引 |
+| `name_length` | 名称编码长度 | `Integer` / `Unsigned` | 名称字段长度 |
+| `name_hash` | 名称哈希值 | `Integer` / `Unsigned` | 源格式记录的符号哈希值 |
+| `variable_count` | 变量总数 | `Integer` / `Unsigned` | 变量表条目数 |
+| `virtual_key` | 虚拟键码 | `Integer` / `Unsigned` | 键位映射记录的键码值 |
+| `window_option` | 窗口配置项 | `Integer` / `Unsigned` | 窗口属性配置值 |
+| `word` | 原始字数据 | `Integer` / `Unsigned` | 扩展字或字表元素值 |
+| `version` | 格式版本或修订号 | `Unsigned` / `Integer` | 文件内显式版本字段 |
+| `state` | 对象状态编码 | `Unsigned` / `Integer` | 原始状态枚举 |
+| `rows` / `frames` | 数据行／帧记录集合 | `Group` | 按原始序号保留 |
+| `row[index]` / `column[index]` | 表格行／列值 | 任意 `Value` | 原生名称保留于 `native_name`，不将其用作统一参数名 |
+| `reserved` | 保留字段 | 任意 `Value` | 格式保留字 |
+| `constant[index]` | 第 `index` 个常量项 | 任意 `Value` | 常量表元素 |
+| `string[index]` | 第 `index` 个字符串项 | `Group` | 含偏移、文本、终止符等字段的字符串池条目 |
+| `reserved[index]` | 第 `index` 个保留字段 | 任意 `Value` | 多项保留字序列 |
+| `source_stamp[index]` | 第 `index` 个源文件时间戳/校验字 | `Integer` / `Unsigned` | 源文件头部标记序列 |
+| `source_field[index]` | 第 `index` 个源文件头字段 | `Integer` / `Unsigned` | 源文件头部未细分整数字段 |
+| `resource_priority[index]` | 第 `index` 个资源优先级项 | `Bytes` | 资源优先级原始记录 |
+| `option[index]` | 第 `index` 个配置选项 | `Integer` / `Unsigned` | 配置表整数字段序列 |
+| `terminator[index]` | 第 `index` 个终止符字段 | `Integer` / `Unsigned` | 独立存储的字符串终止字节（如 AdvHD WS2 schema） |
 
-## 11. 未知语义
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 11. 未知语义（`unknown`）
+
+| `operation` | 语义 | 约束与限定 |
 | --- | --- | --- |
-| `unknown` | 语义尚未确认的原始指令 | 保留边界及数据；不得按空操作执行 |
+| `unknown` | 语义未验证的原生指令 | 保留完整指令边界、`namespace:code`、`Span` 与原始参数 |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+| `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| `unknown[index]` | 语义尚未确认的参数 | Value | index 必须保留原参数位置或编号 |
+| `unknown[index]` | 第 `index` 个语义未验证参数 | 任意 `Value` | `index` 严格对应原参数序号或原生字段编号 |
 
-## 12. Lua 原生字节码
+---
 
-| opcode 名称 | 功能 | 语义说明 |
+## 12. 原生字节码方言（`native` — Lua）
+
+| `operation` | 语义 | 约束与限定 |
 | --- | --- | --- |
-| `native` | 保留原生字节码指令集 | Lua 专用原生模式；真实名称在 native_mnemonic；不参与公共语义映射 |
+| `native` | 原生指令集透传模式 | 当前专用于 Lua 5.0–5.5；指令名存于 `opcode.native_mnemonic`（如 `MOVE`、`LOADK`、`IDIV`、`TAILCALL`、`CLOSE`，未知操作码格式为 `OP_<HEX>`） |
 
-| args 名称 | 功能 | 值与单位 | 说明 |
+| `ArgName`（`NativeArg`） | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
-| `A`、`B`、`C`、`k`、`vB`、`vC`、`sJ`、`Ax`、`Bx`、`sBx`、`sB`、`sC` | Lua 5.0–5.5 原生字段 | 按版本解释的整数或引用 | `NativeArg` 明确选择；不会改成公共语义名称 |
-
-Lua 的 `native_mnemonic` 保留 `MOVE`、`LOADK`、`IDIV`、`TAILCALL`、`CLOSE` 等标准名称；未知编号显示 `OP_<hex>`。辅助字保留顺序，`EXTRAARG` 与闭包捕获 `MOVE`/`GETUPVAL` 保持原生名称，无 opcode 的 SETLIST 扩展字显示 `.word`。函数描述记录使用 `record/function`，不代表对 Lua 指令进行语义映射。
+| `A`, `B`, `C`, `k`, `vB`, `vC`, `sJ`, `Ax`, `Bx`, `sBx`, `sB`, `sC` | Lua 5.0–5.5 指令位域操作数 | `Integer` / `Unsigned` / `Group` | 按对应 Lua 版本的指令格式解码；关联常量、寄存器、upvalue、子函数或跳转目标封装于 `Group`；`EXTRAARG`、闭包伪指令与无 opcode 扩展字（`.word`）均按原始顺序保留，函数原型头使用 `record`（`variant = function`） |
