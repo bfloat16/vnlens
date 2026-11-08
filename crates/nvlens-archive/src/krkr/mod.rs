@@ -1,8 +1,9 @@
 //! KiriKiri XP3. XP3Archive.cpp uses LE chunk lengths and segment
 //! descriptors; Hxv4 adds an out-of-line tag-prefix XChaCha20-Poly1305 table.
-//! Mounting reads only both indices. Entry segments are inflated then filtered
+//! Mounting reads only the standard and optional Hxv4 indices. Entry segments are inflated then filtered
 //! at their logical offsets and checked against the plaintext Adler-32.
 mod names;
+mod read;
 mod special;
 pub use names::{NameProgress, NameRecovery};
 use nvlens_core::{
@@ -94,6 +95,7 @@ struct Xp3Archive {
     records: Vec<Record>,
     names: BTreeMap<String, usize>,
     filter: Option<Filter>,
+    xor31: bool,
 }
 impl ArchiveFormat for Xp3 {
     fn open(&self, view: &Arc<ArcView>, options: &ArchiveOptions) -> Result<Box<dyn Archive>> {
@@ -111,6 +113,15 @@ impl Xp3Archive {
             0 => false,
             1 => true,
             _ => return Err(Error::Unsupported("XP3 Hxv4 option".into())),
+        };
+        let xor31 = match options.numbers.get("xp3_xor31").copied().unwrap_or(0) {
+            0 => false,
+            1 if !use_hxv4 => true,
+            _ => {
+                return Err(Error::Unsupported(
+                    "Conflicting or invalid XP3 filter options".into(),
+                ));
+            }
         };
         let filter = if use_hxv4 {
             let nonce = fixed::<24>(key(options, "hxv4_nonce0")?)?;
@@ -222,11 +233,15 @@ impl Xp3Archive {
             // the authenticated id-zero record names the virtual startup instead.
             if record.flags & 0x8000_0000 != 0
                 && record.filter.is_none()
+                && !xor31
                 && !(has_hxv4 && record.name.eq_ignore_ascii_case("startup.tjs"))
             {
                 return Err(Error::UnknownScheme(Some(
                     "XP3 entry encryption was not resolved by the selected engine".into(),
                 )));
+            }
+            if xor31 && record.flags & 0x8000_0000 != 0 && record.adler.is_none() {
+                return Err(corrupt(position, "XP3 hash filter requires an adlr record"));
             }
             let mut size = 0u64;
             let mut stored = 0u64;
@@ -289,6 +304,7 @@ impl Xp3Archive {
             records: selected,
             names,
             filter,
+            xor31,
         })
     }
 }
@@ -384,6 +400,7 @@ impl Archive for Xp3Archive {
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         let record = self.record(entry)?;
         if record.filter.is_none()
+            && !(self.xor31 && record.flags & 0x8000_0000 != 0)
             && let [s] = record.segments.as_slice()
             && !s.compressed
         {
@@ -854,6 +871,112 @@ mod tests {
         assert!(matches!(
             NameRecovery::open(&[], &AtomicBool::new(true)),
             Err(Error::Cancelled)
+        ));
+        Ok(())
+    }
+    #[test]
+    fn xor31_segments_plain_entries_and_bad_payloads_remain_lazy() -> Result<()> {
+        let plain: Vec<u8> = (0..251).cycle().take(70001).collect();
+        let hash = adler32::checksum(&plain);
+        let mut cipher = plain.clone();
+        nvlens_crypto::cipher::xp3::xor31(hash, 0, &mut cipher);
+        let mut bytes = MAGIC.to_vec();
+        u64v(&mut bytes, 0);
+        let mut segments = Vec::new();
+        let mut raw = Vec::new();
+        for (part, compressed) in [
+            (&cipher[..7], false),
+            (&cipher[7..37], false),
+            (&cipher[37..], true),
+        ] {
+            let data = if compressed {
+                zip(part)?
+            } else {
+                part.to_vec()
+            };
+            segments.push((
+                u32::from(compressed),
+                bytes.len() as u64,
+                part.len() as u64,
+                data.len() as u64,
+            ));
+            bytes.extend(&data);
+            raw.extend(data);
+        }
+        let mut index = record(
+            "folder/日本語.bin",
+            0x80000000,
+            plain.len() as u64,
+            &segments,
+            hash,
+        );
+        let offset = bytes.len() as u64;
+        bytes.extend(b"plain");
+        index.extend(record(
+            "plain.txt",
+            0,
+            5,
+            &[(0, offset, 5, 5)],
+            adler32::checksum(b"plain"),
+        ));
+        let offset = bytes.len() as u64;
+        bytes.extend([0, 1, 2]);
+        index.extend(record("bad.bin", 0x80000000, 8, &[(1, offset, 8, 3)], 1));
+        index.extend(record(
+            "wrong_checksum.bin",
+            0x80000000,
+            plain.len() as u64,
+            &segments,
+            hash ^ 1,
+        ));
+        let index_at = bytes.len();
+        bytes.push(0);
+        u64v(&mut bytes, index.len() as u64);
+        bytes.extend(index);
+        BinaryWriter::u64_le(index_at as u64, &mut bytes[11..]);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| Error::Unsupported(e.to_string()))?
+            .as_nanos();
+        let sample = Sample {
+            path: std::env::temp_dir()
+                .join(format!("nvlens-xor31-{}-{stamp}.xp3", std::process::id())),
+            bytes,
+            special: 0,
+            index: index_at,
+        };
+        fs::write(&sample.path, &sample.bytes)?;
+        let view = Arc::new(ArcView::open(&sample.path)?);
+        assert!(matches!(
+            Xp3.open(&view, &ArchiveOptions::default()),
+            Err(Error::UnknownScheme(_))
+        ));
+        let mut options = ArchiveOptions::default();
+        options.numbers.insert("xp3_xor31", 1);
+        let archive = Xp3Archive::open(&view, &options)?;
+        assert_eq!(archive.entries.len(), 4);
+        assert_eq!(&*archive.open_entry(&archive.entries[0])?, &plain);
+        assert_eq!(&*archive.open_entry_raw(&archive.entries[0])?, &raw);
+        assert!(matches!(
+            archive.open_entry(&archive.entries[1])?,
+            Cow::Borrowed(b"plain")
+        ));
+        assert!(archive.open_entry(&archive.entries[2]).is_err());
+        assert!(matches!(
+            archive.open_entry(&archive.entries[3]),
+            Err(Error::Corrupt { .. })
+        ));
+        assert!(matches!(
+            archive.read_cancellable(
+                &archive.entries[0],
+                &std::sync::atomic::AtomicBool::new(true)
+            ),
+            Err(Error::Cancelled)
+        ));
+        options.numbers.insert("hxv4", 1);
+        assert!(matches!(
+            Xp3.open(&view, &options),
+            Err(Error::Unsupported(_))
         ));
         Ok(())
     }

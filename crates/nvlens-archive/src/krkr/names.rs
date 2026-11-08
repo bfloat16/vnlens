@@ -298,51 +298,8 @@ impl Xp3Archive {
             } else {
                 part.extend_from_slice(&raw[..count]);
             }
-            if let (Some((key, flag)), Some(filter)) = (record.filter, &self.filter) {
-                filter.apply_entry(key, flag, out.len() as u64, &mut part);
-            }
+            self.apply_filter(record, out.len() as u64, &mut part);
             out.extend(part);
-        }
-        Ok(out)
-    }
-    pub(super) fn read_cancellable(&self, entry: &Entry, cancel: &AtomicBool) -> Result<Vec<u8>> {
-        let record = self.record(entry)?;
-        let mut out = Vec::new();
-        for segment in &record.segments {
-            let raw = self.view.slice(segment.offset, segment.stored)?;
-            let mut reader: Box<dyn Read + '_> = if segment.compressed {
-                Box::new(zlib::decoder(raw))
-            } else {
-                Box::new(raw)
-            };
-            let start = out.len();
-            let mut block = [0; 65536];
-            loop {
-                check(cancel)?;
-                let read = reader.read(&mut block)?;
-                if read == 0 {
-                    break;
-                }
-                if (out.len() - start) as u64 + read as u64 > segment.size {
-                    return Err(corrupt(segment.offset, "XP3 decoded segment exceeds size"));
-                }
-                if let (Some((key, flag)), Some(filter)) = (record.filter, &self.filter) {
-                    filter.apply_entry(key, flag, out.len() as u64, &mut block[..read]);
-                }
-                out.extend_from_slice(&block[..read]);
-            }
-            if (out.len() - start) as u64 != segment.size {
-                return Err(corrupt(
-                    segment.offset,
-                    "XP3 decoded segment length mismatch",
-                ));
-            }
-        }
-        if record
-            .adler
-            .is_some_and(|sum| adler32::checksum(&out) != sum)
-        {
-            return Err(corrupt(entry.offset, "XP3 plaintext checksum mismatch"));
         }
         Ok(out)
     }
