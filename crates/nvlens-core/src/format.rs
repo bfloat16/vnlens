@@ -61,12 +61,21 @@ pub trait Archive: Send {
     fn virtual_paths(&self) -> Result<Vec<(usize, String)>> {
         Ok(Vec::new())
     }
+    /// Reads a named dependency outside this archive using engine-resolved
+    /// locations. This is called only after the host's local lookup misses.
+    fn read_companion(&self, _name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 }
 
 /// Resolves a format's named companion resource on demand.
 /// Implementations must not preload unrelated entries during construction.
 pub trait ResourceResolver {
     fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>>;
+    /// Original name of the resource being decoded, when known by the host.
+    fn resource_name(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A registration record for an archive format. Each implementation submits one

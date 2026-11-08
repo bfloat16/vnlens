@@ -43,10 +43,10 @@ impl ResourceKind {
         let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         match ext.as_str() {
             "png" | "pna" | "bmp" | "jpg" | "jpeg" | "tga" | "psb" | "psd" | "wip" | "g00"
-            | "gyu" | "dlt" | "mos" => Self::Image,
-            "ogg" | "wav" | "mp3" | "flac" | "nwa" => Self::Audio,
+            | "gyu" | "dlt" | "mos" | "dwq" => Self::Image,
+            "ogg" | "wav" | "mp3" | "flac" | "nwa" | "vaw" | "wgq" => Self::Audio,
             "json" | "scr" | "txt" | "ini" | "ss" | "gan" | "tjs" | "ks" | "scn" | "rld"
-            | "rnf" | "ws2" | "lua" | "luac" => Self::Script,
+            | "rnf" | "ws2" | "lua" | "luac" | "spt" | "xtx" | "fxf" | "mml" => Self::Script,
             "mpg" | "mp4" | "wmv" | "avi" | "omv" | "ogv" => Self::Video,
             _ => Self::Unknown,
         }

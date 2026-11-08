@@ -26,6 +26,8 @@ impl std::fmt::Debug for Secret {
 pub struct ArchiveOptions {
     pub keys: BTreeMap<&'static str, Secret>,
     pub numbers: BTreeMap<&'static str, u64>,
+    /// Engine-resolved companion locations, opened only on resource requests.
+    pub paths: BTreeMap<&'static str, std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
