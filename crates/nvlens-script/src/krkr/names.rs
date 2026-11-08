@@ -414,6 +414,17 @@ mod tests {
             crate::decode_text_as("script/krkr", &mdf)?,
             Some(json.clone())
         );
+        for data in [&plain, &mdf] {
+            let Some(crate::ScriptContent::Psb(psb)) =
+                crate::decode_content_as("script/krkr", data)?
+            else {
+                return Err(Error::InvalidFormat);
+            };
+            assert_eq!(psb.to_json()?, json);
+            assert_eq!(psb.root.to_json()?, json);
+        }
+        assert!(crate::decode_content_as("script/krkr", b"unrecognized")?.is_none());
+        assert!(crate::decode_content_as("missing/script", &plain).is_err());
         let tree: serde_json::Value =
             serde_json::from_str(&json).map_err(|e| Error::Unsupported(e.to_string()))?;
         assert_eq!(tree["voice"], "scene_001");
@@ -427,6 +438,7 @@ mod tests {
         let mut broken = mdf.clone();
         let end = broken.len() - 1;
         broken[end] ^= 1;
+        assert!(crate::decode_content_as("script/krkr", &broken).is_err());
         assert!(name_candidates(&broken, "scene.scn", &cancel).is_err());
         assert!(matches!(
             name_candidates(&mdf, "scene.scn", &AtomicBool::new(true)),

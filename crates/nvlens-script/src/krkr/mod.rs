@@ -1,10 +1,10 @@
 //! KiriKiri TJS2 bytecode, FE FE text wrappers and PSB/MDF scenario trees.
-//! Bytecode uses the common IR; structured scenarios are presented as JSON.
+//! Bytecode uses the common IR; structured scenarios retain their PSB trees.
 mod bytecode;
 mod names;
 mod opcode;
 mod text;
-use crate::{ScriptFormat, ScriptRegistration, ir::Script};
+use crate::{ScriptContent, ScriptFormat, ScriptRegistration, ir::Script};
 pub use names::name_candidates;
 use nvlens_core::{Format, ResourceResolver, Result};
 #[derive(Debug, Default)]
@@ -33,14 +33,22 @@ impl ScriptFormat for Tjs {
         bytecode::parse(data).map(Some)
     }
     fn decode_text(&self, data: &[u8]) -> Result<Option<String>> {
+        self.decode_content(data)?
+            .map(|content| match content {
+                ScriptContent::Text(text) => Ok(text),
+                ScriptContent::Psb(psb) => psb.to_json(),
+            })
+            .transpose()
+    }
+    fn decode_content(&self, data: &[u8]) -> Result<Option<ScriptContent>> {
         let decoded = crate::mdf::is_mdf(data)
             .then(|| crate::mdf::decode(data, None))
             .transpose()?;
         let data = decoded.as_deref().unwrap_or(data);
         if data.starts_with(b"PSB\0") {
-            return crate::psb::parse_source(&data, None)?.to_json().map(Some);
+            return crate::psb::parse_source(&data, None).map(|psb| Some(ScriptContent::Psb(psb)));
         }
-        text::decode(data)
+        text::decode(data).map(|text| text.map(ScriptContent::Text))
     }
 }
 nvlens_core::inventory::submit! {ScriptRegistration(||Box::new(Tjs))}

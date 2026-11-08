@@ -17,6 +17,17 @@ impl Opcode {
     }
 }
 
+impl Value {
+    /// Formats a single IR value with the same syntax as instruction args.
+    /// Structured values retain their order and encoded values are not clipped.
+    #[must_use]
+    pub fn disassembly(&self) -> String {
+        let mut text = String::new();
+        render_value(self, &mut text);
+        text
+    }
+}
+
 impl Instruction {
     #[must_use]
     pub fn disassembly(&self) -> String {

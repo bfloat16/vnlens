@@ -18,5 +18,11 @@ define_operations! {
         Convert => "convert",
         Concatenate => "concatenate",
         Length => "length",
+        TypeOf => "type_of",
+        Absolute => "absolute",
+        Minimum => "minimum",
+        Maximum => "maximum",
+        Random => "random",
+        PackColor => "pack_color",
     }
 }

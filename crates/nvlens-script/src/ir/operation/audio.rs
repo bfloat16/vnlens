@@ -7,5 +7,6 @@ define_operations! {
         SetVolume => "set_audio_volume",
         Wait => "wait_audio",
         Control => "control_audio",
+        Configure => "configure_audio",
     }
 }

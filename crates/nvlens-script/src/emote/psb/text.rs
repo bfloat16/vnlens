@@ -7,6 +7,14 @@ impl Psb {
     /// Presents the parsed object tree as JSON without recursive traversal or
     /// copying resource bodies. Non-finite floats retain their original bits.
     pub fn to_json(&self) -> Result<String> {
+        self.root.to_json()
+    }
+}
+
+impl PsbValue {
+    /// Presents this value and its descendants as JSON, preserving the same
+    /// resource references and IEEE bit annotations as a whole PSB export.
+    pub fn to_json(&self) -> Result<String> {
         enum Pending<'a> {
             Value(&'a PsbValue, usize),
             Key(&'a str),
@@ -14,7 +22,7 @@ impl Psb {
             Indent(usize),
         }
         let mut output = String::new();
-        let mut pending = vec![Pending::Value(&self.root, 0)];
+        let mut pending = vec![Pending::Value(self, 0)];
         while let Some(item) = pending.pop() {
             match item {
                 Pending::Text(text) => output.push_str(text),

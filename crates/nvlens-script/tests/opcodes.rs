@@ -712,3 +712,54 @@ fn unknown_opcodes_and_all_argument_slots_survive_without_shifting_the_next_inst
     assert_eq!(exhibit.instructions[1].span.offset, next as u64);
     Ok(())
 }
+
+#[test]
+fn systemnnn_exports_shared_store_and_audio_semantics_with_lossless_native_identity() -> Result<()>
+{
+    use nvlens_script::ir::{AudioOperation, Qualifier};
+    let mut bytes = vec![0; 76];
+    BinaryWriter::u32_le(19, &mut bytes);
+    BinaryWriter::u32_le(0x66660001, &mut bytes[4..]);
+    BinaryWriter::u32_le(0x55550001, &mut bytes[8..]);
+    bytes[48..58].copy_from_slice(b"SPTHEADER0");
+    for value in [
+        8, 0x66660005, 0, 0xa0000000, 3, 0x80000007, 0x90000002, 0xa200002b, 6, 0x66660007,
+        0x33330068, 2, 1, 0xfffffffb, 5, 0x6666ffff, 0xabcdef, 11, 22,
+    ] {
+        word(&mut bytes, value);
+    }
+    let script = parse("spt/systemnnn", &bytes, None)?;
+    assert_eq!(
+        script.instructions[1].opcode.operation,
+        Operation::Storage(StorageOperation::Store)
+    );
+    assert_eq!(
+        script.instructions[1].opcode.variant,
+        Some(Qualifier::AddAssign)
+    );
+    assert_eq!(
+        script.instructions[2].opcode.operation,
+        Operation::Audio(AudioOperation::SetVolume)
+    );
+    assert_eq!(script.instructions[2].args[1].name, ArgName::Channel);
+    assert_eq!(script.instructions[2].args[2].name, ArgName::Volume);
+    assert!(matches!(
+        script.instructions[2].args[2].value,
+        Value::Integer(-5)
+    ));
+    assert_eq!(script.instructions[3].opcode.operation, Operation::Unknown);
+    assert_eq!(script.instructions[3].args[1].name, ArgName::Unknown(1));
+    let exported: serde_json::Value = serde_json::from_slice(&script.to_json()?)
+        .map_err(|error| nvlens_core::Error::Unsupported(error.to_string()))?;
+    let store = &exported["instructions"][1];
+    assert_eq!(store["opcode"]["category"], "storage");
+    assert_eq!(store["opcode"]["operation"], "store");
+    assert_eq!(store["opcode"]["variant"], "add_assign");
+    assert_eq!(store["opcode"]["namespace"], "systemnnn/66660005");
+    let token = &store["args"][0]["value"]["value"][0];
+    assert_eq!(token["opcode"]["operation"], "reference");
+    assert_eq!(token["args"][0]["name"], "variable_id");
+    assert!(token.get("value").is_none());
+    assert_eq!(exported["instructions"][2]["args"][2]["category"], "audio");
+    Ok(())
+}
