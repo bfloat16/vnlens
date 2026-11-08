@@ -11,14 +11,16 @@ use std::sync::{
 pub struct Resource {
     pub bytes: Arc<[u8]>,
     pub script: Option<nvlens_script::ir::Script>,
+    pub psb: Option<nvlens_script::psb::Psb>,
     pub image: Option<nvlens_image::Image>,
     pub audio: bool,
 }
 
-struct Resources<'a>(&'a dyn Archive, &'a [String]);
+struct Resources<'a>(&'a dyn Archive, &'a [String], &'a str);
 impl ResourceResolver for Resources<'_> {
     fn read_resource(&self, name: &str) -> nvlens_core::Result<Option<Vec<u8>>> {
-        self.0
+        let local = self
+            .0
             .entries()
             .iter()
             .enumerate()
@@ -30,12 +32,23 @@ impl ResourceResolver for Resources<'_> {
                         .is_some_and(|path| path.replace('\\', "/").eq_ignore_ascii_case(name))
             })
             .map(|(_, entry)| self.0.open_entry(entry).map(|data| data.into_owned()))
-            .transpose()
+            .transpose()?;
+        if local.is_some() {
+            Ok(local)
+        } else {
+            self.0.read_companion(name)
+        }
+    }
+    fn resource_name(&self) -> Option<&str> {
+        Some(self.2)
     }
 }
 
 struct FileResources<'a>(&'a std::path::Path);
 impl ResourceResolver for FileResources<'_> {
+    fn resource_name(&self) -> Option<&str> {
+        self.0.file_name()?.to_str()
+    }
     fn read_resource(&self, name: &str) -> nvlens_core::Result<Option<Vec<u8>>> {
         let relative = std::path::PathBuf::from(name.replace('\\', "/"));
         if !relative
@@ -71,6 +84,7 @@ pub fn read(target: &Target, raw: bool, cancel: &AtomicBool) -> Result<Resource>
     let mut resource = Resource {
         bytes: bytes.into(),
         script: None,
+        psb: None,
         image: None,
         audio: false,
     };
@@ -89,7 +103,7 @@ pub fn read(target: &Target, raw: bool, cancel: &AtomicBool) -> Result<Resource>
         Target::File(_, game) => game.script_format_for(&target.name()),
         _ => None,
     };
-    if let Target::Entry { archive, .. } = target
+    if let Target::Entry { archive, index } = target
         && let Some(tag) = script_tag
     {
         let opened = archive
@@ -99,7 +113,11 @@ pub fn read(target: &Target, raw: bool, cancel: &AtomicBool) -> Result<Resource>
         resource.script = nvlens_script::disassemble_with_options_as(
             tag,
             &resource.bytes,
-            Some(&Resources(&*opened.archive, &archive.paths)),
+            Some(&Resources(
+                &*opened.archive,
+                &archive.paths,
+                &archive.paths[*index],
+            )),
             archive.game.resource_options(),
         )?;
     } else if let Target::File(path, game) = target
@@ -114,9 +132,14 @@ pub fn read(target: &Target, raw: bool, cancel: &AtomicBool) -> Result<Resource>
     }
     if resource.script.is_none() {
         if let Some(tag) = script_tag
-            && let Some(text) = nvlens_script::decode_text_as(tag, &resource.bytes)?
+            && let Some(content) = nvlens_script::decode_content_as(tag, &resource.bytes)?
         {
-            resource.bytes = text.into_bytes().into();
+            match content {
+                nvlens_script::ScriptContent::Text(text) => {
+                    resource.bytes = text.into_bytes().into();
+                }
+                nvlens_script::ScriptContent::Psb(psb) => resource.psb = Some(psb),
+            }
             return Ok(resource);
         }
         if let Some(image) = nvlens_image::decode(&resource.bytes)? {

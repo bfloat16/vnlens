@@ -88,7 +88,10 @@ impl Target {
     pub fn archive_hint(&self) -> bool {
         match self {
             Self::File(path, game) => game.route_path(path).is_some(),
-            Self::Entry { archive, index } => archive.game.route(&archive.paths[*index]).is_some(),
+            Self::Entry { archive, index } => {
+                archive.entries[*index].kind != ResourceKind::Script
+                    && archive.game.route(&archive.paths[*index]).is_some()
+            }
             _ => false,
         }
     }
@@ -275,7 +278,7 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
             )
         }
         Target::Entry { archive, index } => {
-            if archive.game.route(&archive.paths[*index]).is_none() {
+            if !target.archive_hint() {
                 return Ok(None);
             }
             let bytes = target.read(false, cancel)?;

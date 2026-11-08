@@ -129,6 +129,7 @@ struct Preview {
     image_frames: usize,
     image_frame: usize,
     script: Option<Arc<nvlens_script::ir::Script>>,
+    psb: Option<Arc<nvlens_script::psb::Psb>>,
     ir_table: Option<script_view::Table>,
     audio: Option<audio_view::AudioPreview>,
 }
@@ -140,7 +141,10 @@ impl Preview {
         }
         let bytes = resource.bytes;
         let mut widest_line = 0;
-        let lines = (resource.script.is_none() && resource.image.is_none() && !resource.audio)
+        let lines = (resource.script.is_none()
+            && resource.psb.is_none()
+            && resource.image.is_none()
+            && !resource.audio)
             .then(|| {
                 std::str::from_utf8(&bytes)
                     .ok()
@@ -184,11 +188,13 @@ impl Preview {
             .image
             .map(|image| Self::render_image(image, None))
             .transpose()?;
-        let ir_table = resource
-            .script
-            .as_ref()
-            .map(|script| script_view::Table::new(script, cancelled))
-            .transpose()?;
+        let ir_table = if let Some(script) = &resource.script {
+            Some(script_view::Table::new(script, cancelled)?)
+        } else if let Some(psb) = &resource.psb {
+            Some(script_view::Table::from_psb(psb, cancelled)?)
+        } else {
+            None
+        };
         let audio = resource
             .audio
             .then(|| audio_view::AudioPreview::new(&bytes, cancelled))
@@ -201,6 +207,7 @@ impl Preview {
             image_frames,
             image_frame: 0,
             script: resource.script.map(Arc::new),
+            psb: resource.psb.map(Arc::new),
             ir_table,
             audio,
         })
@@ -753,18 +760,19 @@ impl Workspace {
     }
 
     fn copy_instruction(&mut self, _: &CopyInstruction, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(instruction) = self
-            .preview
-            .as_ref()
-            .and_then(|preview| preview.script.as_ref())
-            .and_then(|script| {
-                self.ir_selected
-                    .and_then(|index| script.instructions.get(index))
-            })
-        else {
+        let Some(json) = self.preview.as_ref().and_then(|preview| {
+            let row = self.ir_selected?;
+            let table = preview.ir_table.as_ref()?;
+            if let Some(psb) = &preview.psb {
+                table.psb_json(row, psb)
+            } else {
+                let index = table.instruction_index(row)?;
+                Some(preview.script.as_ref()?.instructions.get(index)?.to_json())
+            }
+        }) else {
             return;
         };
-        match instruction.to_json() {
+        match json {
             Ok(json) => cx.write_to_clipboard(ClipboardItem::new_string(json)),
             Err(error) => {
                 self.error(error.to_string());
