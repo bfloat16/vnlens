@@ -16,6 +16,19 @@ pub struct Section {
     pub executable: bool,
 }
 
+#[derive(Clone, Debug)]
+pub enum ImportSymbol {
+    Name(Vec<u8>),
+    Ordinal(u16),
+}
+
+#[derive(Clone, Debug)]
+pub struct Import {
+    pub library: Vec<u8>,
+    pub symbol: ImportSymbol,
+    pub slot: u64,
+}
+
 pub struct PeImage<'a> {
     bytes: &'a [u8],
     pub image_base: u64,
@@ -25,6 +38,7 @@ pub struct PeImage<'a> {
     header_size: u32,
     pe32_plus: bool,
     exports: Option<(u32, u32)>,
+    imports: Option<(u32, u32)>,
     resources: Option<(u32, u32)>,
     tls: Option<(u32, u32)>,
     replacements: BTreeMap<u32, Vec<u8>>,
@@ -78,7 +92,7 @@ impl<'a> PeImage<'a> {
         fields.set_position(60)?;
         let header_size = fields.read_u32_le()?;
         let directory_count_offset = if kind == 0x10b { 92 } else { 108 };
-        let (exports, resources, tls) = if optional.len() >= directory_count_offset + 4 {
+        let (exports, imports, resources, tls) = if optional.len() >= directory_count_offset + 4 {
             fields.set_position(directory_count_offset)?;
             let count = fields.read_u32_le()?;
             let mut directory = |index: u32| -> io::Result<Option<(u32, u32)>> {
@@ -90,9 +104,9 @@ impl<'a> PeImage<'a> {
                 let size = fields.read_u32_le()?;
                 Ok((rva != 0 && size != 0).then_some((rva, size)))
             };
-            (directory(0)?, directory(2)?, directory(9)?)
+            (directory(0)?, directory(1)?, directory(2)?, directory(9)?)
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         let table_size = count
             .checked_mul(40)
@@ -132,6 +146,7 @@ impl<'a> PeImage<'a> {
             header_size,
             pe32_plus: kind == 0x20b,
             exports,
+            imports,
             resources,
             tls,
             replacements: BTreeMap::new(),
@@ -248,6 +263,113 @@ impl<'a> PeImage<'a> {
                 .ok_or_else(|| BinaryIo::invalid_input("PE export address overflow"));
         }
         Ok(None)
+    }
+
+    /// Resolves an ordinal export without loading the executable. Forwarders
+    /// return None, matching `export`; all table reads remain section-bounded.
+    pub fn export_ordinal(&self, ordinal: u16) -> io::Result<Option<u64>> {
+        let Some((rva, size)) = self.exports else {
+            return Ok(None);
+        };
+        let mut r = BinaryReader::new(
+            self.at_rva(rva)
+                .ok_or_else(|| BinaryIo::unexpected_eof("Missing PE export directory"))?,
+        );
+        r.read_bytes(16)?;
+        let base = r.read_u32_le()?;
+        let count = r.read_u32_le()?;
+        r.read_u32_le()?;
+        let table = r.read_u32_le()?;
+        let Some(index) = u32::from(ordinal).checked_sub(base).filter(|i| *i < count) else {
+            return Ok(None);
+        };
+        let mut r = BinaryReader::new(
+            self.at_rva(table)
+                .ok_or_else(|| BinaryIo::unexpected_eof("Missing PE export addresses"))?,
+        );
+        r.set_position(index as usize * 4)?;
+        let target = r.read_u32_le()?;
+        if target == 0 || target.checked_sub(rva).is_some_and(|d| d < size) {
+            return Ok(None);
+        }
+        if !self.sections.iter().any(|section| {
+            target
+                .checked_sub(section.virtual_address)
+                .is_some_and(|offset| offset < section.virtual_size.max(section.raw_size))
+        }) {
+            return Err(BinaryIo::unexpected_eof("PE export exceeds section"));
+        }
+        Ok(Some(self.image_base + u64::from(target)))
+    }
+
+    /// Enumerates the declared import slots, preserving names and ordinals.
+    /// This only reads PE metadata and never resolves or executes a DLL.
+    pub fn imports(&self) -> io::Result<Vec<Import>> {
+        let Some((rva, size)) = self.imports else {
+            return Ok(Vec::new());
+        };
+        let bytes = self
+            .at_rva(rva)
+            .and_then(|b| b.get(..size as usize))
+            .ok_or_else(|| BinaryIo::unexpected_eof("PE import directory exceeds section"))?;
+        let mut descriptors = BinaryReader::new(bytes);
+        let mut imports = Vec::new();
+        while descriptors.remaining() != 0 {
+            let lookup = descriptors.read_u32_le()?;
+            let timestamp = descriptors.read_u32_le()?;
+            let forwarder = descriptors.read_u32_le()?;
+            let name = descriptors.read_u32_le()?;
+            let table = descriptors.read_u32_le()?;
+            if lookup | timestamp | forwarder | name | table == 0 {
+                return Ok(imports);
+            }
+            let library = self
+                .c_string_at_va(self.image_base + u64::from(name))
+                .ok_or_else(|| BinaryIo::unexpected_eof("Unterminated PE import library"))?;
+            let mut r = BinaryReader::new(
+                self.at_rva(if lookup == 0 { table } else { lookup })
+                    .ok_or_else(|| BinaryIo::unexpected_eof("Missing PE import lookup"))?,
+            );
+            let mut slot = self.image_base + u64::from(table);
+            loop {
+                let value = if self.pe32_plus {
+                    r.read_u64_le()?
+                } else {
+                    u64::from(r.read_u32_le()?)
+                };
+                if value == 0 {
+                    break;
+                }
+                let ordinal_bit = if self.pe32_plus {
+                    1u64 << 63
+                } else {
+                    1u64 << 31
+                };
+                let symbol = if value & ordinal_bit != 0 {
+                    ImportSymbol::Ordinal(value as u16)
+                } else {
+                    let address = self
+                        .image_base
+                        .checked_add(value)
+                        .and_then(|v| v.checked_add(2))
+                        .ok_or_else(|| BinaryIo::invalid_input("PE import address overflow"))?;
+                    ImportSymbol::Name(
+                        self.c_string_at_va(address)
+                            .ok_or_else(|| BinaryIo::unexpected_eof("Unterminated PE import name"))?
+                            .to_vec(),
+                    )
+                };
+                imports.push(Import {
+                    library: library.to_vec(),
+                    symbol,
+                    slot,
+                });
+                slot = slot
+                    .checked_add(if self.pe32_plus { 8 } else { 4 })
+                    .ok_or_else(|| BinaryIo::invalid_input("PE import slot overflow"))?;
+            }
+        }
+        Err(BinaryIo::unexpected_eof("Unterminated PE import directory"))
     }
 
     /// Reads the first TLS callback VA, including PE32+ pointer widths. The
@@ -388,136 +510,5 @@ impl<'a> PeImage<'a> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::BinaryWriter;
-    fn fixture(base: u32) -> Vec<u8> {
-        let mut b = vec![0; 0x600];
-        b[..2].copy_from_slice(b"MZ");
-        BinaryWriter::u32_le(0x80, &mut b[0x3c..]);
-        b[0x80..0x84].copy_from_slice(b"PE\0\0");
-        BinaryWriter::u16_le(0x14c, &mut b[0x84..]);
-        BinaryWriter::u16_le(1, &mut b[0x86..]);
-        BinaryWriter::u16_le(0xe0, &mut b[0x94..]);
-        BinaryWriter::u16_le(0x10b, &mut b[0x98..]);
-        for (at, n) in [
-            (0xb4, base),
-            (0xd4, 0x200),
-            (0xf4, 16),
-            (0x108, 0x1000),
-            (0x10c, 0x180),
-            (0x184, 0x1000),
-            (0x188, 0x400),
-            (0x18c, 0x200),
-            (0x210, 10),
-            (0x214, 0x80000020),
-            (0x230, 0x80000080),
-            (0x234, 0x80000040),
-            (0x250, 1033),
-            (0x254, 0x60),
-            (0x260, 0x1200),
-            (0x264, 3),
-        ] {
-            BinaryWriter::u32_le(n, &mut b[at..]);
-        }
-        for at in [0x20e, 0x22c, 0x24e] {
-            BinaryWriter::u16_le(1, &mut b[at..]);
-        }
-        let name = "STARTUP.TJS";
-        BinaryWriter::u16_le(name.len() as u16, &mut b[0x280..]);
-        for (i, w) in name.encode_utf16().enumerate() {
-            BinaryWriter::u16_le(w, &mut b[0x282 + i * 2..]);
-        }
-        b[0x400..0x403].copy_from_slice(b"TJS");
-        b
-    }
-    #[test]
-    fn resources_follow_named_paths_and_relocated_payload_rvas() -> io::Result<()> {
-        for base in [0x400000, 0x610000] {
-            let mut bytes = fixture(base);
-            let image = PeImage::parse(&bytes)?.unwrap();
-            assert_eq!(
-                image.resource("#10", "STARTUP.TJS")?,
-                Some(b"TJS".as_slice())
-            );
-            assert!(image.resource("#10", "BOOTSTRAP")?.is_none());
-            BinaryWriter::u32_le(0x8000_0000, &mut bytes[0x254..]);
-            assert!(
-                PeImage::parse(&bytes)?
-                    .unwrap()
-                    .resource("#10", "STARTUP.TJS")
-                    .is_err()
-            );
-            BinaryWriter::u32_le(0x60, &mut bytes[0x254..]);
-            BinaryWriter::u32_le(0x1400, &mut bytes[0x260..]);
-            assert_eq!(
-                PeImage::parse(&bytes)?
-                    .unwrap()
-                    .resource("#10", "STARTUP.TJS")
-                    .unwrap_err()
-                    .kind(),
-                io::ErrorKind::UnexpectedEof
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn exports_check_ordinals_forwarders_and_table_bounds() -> io::Result<()> {
-        for base in [0x400000, 0x610000] {
-            let mut bytes = fixture(base);
-            for (at, value) in [
-                (0xf8, 0x1100),
-                (0xfc, 0x80),
-                (0x314, 1),
-                (0x318, 1),
-                (0x31c, 0x1140),
-                (0x320, 0x1144),
-                (0x324, 0x1148),
-                (0x340, 0x1200),
-                (0x344, 0x1150),
-            ] {
-                BinaryWriter::u32_le(value, &mut bytes[at..]);
-            }
-            bytes[0x350..0x357].copy_from_slice(b"V2Link\0");
-            let image = PeImage::parse(&bytes)?.unwrap();
-            assert_eq!(image.export(b"V2Link")?, Some(u64::from(base) + 0x1200));
-            assert_eq!(image.export(b"absent")?, None);
-            BinaryWriter::u32_le(0x1160, &mut bytes[0x340..]);
-            assert_eq!(PeImage::parse(&bytes)?.unwrap().export(b"V2Link")?, None);
-            BinaryWriter::u16_le(1, &mut bytes[0x348..]);
-            assert!(PeImage::parse(&bytes)?.unwrap().export(b"V2Link").is_err());
-            BinaryWriter::u16_le(0, &mut bytes[0x348..]);
-            BinaryWriter::u32_le(0x13ff, &mut bytes[0x320..]);
-            assert_eq!(
-                PeImage::parse(&bytes)?
-                    .unwrap()
-                    .export(b"V2Link")
-                    .unwrap_err()
-                    .kind(),
-                io::ErrorKind::UnexpectedEof
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn initial_words_include_only_the_declared_zero_filled_tail() -> io::Result<()> {
-        let mut bytes = fixture(0x400000);
-        BinaryWriter::u32_le(0x800, &mut bytes[0x180..]);
-        bytes[0x5ff] = 0xab;
-        let image = PeImage::parse(&bytes)?.unwrap();
-        assert_eq!(image.u32_at_va(0x4013ff)?, 0xab);
-        assert_eq!(image.u32_at_va(0x401400)?, 0);
-        assert_eq!(
-            image.u32_at_va(0x4017fd).unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
-        assert_eq!(
-            image.u32_at_va(u64::MAX).unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
-        Ok(())
-    }
-}
+#[path = "../tests/pe.rs"]
+mod tests;

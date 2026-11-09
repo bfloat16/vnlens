@@ -54,6 +54,46 @@ pub enum BitOrder {
     Lsb,
 }
 
+/// Growable bit writer for codecs with interleaved, variable-width fields.
+#[derive(Debug)]
+pub struct BitWriter {
+    data: Vec<u8>,
+    used: u8,
+    order: BitOrder,
+}
+impl BitWriter {
+    #[must_use]
+    pub fn new(order: BitOrder) -> Self {
+        Self {
+            data: Vec::new(),
+            used: 0,
+            order,
+        }
+    }
+    pub fn write_bits_le(&mut self, value: u32, count: u8) -> std::io::Result<()> {
+        if count > 32 {
+            return Err(BinaryIo::invalid_input("Bit field exceeds u32"));
+        }
+        for index in 0..count {
+            if self.used == 0 {
+                self.data.push(0);
+            }
+            let last = self.data.len() - 1;
+            let shift = match self.order {
+                BitOrder::Lsb => self.used,
+                BitOrder::Msb => 7 - self.used,
+            };
+            self.data[last] |= (((value >> index) & 1) as u8) << shift;
+            self.used = (self.used + 1) % 8;
+        }
+        Ok(())
+    }
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+}
+
 /// Bounded bit cursor. Multi-bit fields are assembled in stream order.
 #[derive(Debug)]
 pub struct BitReader<'a> {
@@ -165,9 +205,44 @@ impl<'a> BitReader<'a> {
         }
         Ok(low | (u64::from(self.read_bits_le(count - 32)?) << 32))
     }
+
+    /// Reads an MSB-significant field up to the width of a u64.
+    pub fn read_bits_u64(&mut self, count: u8) -> std::io::Result<u64> {
+        if count > 64 {
+            return Err(BinaryIo::invalid_input("Bit field exceeds u64"));
+        }
+        if count <= 32 {
+            return self.read_bits(count).map(u64::from);
+        }
+        let high = u64::from(self.read_bits(count - 32)?);
+        Ok((high << 32) | u64::from(self.read_bits(32)?))
+    }
 }
 
 impl<'a> BinaryReader<'a> {
+    /// Reads MFC CString framing and returns its encoding flag and raw units.
+    /// The flag is true for UTF-16; byte strings may also contain binary data.
+    pub fn read_mfc_string(&mut self) -> std::io::Result<(bool, &'a [u8])> {
+        let mut length = u32::from(self.read_u8()?);
+        let mut wide = false;
+        if length == 255 {
+            length = u32::from(self.read_u16_le()?);
+            if length == 0xfffe {
+                wide = true;
+                length = u32::from(self.read_u8()?);
+                if length == 255 {
+                    length = u32::from(self.read_u16_le()?);
+                }
+            }
+            if length == 65535 {
+                length = self.read_u32_le()?;
+            }
+        }
+        let size = (length as usize)
+            .checked_mul(if wide { 2 } else { 1 })
+            .ok_or_else(|| BinaryIo::unexpected_eof("MFC string length exceeds address space"))?;
+        Ok((wide, self.read_bytes(size)?))
+    }
     /// Reads signed base-128 payloads, optionally separating low tag bits.
     /// BGI uses two tag bits for typed immediates. Signed payloads use i64;
     /// redundant extension groups remain legal and are checked for consistency.
@@ -549,195 +624,5 @@ fn as_array8(data: &[u8]) -> [u8; 8] {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bit_cache_orders_alignment_and_truncation() -> std::io::Result<()> {
-        let mut bits = BitReader::new(&[0xab, 0xcd, 0xef], BitOrder::Msb);
-        assert_eq!(bits.read_bits(3)?, 5);
-        assert_eq!(bits.peek_byte(), Some(0x5e));
-        bits.align_byte();
-        assert_eq!(bits.read_bits(8)?, 0xcd);
-        assert_eq!(bits.read_bits(4)?, 0xe);
-        assert_eq!(bits.peek_byte(), None);
-        assert_eq!(bits.read_bits(4)?, 0xf);
-        assert_eq!(
-            bits.read_bit().err().map(|e| e.kind()),
-            Some(std::io::ErrorKind::UnexpectedEof)
-        );
-        let mut bits = BitReader::new(&[0x81, 0x02], BitOrder::Lsb);
-        assert_eq!(bits.read_bits(8)?, 0x81);
-        assert_eq!(bits.read_bits(8)?, 0x40);
-        assert_eq!(
-            BinaryReader::new(&[0xe5, 0x8e, 0x26]).read_uleb32()?,
-            624485
-        );
-        assert_eq!(
-            BinaryReader::new(&[0x9b, 0xf1, 0x59]).read_tagged_sleb64(0)?,
-            (0, -624485)
-        );
-        assert_eq!(BinaryReader::new(&[0x7e]).read_tagged_sleb64(2)?, (2, -1));
-        assert_eq!(
-            BinaryReader::new(&[0x82, 0x02]).read_tagged_sleb64(2)?,
-            (2, 64)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn bit_positions_exclude_lookahead_and_wide_fields_preserve_order() -> std::io::Result<()> {
-        let mut bytes = [0; 9];
-        BinaryWriter::u64_le(0xfedc_ba98_7654_3210, &mut bytes);
-        bytes[8] = 0xab;
-        let mut bits = BitReader::new(&bytes, BitOrder::Lsb);
-        assert_eq!(bits.position(), (0, 0));
-        assert_eq!(bits.read_bits_le(4)?, 0);
-        assert!(bits.peek_byte().is_some());
-        assert_eq!(bits.position(), (0, 4));
-        assert_eq!(bits.read_bits_le_u64(64)?, 0xbfed_cba9_8765_4321);
-        assert_eq!(bits.position(), (8, 4));
-        assert_eq!(bits.read_bits_le(4)?, 0xa);
-        assert_eq!(bits.position(), (9, 0));
-        assert!(bits.read_bit().is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn compact_signed_values_extend_the_highest_byte() {
-        for width in 1..=8 {
-            assert_eq!(
-                BinaryReader::compact_i64_le(&[0xff; 8][..width]).unwrap(),
-                -1
-            );
-        }
-        assert_eq!(BinaryReader::compact_i64_le(&[0x80]).unwrap(), -128);
-        assert_eq!(BinaryReader::compact_i64_le(&[0, 0x80]).unwrap(), -32768);
-        assert_eq!(BinaryReader::compact_i64_le(&[0xff, 0]).unwrap(), 255);
-    }
-
-    #[test]
-    fn cursor_reads_advance() {
-        let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
-        let mut r = BinaryReader::new(&data);
-        assert_eq!(r.read_u16_le().unwrap(), 0x0201);
-        assert_eq!(r.read_u32_le().unwrap(), 0x0605_0403);
-        assert_eq!(r.remaining(), 0);
-        assert!(r.read_u8().is_err());
-    }
-
-    #[test]
-    fn endian_selects_order() {
-        let data = [0x12, 0x34, 0x56, 0x78];
-        assert_eq!(Endian::Little.read_u32(&data), 0x7856_3412);
-        assert_eq!(Endian::Big.read_u32(&data), 0x1234_5678);
-    }
-
-    #[test]
-    fn compact_integer_reads_keep_byte_order_sign_and_bounds() {
-        for (bytes, endian) in [
-            ([0x80, 0x01, 0x23], Endian::Big),
-            ([0x23, 0x01, 0x80], Endian::Little),
-        ] {
-            assert_eq!(
-                BinaryReader::new(&bytes)
-                    .read_compact_u64(3, endian)
-                    .unwrap(),
-                0x800123
-            );
-            assert_eq!(
-                BinaryReader::new(&bytes)
-                    .read_compact_i64(3, endian)
-                    .unwrap(),
-                -8388317
-            );
-            assert!(
-                BinaryReader::new(&bytes)
-                    .read_compact_u64(0, endian)
-                    .is_err()
-            );
-            assert!(
-                BinaryReader::new(&bytes)
-                    .read_compact_u64(9, endian)
-                    .is_err()
-            );
-            assert_eq!(
-                BinaryReader::new(&bytes)
-                    .read_compact_u64(4, endian)
-                    .unwrap_err()
-                    .kind(),
-                std::io::ErrorKind::UnexpectedEof
-            );
-        }
-        assert_eq!(
-            BinaryReader::new(&[255; 8])
-                .read_compact_i64(8, Endian::Big)
-                .unwrap(),
-            -1
-        );
-    }
-
-    #[test]
-    fn msb_base128_handles_both_terminators_and_integer_overflow() {
-        assert_eq!(
-            BinaryReader::new(&[1, 0x82])
-                .read_msb_base128_u64(true)
-                .unwrap(),
-            130
-        );
-        assert_eq!(
-            BinaryReader::new(&[0x81, 2])
-                .read_msb_base128_u64(false)
-                .unwrap(),
-            130
-        );
-        let mut maximum = [0x7f; 10];
-        maximum[0] = 1;
-        maximum[9] = 255;
-        assert_eq!(
-            BinaryReader::new(&maximum)
-                .read_msb_base128_u64(true)
-                .unwrap(),
-            u64::MAX
-        );
-        maximum[0] = 2;
-        assert_eq!(
-            BinaryReader::new(&maximum)
-                .read_msb_base128_u64(true)
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::InvalidData
-        );
-        assert_eq!(
-            BinaryReader::new(&[0])
-                .read_msb_base128_u64(true)
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::UnexpectedEof
-        );
-        let mut zeros = [0; 20];
-        zeros[19] = 0x80;
-        assert_eq!(
-            BinaryReader::new(&zeros)
-                .read_msb_base128_u64(true)
-                .unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn writer_roundtrip() {
-        let mut out = [0u8; 4];
-        BinaryWriter::u32_le(0xDEAD_BEEF, &mut out);
-        assert_eq!(BinaryReader::u32_le(&out), 0xDEAD_BEEF);
-    }
-
-    #[test]
-    fn compact_integer_roundtrip() {
-        let mut out = [0u8; 3];
-        BinaryWriter::compact_u64_le(0x00AB_CDEF, &mut out).unwrap();
-        assert_eq!(out, [0xEF, 0xCD, 0xAB]);
-        assert_eq!(BinaryReader::compact_u64_le(&out).unwrap(), 0x00AB_CDEF);
-    }
-}
+#[path = "../tests/binary.rs"]
+mod tests;

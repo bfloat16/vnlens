@@ -13,6 +13,6 @@ pub mod filesystem;
 pub mod log;
 pub mod pe;
 
-pub use binary::{BinaryIo, BinaryReader, BinaryWriter, BitOrder, BitReader, Endian};
+pub use binary::{BinaryIo, BinaryReader, BinaryWriter, BitOrder, BitReader, BitWriter, Endian};
 pub use source::{BinarySourceReader, ReadAt};
 pub use view::ArcView;
