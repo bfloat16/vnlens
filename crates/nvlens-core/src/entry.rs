@@ -5,7 +5,8 @@
 pub struct Entry {
     /// Name as stored by the format; the output layer maps it to a local path.
     pub name: String,
-    /// Resource category.
+    /// Resource category declared by the index. Name-based classification is
+    /// supplied by the identified engine; absent index information is Unknown.
     pub kind: ResourceKind,
     /// Absolute byte offset within the archive file.
     pub offset: u64,
@@ -36,25 +37,6 @@ pub enum ResourceKind {
     Font,
     Video,
     Unknown,
-}
-
-impl ResourceKind {
-    /// Roughly guesses the category from a file name extension. Used only for
-    /// display and defaults; format implementations may override it.
-    #[must_use]
-    pub fn guess_from_name(name: &str) -> Self {
-        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-        match ext.as_str() {
-            "png" | "pna" | "bmp" | "jpg" | "jpeg" | "tga" | "psb" | "psd" | "wip" | "g00"
-            | "gyu" | "dlt" | "mos" | "dwq" => Self::Image,
-            "ogg" | "wav" | "mp3" | "flac" | "nwa" | "vaw" | "wgq" => Self::Audio,
-            "json" | "scr" | "txt" | "ini" | "ss" | "gan" | "tjs" | "ks" | "scn" | "rld"
-            | "rnf" | "ws2" | "lua" | "luac" | "spt" | "xtx" | "fxf" | "mml" => Self::Script,
-            "mpg" | "mp4" | "wmv" | "avi" | "omv" | "ogv" => Self::Video,
-            "ttf" | "otf" | "ttc" | "woff" | "woff2" | "fon" | "fnt" => Self::Font,
-            _ => Self::Unknown,
-        }
-    }
 }
 
 impl Entry {

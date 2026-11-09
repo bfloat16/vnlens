@@ -41,9 +41,17 @@ pub trait Archive: Send {
     /// All entries.
     fn entries(&self) -> &[Entry];
 
-    /// Opens an entry's content. Stored entries borrow the mapping with zero
-    /// copy; transformed entries return an owned buffer.
+    /// Opens logical resource bytes after archive and embedded-resource
+    /// transformations. Hosts must not apply the disk resource envelope again.
+    /// Stored entries borrow the mapping; transformed entries own their buffer.
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>>;
+
+    /// Opens the same logical bytes as open_entry, with independent streaming
+    /// cursors. Formats return None when they do not yet provide a streaming
+    /// resource path with the same transformations.
+    fn open_entry_source(&self, _entry: &Entry) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        Ok(None)
+    }
 
     /// Opens an entry's raw stored content when a format can expose it.
     ///

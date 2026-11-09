@@ -2,6 +2,46 @@
 
 use std::collections::BTreeMap;
 
+use crate::ResourceKind;
+
+/// Storage context for name-based routing. Entry kinds come from index metadata,
+/// never from eagerly inspecting payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceOrigin {
+    File,
+    Entry(ResourceKind),
+}
+
+/// One engine-selected handler. A multiplexed container explicitly names its
+/// audio and video handlers; stream metadata decides which one is needed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResourceRoute {
+    Archive(Box<ArchiveRoute>),
+    Image(&'static str),
+    Audio(&'static str),
+    Script(&'static str),
+    Video(&'static str),
+    Media {
+        audio: &'static str,
+        video: &'static str,
+    },
+    Other(ResourceKind),
+}
+
+impl ResourceRoute {
+    #[must_use]
+    pub fn kind(&self) -> ResourceKind {
+        match self {
+            Self::Archive(_) => ResourceKind::Archive,
+            Self::Image(_) => ResourceKind::Image,
+            Self::Audio(_) | Self::Media { .. } => ResourceKind::Audio,
+            Self::Script(_) => ResourceKind::Script,
+            Self::Video(_) => ResourceKind::Video,
+            Self::Other(kind) => *kind,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(Vec<u8>);
 
