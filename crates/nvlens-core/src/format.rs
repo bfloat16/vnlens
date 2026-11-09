@@ -66,6 +66,18 @@ pub trait Archive: Send {
     fn read_companion(&self, _name: &str) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
+    /// Whether an entry may expose a lazily indexed object-reference container.
+    /// This is metadata only: implementations must not read its payload here.
+    fn has_references(&self, _entry: &Entry) -> bool {
+        false
+    }
+
+    /// Opens references declared by one explicitly selected object. Their
+    /// payloads remain lazy, and the returned archive retains its source views.
+    /// Returns None when a possible reference owner has no stored children.
+    fn open_references(&self, _entry: &Entry) -> Result<Option<Box<dyn Archive>>> {
+        Ok(None)
+    }
 }
 
 /// Resolves a format's named companion resource on demand.

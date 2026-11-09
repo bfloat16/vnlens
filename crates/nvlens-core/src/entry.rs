@@ -31,6 +31,9 @@ pub enum ResourceKind {
     Image,
     Audio,
     Script,
+    /// Structured values and configuration objects that are not executable scripts.
+    Data,
+    Font,
     Video,
     Unknown,
 }
@@ -48,6 +51,7 @@ impl ResourceKind {
             "json" | "scr" | "txt" | "ini" | "ss" | "gan" | "tjs" | "ks" | "scn" | "rld"
             | "rnf" | "ws2" | "lua" | "luac" | "spt" | "xtx" | "fxf" | "mml" => Self::Script,
             "mpg" | "mp4" | "wmv" | "avi" | "omv" | "ogv" => Self::Video,
+            "ttf" | "otf" | "ttc" | "woff" | "woff2" | "fon" | "fnt" => Self::Font,
             _ => Self::Unknown,
         }
     }
