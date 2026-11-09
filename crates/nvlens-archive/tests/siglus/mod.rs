@@ -2,6 +2,7 @@ use super::*;
 use nvlens_core::{ArchiveRoute, Catalog, Secret};
 use nvlens_io::BinaryWriter;
 use std::{borrow::Cow, fs, path::PathBuf};
+
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
@@ -17,6 +18,7 @@ fn temp() -> Result<Temp> {
     fs::create_dir(&path)?;
     Ok(Temp(path))
 }
+
 #[test]
 fn scene_mount_is_lazy_and_preserves_names_and_raw_payloads() -> Result<()> {
     let temp = temp()?;
@@ -80,6 +82,7 @@ fn scene_mount_is_lazy_and_preserves_names_and_raw_payloads() -> Result<()> {
     assert!(catalog.open(&path, &route).is_err());
     Ok(())
 }
+
 #[test]
 fn voice_indices_do_not_decode_unused_streams() -> Result<()> {
     let temp = temp()?;

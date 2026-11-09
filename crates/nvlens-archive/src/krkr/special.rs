@@ -56,15 +56,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<Index> {
     }
     Ok(out)
 }
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        out.push(char::from(DIGITS[usize::from(byte & 15)]));
-    }
-    out
-}
+use super::names::hex;
 fn count(r: &mut BinaryReader<'_>) -> Result<usize> {
     let n = r.read_u32(Endian::Big)? as i32;
     usize::try_from(n).map_err(|_| corrupt(r.position() as u64, "Negative Hxv4 count"))

@@ -46,7 +46,7 @@ fn check(cancel: &AtomicBool) -> Result<()> {
         Ok(())
     }
 }
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 fn hashed(path: &str) -> Option<(&str, &str)> {

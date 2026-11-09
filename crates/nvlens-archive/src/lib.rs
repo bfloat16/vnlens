@@ -7,6 +7,8 @@ mod emote;
 mod escude;
 mod exhibit;
 pub mod krkr;
+mod propeller;
+mod rugp;
 mod siglus;
 mod systemnnn;
 mod will;

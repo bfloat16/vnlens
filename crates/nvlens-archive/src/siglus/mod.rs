@@ -3,8 +3,6 @@
 mod gameexe;
 mod movie;
 mod scene;
-#[cfg(test)]
-mod tests;
 mod voice;
 
 use nvlens_core::{ArchiveOptions, Error, Result};
@@ -32,3 +30,7 @@ fn decode(data: &[u8], options: &ArchiveOptions, table: &str, encrypted: bool) -
         }
     })
 }
+
+#[cfg(test)]
+#[path = "../../tests/siglus/mod.rs"]
+mod tests;

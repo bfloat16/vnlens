@@ -6,6 +6,8 @@ use nvlens_core::{
 };
 use nvlens_io::{ArcView, BinaryReader};
 use std::{borrow::Cow, sync::Arc};
+const SIGNATURES: &[u32] = &[0];
+
 #[derive(Debug, Default)]
 struct VoiceFormat;
 impl Format for VoiceFormat {
@@ -13,7 +15,7 @@ impl Format for VoiceFormat {
         "voice/siglus"
     }
     fn signatures(&self) -> &'static [u32] {
-        &[0]
+        SIGNATURES
     }
     fn extensions(&self) -> &'static [&'static str] {
         &["ovk", "nwk"]

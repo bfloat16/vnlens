@@ -6,6 +6,8 @@ use nvlens_core::{
 };
 use nvlens_io::{ArcView, BinaryReader};
 use std::{borrow::Cow, sync::Arc};
+const SIGNATURES: &[u32] = &[0xa8];
+
 #[derive(Debug, Default)]
 struct MovieFormat;
 impl Format for MovieFormat {
@@ -13,7 +15,7 @@ impl Format for MovieFormat {
         "omv/siglus"
     }
     fn signatures(&self) -> &'static [u32] {
-        &[0xa8]
+        SIGNATURES
     }
     fn extensions(&self) -> &'static [&'static str] {
         &["omv"]

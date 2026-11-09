@@ -7,6 +7,8 @@ use nvlens_core::{
 use nvlens_io::{ArcView, BinaryReader};
 use std::{borrow::Cow, sync::Arc};
 
+const SIGNATURES: &[u32] = &[0x5c];
+
 #[derive(Debug, Default)]
 struct SceneFormat;
 impl Format for SceneFormat {
@@ -14,7 +16,7 @@ impl Format for SceneFormat {
         "pck/siglus"
     }
     fn signatures(&self) -> &'static [u32] {
-        &[0x5c]
+        SIGNATURES
     }
     fn extensions(&self) -> &'static [&'static str] {
         &["pck"]
