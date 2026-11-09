@@ -56,26 +56,6 @@ pub enum Category {
     Unknown,
 }
 
-impl Category {
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Basic => "basic",
-            Self::Storage => "storage",
-            Self::ControlFlow => "control_flow",
-            Self::Text => "text",
-            Self::Audio => "audio",
-            Self::Video => "video",
-            Self::Image => "image",
-            Self::Effect => "effect",
-            Self::Runtime => "runtime",
-            Self::Data => "data",
-            Self::Native => "native",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Operation {

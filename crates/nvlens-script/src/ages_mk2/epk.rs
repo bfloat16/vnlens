@@ -67,35 +67,5 @@ pub fn decrypt(raw: &[u8], key: &[u8], datas: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn key_is_filename_stem() {
-        assert_eq!(key_from_name("path/to/scene.epk"), b"scene");
-        assert_eq!(key_from_name("data\\table.epk"), b"table");
-        assert_eq!(key_from_name("noext"), b"noext");
-    }
-
-    #[test]
-    fn rejects_invalid_trailers_and_inconsistent_plaintext_length() {
-        assert!(matches!(
-            decrypt(b"short", b"key", &[]),
-            Err(Error::InvalidFormat)
-        ));
-        let mut data = vec![0u8; 8 + TRAILER];
-        let hash = md5::digest_parts(&[&data[..8], SALT]);
-        data[8 + 0x20..].copy_from_slice(&hash);
-        nvlens_io::BinaryWriter::u32_be(9, &mut data[8 + 0x10..8 + 0x14]);
-        assert!(matches!(
-            decrypt(&data, b"key", &[]),
-            Err(Error::Corrupt { .. })
-        ));
-        data[0] ^= 1;
-        assert!(matches!(
-            decrypt(&data, b"key", &[]),
-            Err(Error::InvalidFormat)
-        ));
-    }
-}
+#[path = "../../tests/ages_mk2/epk.rs"]
+mod tests;

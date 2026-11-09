@@ -29,21 +29,6 @@ impl Value {
 }
 
 impl Instruction {
-    #[must_use]
-    pub fn disassembly(&self) -> String {
-        let mut text = format!("{:08X}  ", self.span.offset);
-        if let Some(line) = self.source_line {
-            let _ = write!(text, "L{line:<6} ");
-        }
-        text.push_str(&self.opcode_name());
-        let args = self.args_disassembly();
-        if !args.is_empty() {
-            text.push_str("  ");
-            text.push_str(&args);
-        }
-        text
-    }
-
     /// Returns the shared operation name or an explicitly native mnemonic.
     #[must_use]
     pub fn opcode_name(&self) -> String {

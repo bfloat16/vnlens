@@ -12,6 +12,8 @@ mod format;
 pub mod ir;
 pub mod krkr;
 mod lua;
+mod propeller;
+pub mod rugp;
 mod siglus;
 mod systemnnn;
 mod will;

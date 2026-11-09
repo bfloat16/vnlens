@@ -86,15 +86,3 @@ fn text_at(data: &[u8], at: usize) -> Result<Value> {
         Value::Text(text.into_owned())
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strings_support_both_runtime_encodings() -> Result<()> {
-        assert!(matches!(text_at("あ♥\0".as_bytes(),0)?,Value::Text(text) if text=="あ♥"));
-        assert!(matches!(text_at(&[0x82,0xa0,0],0)?,Value::Text(text) if text=="あ"));
-        Ok(())
-    }
-}

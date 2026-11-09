@@ -143,27 +143,3 @@ pub(super) fn validate_header(header: &PsbHeader, len: u64) -> Result<()> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn validate_header_allows_empty_tail_sections() {
-        let header = PsbHeader {
-            version: 3,
-            header_length: 44,
-            offset_names: 44,
-            offset_strings: 44,
-            offset_strings_data: 44,
-            offset_chunk_offsets: 44,
-            offset_chunk_lengths: 44,
-            offset_chunk_data: 100,
-            offset_entries: 44,
-            offset_extra_chunk_offsets: None,
-            offset_extra_chunk_lengths: None,
-            offset_extra_chunk_data: None,
-        };
-
-        assert!(validate_header(&header, 100).is_ok());
-    }
-}

@@ -172,50 +172,5 @@ fn strip_extension(name: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::super::PsbNumber;
-    use super::*;
-    #[test]
-    fn archive_info_range_uses_kind_specific_layout() {
-        let file_info = vec![
-            PsbValue::Number(PsbNumber::Integer(10)),
-            PsbValue::Number(PsbNumber::Integer(20)),
-        ];
-        assert_eq!(
-            archive_info_range(&file_info, ArchiveInfoKind::FileInfo).unwrap(),
-            (10, 20)
-        );
-
-        let umd_root = vec![
-            PsbValue::Null,
-            PsbValue::Number(PsbNumber::Integer(20)),
-            PsbValue::Number(PsbNumber::Integer(10)),
-        ];
-        assert_eq!(
-            archive_info_range(&umd_root, ArchiveInfoKind::UmdRoot).unwrap(),
-            (10, 20)
-        );
-    }
-
-    #[test]
-    fn archive_info_possible_names_match_freemote_rules() {
-        assert_eq!(
-            archive_info_possible_file_names("image/man003", ".psb.m"),
-            [
-                "man003.psb.m",
-                "man003",
-                "image/man003.psb.m",
-                "image/man003"
-            ]
-        );
-        assert_eq!(
-            archive_info_possible_file_names("bg_c_whit.m", ".psb.m"),
-            ["bg_c_whit.m.psb.m", "bg_c_whit.m", "bg_c_whit"]
-        );
-        assert_eq!(
-            archive_info_possible_file_names("mmm22.ks", ".scn.m"),
-            ["mmm22.ks.scn.m", "mmm22.ks", "mmm22", "mmm22.scn.m"]
-        );
-    }
-}
+#[path = "../../../tests/emote/psb/archive_info.rs"]
+mod tests;

@@ -1,5 +1,5 @@
-//! AdvHD WS2: byte opcodes and PE-defined typed args. Strings are UTF-16LE;
-//! type 8 stores their separate two-byte terminator. Type 7 repeats the next
+//! AdvHD WS2: byte opcodes and PE-defined typed args. Strings are CP932 or
+//! UTF-16LE; type 8 stores their separate terminator. Type 7 repeats the next
 //! type using a byte count. Opcode 15 embeds choice records and a command.
 //! The final two u32 values belong to the plaintext footer, not the code.
 //! Verified against the WS2 constructor and parameter/choice readers.
@@ -43,7 +43,16 @@ impl ScriptFormat for Ws2 {
         let bytes = options.keys.get("will_ws2").ok_or_else(|| {
             Error::UnknownScheme(Some("AdvHD WS2 parameter table is unavailable".into()))
         })?;
-        ws2::parse(data, bytes.bytes()).map(Some)
+        let encoding = match options.numbers.get("will_ws2_codepage").copied() {
+            Some(932) => ws2::TextEncoding::Cp932,
+            None | Some(1200) => ws2::TextEncoding::Utf16,
+            Some(codepage) => {
+                return Err(Error::Unsupported(format!(
+                    "Unsupported AdvHD WS2 code page {codepage}"
+                )));
+            }
+        };
+        ws2::parse(data, bytes.bytes(), encoding).map(Some)
     }
 }
 nvlens_core::inventory::submit! { ScriptRegistration(|| Box::new(Ws2)) }

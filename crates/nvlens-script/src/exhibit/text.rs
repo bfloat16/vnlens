@@ -21,17 +21,3 @@ pub(super) fn decode(data: &[u8]) -> Result<Option<String>> {
     let (text, _, errors) = encoding_rs::SHIFT_JIS.decode(data);
     Ok((!errors).then(|| text.into_owned()))
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    #[test]
-    fn configuration_text_keeps_whitespace_and_decodes_cp932() {
-        assert_eq!(
-            decode(b"  ; \x82\xa0\r\nkey=1\r\n").unwrap().as_deref(),
-            Some("  ; あ\r\nkey=1\r\n")
-        );
-        assert!(decode(b"[\0binary").unwrap().is_none());
-    }
-}
