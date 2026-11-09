@@ -1,9 +1,22 @@
-//! nvlens video-format handlers.
+//! nvlens video decoding through FFmpeg.
 //!
-//! Placeholder crate: implementations land here as engines are ported. Keeps
-//! `lib.rs` limited to public exposure; logic will live in separate modules.
+//! `lib.rs` only exposes the public surface; logic lives in separate modules.
 #![forbid(unsafe_code)]
 
-/// Forces this crate to be linked so its future format registrations are
-/// included in the final binary.
-pub fn init() {}
+mod audio;
+mod decoder;
+mod input;
+mod model;
+mod video;
+mod yuris;
+
+pub use audio::AudioDecoder;
+pub use decoder::contains_video;
+pub use model::{AudioFrame, AudioStream, Picture, VideoMeta, VideoStream};
+pub use video::{Video, VideoDecoder, VideoFormat, VideoRegistration};
+
+/// Forces this crate to be linked and keeps FFmpeg's own logging to errors;
+/// failures are also returned to the caller.
+pub fn init() {
+    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Error);
+}
