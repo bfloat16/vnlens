@@ -14,5 +14,5 @@ pub mod log;
 pub mod pe;
 
 pub use binary::{BinaryIo, BinaryReader, BinaryWriter, BitOrder, BitReader, BitWriter, Endian};
-pub use source::{BinarySourceReader, ReadAt};
+pub use source::{BinarySourceReader, RangeSource, ReadAt, ReadFactory, ReadSeek, ReplayReader};
 pub use view::ArcView;
