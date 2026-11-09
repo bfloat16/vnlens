@@ -22,11 +22,9 @@ impl Format for Sound {
 }
 impl ScriptFormat for Sound {
     fn decode<'a>(&self, data: &'a [u8], _: &ArchiveOptions) -> Result<Cow<'a, [u8]>> {
-        envelope(data)
+        decode_envelope(data)
     }
     fn disassemble(&self, data: &[u8], _: Option<&dyn ResourceResolver>) -> Result<Option<Script>> {
-        let data = envelope(data)?;
-        let data = data.as_ref();
         let mut r = BinaryReader::new(data);
         let mut flags = Vec::new();
         for _ in 0..8 {

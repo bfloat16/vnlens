@@ -6,7 +6,7 @@
 mod ages_mk2;
 mod bgi;
 mod emote;
-mod escude;
+pub mod escude;
 mod exhibit;
 mod format;
 pub mod ir;

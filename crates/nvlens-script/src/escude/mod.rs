@@ -41,15 +41,13 @@ impl Format for Escude {
 }
 impl ScriptFormat for Escude {
     fn decode<'a>(&self, data: &'a [u8], _: &ArchiveOptions) -> Result<Cow<'a, [u8]>> {
-        envelope(data)
+        decode_envelope(data)
     }
     fn disassemble(
         &self,
         data: &[u8],
         resources: Option<&dyn ResourceResolver>,
     ) -> Result<Option<Script>> {
-        let data = envelope(data)?;
-        let data = data.as_ref();
         if data.starts_with(b"@code:__") {
             let mut script = scenario::code(data)?;
             scenario::resolve(&mut script, resources)?;
@@ -87,7 +85,7 @@ impl Format for Text {
 }
 impl ScriptFormat for Text {
     fn decode<'a>(&self, data: &'a [u8], _: &ArchiveOptions) -> Result<Cow<'a, [u8]>> {
-        envelope(data)
+        decode_envelope(data)
     }
     fn disassemble(
         &self,
@@ -97,14 +95,13 @@ impl ScriptFormat for Text {
         Escude.disassemble(data, resources)
     }
     fn decode_text(&self, data: &[u8]) -> Result<Option<String>> {
-        let data = envelope(data)?;
         if data.starts_with(b"@mess:__") {
             return Ok(None);
         }
-        if let Ok(text) = std::str::from_utf8(&data) {
+        if let Ok(text) = std::str::from_utf8(data) {
             return Ok(Some(text.into()));
         }
-        let (text, _, errors) = encoding_rs::SHIFT_JIS.decode(&data);
+        let (text, _, errors) = encoding_rs::SHIFT_JIS.decode(data);
         if errors {
             return Err(bad(0, "Invalid Escu:de CP932 source text"));
         }
@@ -113,7 +110,9 @@ impl ScriptFormat for Text {
 }
 nvlens_core::inventory::submit! { ScriptRegistration(||Box::new(Text)) }
 
-fn envelope(data: &[u8]) -> Result<Cow<'_, [u8]>> {
+/// Removes the ACP resource envelope once, before script/content decoding.
+/// Archives use the same entry point for embedded ACP resources.
+pub fn decode_envelope(data: &[u8]) -> Result<Cow<'_, [u8]>> {
     if data.starts_with(b"acp\0") {
         let decoded = nvlens_crypto::compress::acp::unpack(data).map_err(|error| {
             if error.kind() == std::io::ErrorKind::InvalidInput {

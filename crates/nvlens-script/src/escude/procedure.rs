@@ -14,7 +14,7 @@ pub(super) fn resolve(script: &mut Script, resources: &dyn ResourceResolver) -> 
     let Some(registry) = resources.read_resource("adv/adv.c")? else {
         return Ok(());
     };
-    let registry = envelope(&registry)?;
+    let registry = decode_envelope(&registry)?;
     let tokens = source::tokens(&registry)?;
     let Some(names) = source::registry(&tokens) else {
         return Ok(());
@@ -24,7 +24,7 @@ pub(super) fn resolve(script: &mut Script, resources: &dyn ResourceResolver) -> 
     let Some(vm) = resources.read_resource("misc/script.inc")? else {
         return Ok(());
     };
-    let vm = envelope(&vm)?;
+    let vm = decode_envelope(&vm)?;
     if source::fingerprint(&source::tokens(&vm)?) != VM {
         return Ok(());
     }
@@ -64,7 +64,7 @@ pub(super) fn resolve(script: &mut Script, resources: &dyn ResourceResolver) -> 
         if !checked.contains_key(file) {
             let valid = match resources.read_resource(file)? {
                 Some(bytes) => {
-                    let bytes = envelope(&bytes)?;
+                    let bytes = decode_envelope(&bytes)?;
                     source::fingerprint(&source::tokens(&bytes)?) == file_fingerprint(file)
                 }
                 None => false,

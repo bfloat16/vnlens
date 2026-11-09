@@ -167,7 +167,7 @@ pub(super) fn resolve(script: &mut Script, resources: Option<&dyn ResourceResolv
     let Some(bytes) = resources.read_resource(&companion)? else {
         return Ok(());
     };
-    let bytes = envelope(&bytes)?;
+    let bytes = decode_envelope(&bytes)?;
     let values = if bytes.starts_with(b"@mess:__") {
         let table = messages(&bytes)?;
         let Some(Value::Group(items)) = table.instructions[0]
