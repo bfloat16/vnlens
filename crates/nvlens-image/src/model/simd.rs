@@ -32,44 +32,7 @@ unsafe fn swap(bytes: &mut [u8]) {
         pixel.swap(0, 2);
     }
 }
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    #[ignore = "Short release-mode throughput comparison"]
-    fn pixel_throughput() {
-        let source: Vec<_> = (0..1920 * 1080 * 4).map(|i| i as u8).collect();
-        let mut scalar = source.clone();
-        let mut vector = source;
-        let start = std::time::Instant::now();
-        for _ in 0..31 {
-            for pixel in std::hint::black_box(&mut scalar).as_chunks_mut::<4>().0 {
-                pixel.swap(0, 2);
-            }
-        }
-        let scalar_time = start.elapsed();
-        let start = std::time::Instant::now();
-        for _ in 0..31 {
-            swap_red_blue(std::hint::black_box(&mut vector));
-        }
-        println!(
-            "31 1080p frames: scalar {scalar_time:?}, SSE2 {:?}",
-            start.elapsed()
-        );
-        assert_eq!(scalar, vector);
-    }
-    #[test]
-    fn matches_scalar_for_offsets_tails_and_all_channel_values() {
-        for offset in 0..16 {
-            for len in 0..=1027 {
-                let mut data: Vec<_> = (0..offset + len + 16).map(|i| i as u8).collect();
-                let mut expected = data.clone();
-                for pixel in expected[offset..offset + len].as_chunks_mut::<4>().0 {
-                    pixel.swap(0, 2);
-                }
-                swap_red_blue(&mut data[offset..offset + len]);
-                assert_eq!(data, expected);
-            }
-        }
-    }
-}
+#[path = "../../tests/model/simd.rs"]
+mod tests;

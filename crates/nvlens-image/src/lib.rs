@@ -8,6 +8,8 @@ mod exhibit;
 mod format;
 mod krkr;
 mod model;
+mod propeller;
+mod rugp;
 mod siglus;
 mod standard;
 mod systemnnn;

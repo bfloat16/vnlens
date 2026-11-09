@@ -113,48 +113,5 @@ fn aan(v: [__m128; 8]) -> [__m128; 8] {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn sse2_matches_scalar_for_dc_sparse_and_extreme_coefficients() {
-        let mut state = 0x1234_5678u32;
-        for iteration in 0..2048 {
-            let data = std::array::from_fn(|index| {
-                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-                if iteration < 64 && index != iteration {
-                    0
-                } else {
-                    state as i16
-                }
-            });
-            let quant =
-                std::array::from_fn(|index| ((index + iteration) % 255 + 1) as f32 * 0.27589938);
-            assert_eq!(
-                inverse(&data, &quant),
-                super::super::dct::inverse_scalar(&data, &quant)
-            );
-        }
-    }
-    #[test]
-    #[ignore = "Manual release-mode SIMD microbenchmark; no window or device"]
-    fn benchmark_idct() {
-        let data = std::array::from_fn(|i| i as i16 - 32);
-        let quant = [1.; 64];
-        for (name, run) in [
-            (
-                "scalar",
-                super::super::dct::inverse_scalar as fn(&[i16; 64], &[f32; 64]) -> [u8; 64],
-            ),
-            ("sse2", inverse),
-        ] {
-            let start = std::time::Instant::now();
-            for _ in 0..100_000 {
-                std::hint::black_box(run(
-                    std::hint::black_box(&data),
-                    std::hint::black_box(&quant),
-                ));
-            }
-            println!("IDCT {name}: {:?}", start.elapsed());
-        }
-    }
-}
+#[path = "../../tests/bgi/simd.rs"]
+mod tests;
