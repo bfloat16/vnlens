@@ -21,27 +21,28 @@ pub trait AudioFormat: Format {
 #[derive(Debug)]
 pub struct AudioRegistration(pub fn() -> Box<dyn AudioFormat>);
 nvlens_core::inventory::collect!(AudioRegistration);
-pub fn metadata(data: &[u8]) -> Result<Option<AudioMeta>> {
+fn selected(tag: &str) -> Result<Box<dyn AudioFormat>> {
     for registration in nvlens_core::inventory::iter::<AudioRegistration>() {
-        if let Some(meta) = (registration.0)().metadata(data)? {
-            return Ok(Some(meta));
+        let format = (registration.0)();
+        if format.tag() == tag {
+            return Ok(format);
         }
     }
-    Ok(None)
+    Err(Error::Unsupported(format!(
+        "Audio route is not registered: {tag}"
+    )))
 }
-pub fn decode(data: &[u8]) -> Result<Option<Pcm>> {
-    decode_cancellable(data, &AtomicBool::new(false))
+/// Reads metadata using exactly the selected format; never probes another reader.
+pub fn metadata_as(tag: &str, data: &[u8]) -> Result<Option<AudioMeta>> {
+    selected(tag)?.metadata(data)
 }
-/// Decodes a recognized audio stream, returning Cancelled when requested.
-pub fn decode_cancellable(data: &[u8], cancelled: &AtomicBool) -> Result<Option<Pcm>> {
+pub fn decode_as(tag: &str, data: &[u8]) -> Result<Pcm> {
+    decode_cancellable_as(tag, data, &AtomicBool::new(false))
+}
+/// Decodes the selected audio format, returning Cancelled when requested.
+pub fn decode_cancellable_as(tag: &str, data: &[u8], cancelled: &AtomicBool) -> Result<Pcm> {
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
-    for registration in nvlens_core::inventory::iter::<AudioRegistration>() {
-        let format = (registration.0)();
-        if format.metadata(data)?.is_some() {
-            return format.decode_cancellable(data, cancelled).map(Some);
-        }
-    }
-    Ok(None)
+    selected(tag)?.decode_cancellable(data, cancelled)
 }

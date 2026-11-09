@@ -14,7 +14,7 @@ pub mod spectrogram;
 mod standard;
 mod systemnnn;
 
-pub use format::{AudioFormat, AudioRegistration, decode, decode_cancellable, metadata};
+pub use format::{AudioFormat, AudioRegistration, decode_as, decode_cancellable_as, metadata_as};
 pub use model::{AudioMeta, Pcm};
 
 pub use ages_mk2::fcd;
