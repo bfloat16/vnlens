@@ -3,7 +3,9 @@
 pub mod acp;
 pub mod bgi;
 pub mod exhibit;
+pub mod lzf;
 pub mod lzss;
+pub mod rugp;
 pub mod siglus;
 pub mod tlg;
 pub mod tlg6;

@@ -6,6 +6,7 @@ pub mod escude;
 pub mod hxv4;
 pub mod mdf;
 pub mod psb_stream;
+pub mod rugp;
 pub mod scramble;
 pub mod xor;
 pub mod xp3;
