@@ -3,7 +3,7 @@ use nvlens_io::BinaryWriter;
 
 #[test]
 fn frame_access_is_lazy_and_preserves_alpha_and_bottom_up_rows() -> Result<()> {
-    let mut bmp = vec![0; 62];
+    let mut bmp = [0; 62];
     bmp[..2].copy_from_slice(b"BM");
     BinaryWriter::u32_le(62, &mut bmp[2..]);
     BinaryWriter::u32_le(54, &mut bmp[10..]);

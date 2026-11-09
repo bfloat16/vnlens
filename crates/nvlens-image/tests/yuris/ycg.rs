@@ -14,7 +14,7 @@ fn decodes_bgra_and_preserves_png_offsets() {
     image.meta.offset_x = -3;
     image.meta.offset_y = 5;
     let png = image.to_png().unwrap();
-    let decoded = crate::decode(&png).unwrap().unwrap();
+    let decoded = crate::decode_as("image/standard", &png).unwrap();
     assert_eq!(decoded.meta, image.meta);
     let PixelBuffer::Rgba8(pixels) = decoded.pixels else {
         return;

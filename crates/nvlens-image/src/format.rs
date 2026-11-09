@@ -1,6 +1,6 @@
 //! Image registration and two-stage metadata/pixel decoding.
 use crate::{Image, ImageMeta};
-use nvlens_core::{Format, Result};
+use nvlens_core::{Error, Format, Result};
 
 pub trait ImageFormat: Format {
     fn metadata(&self, data: &[u8]) -> Result<Option<ImageMeta>>;
@@ -24,34 +24,27 @@ pub trait ImageFormat: Format {
 pub struct ImageRegistration(pub fn() -> Box<dyn ImageFormat>);
 nvlens_core::inventory::collect!(ImageRegistration);
 
-pub fn metadata(data: &[u8]) -> Result<Option<ImageMeta>> {
-    for registration in nvlens_core::inventory::iter::<ImageRegistration>() {
-        if let Some(meta) = (registration.0)().metadata(data)? {
-            return Ok(Some(meta));
-        }
-    }
-    Ok(None)
-}
-pub fn decode(data: &[u8]) -> Result<Option<Image>> {
-    decode_frame(data, 0)
-}
-
-pub fn frame_count(data: &[u8]) -> Result<Option<usize>> {
+fn selected(tag: &str) -> Result<Box<dyn ImageFormat>> {
     for registration in nvlens_core::inventory::iter::<ImageRegistration>() {
         let format = (registration.0)();
-        if format.metadata(data)?.is_some() {
-            return format.frame_count(data).map(Some);
+        if format.tag() == tag {
+            return Ok(format);
         }
     }
-    Ok(None)
+    Err(Error::Unsupported(format!(
+        "Image route is not registered: {tag}"
+    )))
 }
-
-pub fn decode_frame(data: &[u8], frame: usize) -> Result<Option<Image>> {
-    for registration in nvlens_core::inventory::iter::<ImageRegistration>() {
-        let format = (registration.0)();
-        if format.metadata(data)?.is_some() {
-            return format.decode_frame(data, frame).map(Some);
-        }
-    }
-    Ok(None)
+/// Reads metadata using exactly the selected format; never probes another reader.
+pub fn metadata_as(tag: &str, data: &[u8]) -> Result<Option<ImageMeta>> {
+    selected(tag)?.metadata(data)
+}
+pub fn decode_as(tag: &str, data: &[u8]) -> Result<Image> {
+    decode_frame_as(tag, data, 0)
+}
+pub fn frame_count_as(tag: &str, data: &[u8]) -> Result<usize> {
+    selected(tag)?.frame_count(data)
+}
+pub fn decode_frame_as(tag: &str, data: &[u8], frame: usize) -> Result<Image> {
+    selected(tag)?.decode_frame(data, frame)
 }

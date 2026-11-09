@@ -42,7 +42,7 @@ fn indexed_bmp_uses_sequential_palette_top_down_rows_and_no_resource_conflict() 
         255, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255, 0, 0, 255,
         255,
     ];
-    let image = crate::decode(&data).unwrap().unwrap();
+    let image = crate::decode_as("dwq/systemnnn", &data).unwrap();
     assert!(matches!(image.pixels,PixelBuffer::Rgba8(p) if p==expected));
     for len in 0..data.len() {
         assert!(Dwq.decode(&data[..len]).is_err());

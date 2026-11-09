@@ -38,7 +38,9 @@ fn skips_group_records_preserves_offsets_and_unpremultiplies_selected_layer() {
     assert_eq!((image.meta.offset_x, image.meta.offset_y), (-4, 7));
     assert!(matches!(&image.pixels, PixelBuffer::Rgba8(p) if p == &[59,39,19,128]));
     assert_eq!(
-        crate::metadata(&image.to_png().unwrap()).unwrap().unwrap(),
+        crate::metadata_as("image/standard", &image.to_png().unwrap())
+            .unwrap()
+            .unwrap(),
         image.meta
     );
     assert!(Pna.decode_frame(&bytes, 2).is_err());

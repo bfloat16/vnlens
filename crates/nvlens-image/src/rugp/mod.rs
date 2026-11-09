@@ -150,7 +150,7 @@ impl Format for Rugp {
         &[0x29f6cba4, 0x1edb927c]
     }
     fn extensions(&self) -> &'static [&'static str] {
-        &["cr6ti", "cs5i", "csbm", "cicon"]
+        &["cr6ti", "cr6tix", "crmti", "cs5i", "csbm", "cicon"]
     }
     fn description(&self) -> &'static str {
         "rUGP native image objects"

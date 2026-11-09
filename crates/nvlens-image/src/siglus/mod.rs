@@ -156,7 +156,7 @@ impl ImageFormat for G00 {
             }
             2 => decode_patches(data, &h, frame, size)?,
             3 => {
-                let image = crate::decode(&data[5..])?.ok_or(Error::InvalidFormat)?;
+                let image = crate::standard::Raster.decode(&data[5..])?;
                 if image.meta.width != meta.width || image.meta.height != meta.height {
                     return Err(corrupt(1, "G00 JPEG dimensions differ from header"));
                 }

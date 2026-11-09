@@ -43,12 +43,12 @@ fn key_and_delta_frames_match_independent_pixel_vectors() -> Result<()> {
         ),
     ];
     for (data, expected, count) in cases {
-        let image = crate::decode(&data)?.ok_or(Error::InvalidFormat)?;
+        let image = crate::decode_as("frame/rugp", &data)?;
         let PixelBuffer::Rgba8(pixels) = &image.pixels else {
             return Err(Error::InvalidFormat);
         };
         assert_eq!(*pixels, expected.repeat(count));
-        assert_eq!(crate::frame_count(&data)?, Some(1));
+        assert_eq!(crate::frame_count_as("frame/rugp", &data)?, 1);
         assert!(image.to_png()?.starts_with(b"\x89PNG\r\n\x1a\n"));
         for end in MAGIC.len()..data.len() {
             assert!(Frame.decode(&data[..end]).is_err());

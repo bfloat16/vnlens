@@ -16,7 +16,9 @@ mod systemnnn;
 mod will;
 mod yuris;
 
-pub use format::{ImageFormat, ImageRegistration, decode, decode_frame, frame_count, metadata};
+pub use format::{
+    ImageFormat, ImageRegistration, decode_as, decode_frame_as, frame_count_as, metadata_as,
+};
 pub use model::{Image, ImageMeta, OffsetUnit, PixelBuffer, swap_red_blue};
 
 /// Forces this crate to be linked so its format registrations are included in
