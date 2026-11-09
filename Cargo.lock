@@ -3720,7 +3720,6 @@ dependencies = [
  "nvlens-bin",
  "nvlens-core",
  "nvlens-crypto",
- "nvlens-engine",
  "nvlens-image",
  "nvlens-io",
  "nvlens-script",
@@ -3731,6 +3730,7 @@ name = "nvlens-audio"
 version = "0.1.0"
 dependencies = [
  "lewton",
+ "nvlens-bin",
  "nvlens-core",
  "nvlens-crypto",
  "nvlens-io",
@@ -3773,12 +3773,14 @@ dependencies = [
 name = "nvlens-engine"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs",
  "iced-x86",
  "nvlens-bin",
  "nvlens-core",
  "nvlens-crypto",
  "nvlens-io",
  "nvlens-unpack",
+ "serde_json",
 ]
 
 [[package]]
@@ -3796,9 +3798,11 @@ dependencies = [
  "nvlens-io",
  "nvlens-script",
  "nvlens-video",
+ "raw-window-handle",
  "rodio",
  "tracing",
  "unicode-segmentation",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
