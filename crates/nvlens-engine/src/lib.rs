@@ -12,6 +12,7 @@ mod krkr;
 mod krkrz_hxv4;
 mod model;
 mod propeller;
+mod routing;
 mod rugp;
 mod siglus;
 mod systemnnn;

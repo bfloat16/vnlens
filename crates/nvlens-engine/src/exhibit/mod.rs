@@ -1,6 +1,9 @@
 //! ExHIBIT / RetouchSystem. `liteInit` reads RT_BITMAP 152, column 31,
 //! top 32 rows, then XORs the bit word with `calcIniValue`'s INI checksum.
 //! `INIT_ENTRY` passes setting/SYSVER to select whether TITLE is included.
+//! UxAdvSystem::createMovieFilename (sub_100C1D80) defaults to .mpg and
+//! accepts an explicit extension. playVideo passes the disk path through to
+//! IGraphBuilder::RenderFile (sub_48A6F0), without an engine-specific wrapper.
 
 use crate::{
     Engine,

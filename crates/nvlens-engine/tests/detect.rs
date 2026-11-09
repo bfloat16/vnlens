@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use nvlens_core::{ResourceOrigin, ResourceRoute};
 use nvlens_io::BinaryWriter;
 use std::{fs, sync::atomic::AtomicU64};
 
@@ -55,23 +56,38 @@ fn propeller_requires_pe_evidence_and_routes_only_its_formats() {
     .unwrap();
     let game = identify(&dir.0, &cancel).unwrap().unwrap();
     assert_eq!(game.engine, Engine::Propeller);
-    assert_eq!(game.route("BG.MPK").unwrap().tag, "mpk/propeller");
+    assert_eq!(archive_tag(&game, "BG.MPK"), "mpk/propeller");
     let movie = dir.0.join("ma.mpk");
     let mut header = [0; 12];
     BinaryWriter::u32_le(0xba01_0000, &mut header);
     fs::write(&movie, header).unwrap();
     assert_eq!(
-        game.resource_kind_for_path(&movie),
+        game.route_path(&movie).unwrap().kind(),
         nvlens_core::ResourceKind::Video
     );
-    assert!(game.route_path(&movie).is_none());
+    assert!(matches!(
+        game.route_path(&movie).unwrap(),
+        ResourceRoute::Video("ffmpeg")
+    ));
     let package = dir.0.join("m.mpk");
     BinaryWriter::u32_le(8, &mut header);
     fs::write(&package, header).unwrap();
-    assert!(game.route_path(&package).is_some());
-    assert_eq!(game.script_format_for("system.MSC"), Some("msc/propeller"));
-    assert!(game.route("data.arc").is_none());
-    assert!(game.script_format_for("image.mgr").is_none());
+    assert!(matches!(
+        game.route_path(&package).unwrap(),
+        ResourceRoute::Archive(_)
+    ));
+    assert_eq!(
+        game.resource_route("system.MSC", ResourceOrigin::File, &[]),
+        ResourceRoute::Script("msc/propeller")
+    );
+    assert!(!matches!(
+        game.resource_route("data.arc", ResourceOrigin::File, &[]),
+        ResourceRoute::Archive(_)
+    ));
+    assert!(matches!(
+        game.resource_route("image.mgr", ResourceOrigin::File, &[]),
+        ResourceRoute::Image(_)
+    ));
 }
 
 #[test]
@@ -85,8 +101,27 @@ fn pe_strings_precede_layout_and_archive_bytes_are_not_evidence() {
     let game = identify(&dir.0, &cancel).unwrap().unwrap();
     assert_eq!(game.engine, Engine::Will);
     assert!(game.evidence.starts_with("PE features"));
-    assert_eq!(game.route("random.arc").unwrap().tag, "arc/willv2");
-    assert!(game.route("Scripts.ypf").is_none());
+    assert_eq!(archive_tag(&game, "random.arc"), "arc/willv2");
+    assert!(!matches!(
+        game.resource_route("Scripts.ypf", ResourceOrigin::File, &[]),
+        ResourceRoute::Archive(_)
+    ));
+    let movie = dir.0.join("op.dat");
+    fs::write(
+        &movie,
+        b"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c",
+    )
+    .unwrap();
+    assert_eq!(
+        game.route_path(&movie).unwrap().kind(),
+        nvlens_core::ResourceKind::Video
+    );
+    let data = dir.0.join("save.dat");
+    fs::write(&data, b"not-asf-header-0").unwrap();
+    assert_eq!(
+        game.route_path(&data).unwrap().kind(),
+        nvlens_core::ResourceKind::Unknown
+    );
     fs::remove_file(dir.0.join("renamed.exe")).unwrap();
     assert!(matches!(
         identify(&dir.0, &cancel),
@@ -158,10 +193,10 @@ fn emote_attaches_to_host_and_never_identifies_an_engine() {
     fs::write(dir.0.join("host.exe"), pe_bytes(b"AdvHD\0WillPlus\0")).unwrap();
     let game = identify(&dir.0, &cancel).unwrap().unwrap();
     assert_eq!(game.engine, Engine::Will);
-    assert_eq!(game.route("data.arc").unwrap().tag, "arc/willv2");
-    assert_eq!(game.route("body.psb").unwrap().tag, "psb/emote-resources");
+    assert_eq!(archive_tag(&game, "data.arc"), "arc/willv2");
+    assert_eq!(archive_tag(&game, "body.psb"), "psb/emote-resources");
     assert_eq!(
-        game.route("pack_info.psb.m").unwrap().tag,
+        archive_tag(&game, "pack_info.psb.m"),
         "psb/emote-archive-info"
     );
     fs::write(
@@ -193,10 +228,16 @@ fn krkr_requires_host_evidence_and_hxv4_resolution_never_falls_back() {
     .unwrap();
     let game = identify(&dir.0, &cancel).unwrap().unwrap();
     assert_eq!(game.engine, Engine::Krkr);
-    assert_eq!(game.route("DATA.XP3").unwrap().tag, "xp3/krkr");
+    assert_eq!(archive_tag(&game, "DATA.XP3"), "xp3/krkr");
     assert!(game.resource_options().numbers.is_empty());
-    assert_eq!(game.script_format_for("scene.ks"), Some("script/krkr"));
-    assert!(game.route("other.arc").is_none());
+    assert_eq!(
+        game.resource_route("scene.ks", ResourceOrigin::File, &[]),
+        ResourceRoute::Script("script/krkr")
+    );
+    assert!(!matches!(
+        game.resource_route("other.arc", ResourceOrigin::File, &[]),
+        ResourceRoute::Archive(_)
+    ));
     fs::write(
         dir.0.join("extra.tpm"),
         pe_bytes(b"Hxv4\0PARAMS\0FilterManager\0"),
@@ -212,4 +253,11 @@ fn krkr_requires_host_evidence_and_hxv4_resolution_never_falls_back() {
         identify(&dir.0, &cancel),
         Err(Error::Unsupported(_))
     ));
+}
+
+fn archive_tag(game: &Identification, name: &str) -> &'static str {
+    match game.resource_route(name, ResourceOrigin::File, &[]) {
+        ResourceRoute::Archive(route) => route.tag,
+        _ => "missing archive route",
+    }
 }
