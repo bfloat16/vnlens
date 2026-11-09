@@ -22,9 +22,8 @@ pub(super) struct AudioPreview {
 }
 
 impl AudioPreview {
-    pub(super) fn new(bytes: &[u8], cancelled: &AtomicBool) -> anyhow::Result<Self> {
-        let pcm = nvlens_audio::decode_cancellable(bytes, cancelled)?
-            .ok_or_else(|| anyhow::anyhow!("Audio decoder did not match"))?;
+    pub(super) fn new(tag: &str, bytes: &[u8], cancelled: &AtomicBool) -> anyhow::Result<Self> {
+        let pcm = nvlens_audio::decode_cancellable_as(tag, bytes, cancelled)?;
         // These are texture resolution, not limits on duration or channel count.
         let mel = MelSpectrogram::new(&pcm, 1536, 192, cancelled)?;
         let mut channels = Vec::with_capacity(mel.channels.len());
@@ -353,7 +352,7 @@ impl Workspace {
     }
 }
 
-fn time(seconds: f64) -> String {
+pub(super) fn time(seconds: f64) -> String {
     let minutes = (seconds / 60.).floor() as u64;
     format!("{minutes}:{:04.1}", seconds % 60.)
 }

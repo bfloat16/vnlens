@@ -122,7 +122,7 @@ impl Workspace {
         let scrollable = self
             .preview
             .as_ref()
-            .is_some_and(|preview| preview.image.is_none());
+            .is_some_and(|preview| preview.image.is_none() && preview.video.is_none());
         div()
             .size_full()
             .overflow_hidden()
@@ -236,6 +236,9 @@ impl Workspace {
         if let Some(audio) = &preview.audio {
             return self.audio_view(audio, cx).into_any_element();
         }
+        if let Some(video) = &preview.video {
+            return self.video_view(video, cx).into_any_element();
+        }
         if preview.image.is_some() {
             return self.image_preview(cx);
         }
@@ -338,6 +341,12 @@ impl Render for Workspace {
             return self.settings(window, cx).into_any_element();
         }
         let inset = self.animate_layout(window);
+        // Present pictures at display rate while playing; the event loop's
+        // 33 ms tick alone would cap playback near 30 fps.
+        if self.video_playing() {
+            self.tick_video(cx);
+            window.request_animation_frame();
+        }
         div()
             .relative()
             .size_full()
@@ -352,7 +361,15 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_dialog))
             .on_action(cx.listener(|this, _: &TogglePlayback, _, cx| {
                 if this.show_inspector {
-                    this.toggle_audio(cx);
+                    if this
+                        .preview
+                        .as_ref()
+                        .is_some_and(|preview| preview.video.is_some())
+                    {
+                        this.toggle_video(cx);
+                    } else {
+                        this.toggle_audio(cx);
+                    }
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenFolder, _, cx| this.path_dialog(true, cx)))

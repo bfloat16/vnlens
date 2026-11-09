@@ -1,19 +1,42 @@
 //! Resource decoding and exports through domain crates, independent of widgets.
 use crate::browser::Target;
 use anyhow::{Result, anyhow};
-use nvlens_core::{Archive, ResourceResolver};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use nvlens_core::{Archive, ResourceKind, ResourceResolver, ResourceRoute};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+
+/// Retains nested archive backing storage while independent decoders read it.
+#[derive(Clone)]
+pub struct VideoInput {
+    pub tag: &'static str,
+    pub source: Arc<dyn nvlens_io::ReadAt>,
+    pub name: String,
+    pub archive: Option<Arc<crate::archive::MountedArchive>>,
+}
+impl fmt::Debug for VideoInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VideoInput")
+            .field("name", &self.name)
+            .field("size", &self.source.len())
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug)]
 pub struct Resource {
+    pub route: ResourceRoute,
     pub bytes: Arc<[u8]>,
     pub script: Option<nvlens_script::ir::Script>,
     pub psb: Option<nvlens_script::psb::Psb>,
     pub image: Option<nvlens_image::Image>,
     pub audio: bool,
+    /// Name hint for FFmpeg's container probe when the resource is a video.
+    pub video: Option<VideoInput>,
 }
 
 struct Resources<'a>(&'a dyn Archive, &'a [String], &'a str);
@@ -79,81 +102,124 @@ impl ResourceResolver for FileResources<'_> {
     }
 }
 
-pub fn read(target: &Target, raw: bool, cancel: &AtomicBool) -> Result<Resource> {
-    let bytes = target.read(raw, cancel)?;
+pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Resource> {
     let mut resource = Resource {
-        bytes: bytes.into(),
+        route: ResourceRoute::Other(ResourceKind::Unknown),
+        bytes: Arc::from([]),
         script: None,
         psb: None,
         image: None,
         audio: false,
+        video: None,
     };
-    if raw || cancel.load(Ordering::Relaxed) {
+    if raw {
+        resource.bytes = target.read(true, cancel)?.into();
         return Ok(resource);
     }
-    // Video containers have no pixel/audio preview decoder yet. Preserve their
-    // encoded stream without passing Ogg Theora to the Vorbis audio reader.
-    let kind = match target {
-        Target::Entry { archive, index }
-            if archive.entries[*index].kind != nvlens_core::ResourceKind::Unknown =>
-        {
-            archive.entries[*index].kind
-        }
-        Target::File(path, game) => game.resource_kind_for_path(path),
-        _ => nvlens_core::ResourceKind::guess_from_name(&target.name()),
-    };
-    if kind == nvlens_core::ResourceKind::Video {
-        return Ok(resource);
+    if cancel.load(Ordering::Relaxed) {
+        return Err(nvlens_core::Error::Cancelled.into());
     }
-    let script_tag = match target {
-        Target::Entry { archive, .. } => archive.game.script_format_for(&target.name()),
-        Target::File(_, game) => game.script_format_for(&target.name()),
-        _ => None,
-    };
-    if let Target::Entry { archive, index } = target
-        && let Some(tag) = script_tag
-    {
-        let opened = archive
-            .source
-            .lock()
-            .map_err(|_| anyhow!("Archive reader is unavailable"))?;
-        resource.script = nvlens_script::disassemble_with_options_as(
-            tag,
-            &resource.bytes,
-            Some(&Resources(
-                &*opened.archive,
-                &archive.paths,
-                &archive.paths[*index],
-            )),
-            archive.game.resource_options(),
-        )?;
-    } else if let Target::File(path, game) = target
-        && let Some(tag) = script_tag
-    {
-        resource.script = nvlens_script::disassemble_with_options_as(
-            tag,
-            &resource.bytes,
-            Some(&FileResources(path)),
-            game.resource_options(),
-        )?;
-    }
-    if resource.script.is_none() {
-        if let Some(tag) = script_tag
-            && let Some(content) = nvlens_script::decode_content_as(tag, &resource.bytes)?
-        {
-            match content {
-                nvlens_script::ScriptContent::Text(text) => {
-                    resource.bytes = text.into_bytes().into();
-                }
-                nvlens_script::ScriptContent::Psb(psb) => resource.psb = Some(psb),
-            }
-            return Ok(resource);
+    // Only the requested resource is opened. Streaming sources expose logical
+    // bytes after archive transforms, and retain the archive's backing storage.
+    let source: Option<Arc<dyn nvlens_io::ReadAt>> = match target {
+        Target::File(path, _) => Some(Arc::new(nvlens_io::ArcView::open(path)?)),
+        Target::Entry { archive, index } => {
+            let opened = archive
+                .source
+                .lock()
+                .map_err(|_| anyhow!("Archive reader is unavailable"))?;
+            let entry = opened
+                .archive
+                .entries()
+                .get(*index)
+                .ok_or_else(|| anyhow!("Selected entry no longer exists"))?;
+            opened.archive.open_entry_source(entry)?
         }
-        if let Some(image) = nvlens_image::decode(&resource.bytes)? {
-            resource.image = Some(image);
+        _ => return Err(anyhow!("Select a file with an identified game context")),
+    };
+    let source = if let Some(source) = source {
+        source
+    } else {
+        resource.bytes = target.read(false, cancel)?.into();
+        Arc::new(resource.bytes.clone()) as Arc<dyn nvlens_io::ReadAt>
+    };
+    let mut header = [0; 64];
+    let size = usize::try_from(source.len().min(header.len() as u64))?;
+    let mut reader = source.clone().reader(cancel.clone())?;
+    std::io::Read::read_exact(&mut reader, &mut header[..size])?;
+    resource.route = target.resource_route(&header[..size])?;
+    if let ResourceRoute::Media { audio, video } = resource.route {
+        resource.route = if nvlens_video::contains_video(source.clone(), cancel.clone())? {
+            ResourceRoute::Video(video)
         } else {
-            resource.audio = nvlens_audio::metadata(&resource.bytes)?.is_some();
+            ResourceRoute::Audio(audio)
+        };
+    }
+    if let ResourceRoute::Video(tag) = resource.route {
+        resource.video = Some(VideoInput {
+            tag,
+            source,
+            name: target.name(),
+            archive: match target {
+                Target::Entry { archive, .. } => Some(archive.clone()),
+                _ => None,
+            },
+        });
+        return Ok(resource);
+    }
+    if resource.bytes.is_empty() {
+        resource.bytes = target.read(false, cancel)?.into();
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(nvlens_core::Error::Cancelled.into());
+    }
+    match resource.route {
+        ResourceRoute::Script(tag) => {
+            resource.script = match target {
+                Target::Entry { archive, index } => {
+                    let opened = archive
+                        .source
+                        .lock()
+                        .map_err(|_| anyhow!("Archive reader is unavailable"))?;
+                    nvlens_script::disassemble_with_options_as(
+                        tag,
+                        &resource.bytes,
+                        Some(&Resources(
+                            &*opened.archive,
+                            &archive.paths,
+                            &archive.paths[*index],
+                        )),
+                        archive.game.resource_options(),
+                    )?
+                }
+                Target::File(path, game) => nvlens_script::disassemble_with_options_as(
+                    tag,
+                    &resource.bytes,
+                    Some(&FileResources(path)),
+                    game.resource_options(),
+                )?,
+                _ => None,
+            };
+            if resource.script.is_none()
+                && let Some(content) = nvlens_script::decode_content_as(tag, &resource.bytes)?
+            {
+                match content {
+                    nvlens_script::ScriptContent::Text(text) => {
+                        resource.bytes = text.into_bytes().into()
+                    }
+                    nvlens_script::ScriptContent::Psb(psb) => resource.psb = Some(psb),
+                }
+            }
         }
+        ResourceRoute::Image(tag) => {
+            resource.image = Some(nvlens_image::decode_as(tag, &resource.bytes)?)
+        }
+        ResourceRoute::Audio(tag) => {
+            nvlens_audio::metadata_as(tag, &resource.bytes)?
+                .ok_or_else(|| anyhow!("Resource does not match audio route {tag}"))?;
+            resource.audio = true;
+        }
+        _ => {}
     }
     Ok(resource)
 }
@@ -176,19 +242,23 @@ impl ExportKind {
 
 pub fn convert(
     bytes: &[u8],
+    route: &ResourceRoute,
     kind: ExportKind,
     script: Option<&nvlens_script::ir::Script>,
     frame: usize,
 ) -> Result<Vec<u8>> {
-    match kind {
-        ExportKind::Png => Ok(nvlens_image::decode_frame(bytes, frame)?
-            .ok_or_else(|| anyhow!("No image decoder matched"))?
-            .to_png()?),
-        ExportKind::Wav => Ok(nvlens_audio::decode(bytes)?
-            .ok_or_else(|| anyhow!("No audio decoder matched"))?
-            .to_wav()?),
-        ExportKind::Ir => Ok(script
+    match (kind, route) {
+        (ExportKind::Png, ResourceRoute::Image(tag)) => {
+            Ok(nvlens_image::decode_frame_as(tag, bytes, frame)?.to_png()?)
+        }
+        (ExportKind::Wav, ResourceRoute::Audio(tag)) => {
+            Ok(nvlens_audio::decode_as(tag, bytes)?.to_wav()?)
+        }
+        (ExportKind::Ir, ResourceRoute::Script(_)) => Ok(script
             .ok_or_else(|| anyhow!("No disassembly is available"))?
             .to_json()?),
+        _ => Err(anyhow!(
+            "Conversion does not match the selected resource route"
+        )),
     }
 }

@@ -25,6 +25,7 @@ mod script_view;
 mod scroll;
 mod scrollbar;
 mod status_view;
+mod video_view;
 mod view;
 
 const BACKGROUND: u32 = 0x1c1c1e;
@@ -133,6 +134,7 @@ impl Drop for Column {
 }
 
 struct Preview {
+    route: nvlens_core::ResourceRoute,
     bytes: Arc<[u8]>,
     lines: Option<Vec<Range<usize>>>,
     widest_line: usize,
@@ -143,55 +145,80 @@ struct Preview {
     psb: Option<Arc<nvlens_script::psb::Psb>>,
     ir_table: Option<script_view::Table>,
     audio: Option<audio_view::AudioPreview>,
+    video: Option<Box<video_view::VideoPreview>>,
 }
 
 impl Preview {
-    fn new(resource: crate::resource::Resource, cancelled: &AtomicBool) -> anyhow::Result<Self> {
+    fn new(
+        resource: crate::resource::Resource,
+        cancelled: &Arc<AtomicBool>,
+    ) -> anyhow::Result<Self> {
         if cancelled.load(Ordering::Relaxed) {
             return Err(nvlens_core::Error::Cancelled.into());
         }
-        let bytes = resource.bytes;
+        let mut bytes = resource.bytes;
+        // Containers without a video stream fall back to the byte view.
+        let video = match &resource.video {
+            Some(input) => {
+                let video =
+                    video_view::VideoPreview::new(input.clone(), cancelled.clone())?.map(Box::new);
+                if video.is_none() && bytes.is_empty() {
+                    let mut reader = input.source.clone().reader(cancelled.clone())?;
+                    let mut data = Vec::new();
+                    std::io::Read::read_to_end(&mut reader, &mut data)?;
+                    bytes = data.into();
+                }
+                video
+            }
+            None => None,
+        };
         let mut widest_line = 0;
         let lines = (resource.script.is_none()
             && resource.psb.is_none()
             && resource.image.is_none()
-            && !resource.audio)
-            .then(|| {
-                std::str::from_utf8(&bytes)
-                    .ok()
-                    .filter(|text| {
-                        !text
-                            .chars()
-                            .any(|ch| ch.is_control() && !matches!(ch, '\r' | '\n' | '\t'))
-                    })
-                    .map(|text| {
-                        let mut offset = 0;
-                        let mut max_width = 0;
-                        text.split_inclusive('\n')
-                            .enumerate()
-                            .map(|(index, line)| {
-                                let width: usize = line
-                                    .chars()
-                                    .map(|ch| match ch {
-                                        '\t' => 4,
-                                        ch if ch.is_ascii() => 1,
-                                        _ => 2,
-                                    })
-                                    .sum();
-                                if width > max_width {
-                                    max_width = width;
-                                    widest_line = index;
-                                }
-                                let start = offset;
-                                offset += line.len();
-                                start..offset
-                            })
-                            .collect()
-                    })
-            })
-            .flatten();
+            && !resource.audio
+            && video.is_none())
+        .then(|| {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .filter(|text| {
+                    !text
+                        .chars()
+                        .any(|ch| ch.is_control() && !matches!(ch, '\r' | '\n' | '\t'))
+                })
+                .map(|text| {
+                    let mut offset = 0;
+                    let mut max_width = 0;
+                    text.split_inclusive('\n')
+                        .enumerate()
+                        .map(|(index, line)| {
+                            let width: usize = line
+                                .chars()
+                                .map(|ch| match ch {
+                                    '\t' => 4,
+                                    ch if ch.is_ascii() => 1,
+                                    _ => 2,
+                                })
+                                .sum();
+                            if width > max_width {
+                                max_width = width;
+                                widest_line = index;
+                            }
+                            let start = offset;
+                            offset += line.len();
+                            start..offset
+                        })
+                        .collect()
+                })
+        })
+        .flatten();
         let image_frames = if resource.image.is_some() {
-            nvlens_image::frame_count(&bytes)?.unwrap_or(1)
+            match resource.route {
+                nvlens_core::ResourceRoute::Image(tag) => {
+                    nvlens_image::frame_count_as(tag, &bytes)?
+                }
+                _ => return Err(anyhow::anyhow!("Image preview has no format route")),
+            }
         } else {
             0
         };
@@ -208,9 +235,15 @@ impl Preview {
         };
         let audio = resource
             .audio
-            .then(|| audio_view::AudioPreview::new(&bytes, cancelled))
+            .then(|| match resource.route {
+                nvlens_core::ResourceRoute::Audio(tag) => {
+                    audio_view::AudioPreview::new(tag, &bytes, cancelled)
+                }
+                _ => Err(anyhow::anyhow!("Audio preview has no format route")),
+            })
             .transpose()?;
         Ok(Self {
+            route: resource.route,
             bytes,
             lines,
             widest_line,
@@ -221,6 +254,7 @@ impl Preview {
             psb: resource.psb.map(Arc::new),
             ir_table,
             audio,
+            video,
         })
     }
 
@@ -271,6 +305,9 @@ impl Preview {
         if let Some(audio) = self.audio {
             audio.release(cx);
         }
+        if let Some(video) = self.video {
+            video.release(cx);
+        }
     }
 }
 
@@ -279,7 +316,7 @@ enum Event {
     NamesRefreshed(anyhow::Result<Vec<names::Refresh>>),
     Imported(Vec<anyhow::Result<Item>>),
     Folder(u64, anyhow::Result<Option<Folder>>),
-    Preview(Arc<AtomicBool>, anyhow::Result<Preview>),
+    Preview(Arc<AtomicBool>, anyhow::Result<Box<Preview>>),
     ImageFrame(Arc<AtomicBool>, usize, anyhow::Result<Arc<RenderImage>>),
     ImageThumbnail(Arc<AtomicBool>, usize, anyhow::Result<Arc<RenderImage>>),
     Progress(Progress, Option<String>),
@@ -367,6 +404,7 @@ impl Workspace {
                 }
                 let _ = weak.update(cx, |this, cx| {
                     this.tick_audio(cx);
+                    this.tick_video(cx);
                 });
                 if weak.upgrade().is_none() {
                     break;
@@ -442,7 +480,7 @@ impl Workspace {
                 match result {
                     Ok(preview) => {
                         self.clear_preview(cx);
-                        self.preview = Some(preview);
+                        self.preview = Some(*preview);
                     }
                     Err(error) => {
                         self.preview_failed = true;
@@ -759,7 +797,8 @@ impl Workspace {
         cx.background_executor()
             .spawn(async move {
                 let result = crate::resource::read(&target, raw, &request)
-                    .and_then(|resource| Preview::new(resource, &request));
+                    .and_then(|resource| Preview::new(resource, &request))
+                    .map(Box::new);
                 let _ = sender.send(Event::Preview(request, result));
             })
             .detach();
@@ -829,6 +868,7 @@ impl Workspace {
         };
         let bytes = preview.bytes.clone();
         let script = preview.script.clone();
+        let route = preview.route.clone();
         let image_frame = preview.image_frame;
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -850,6 +890,7 @@ impl Workspace {
                                 let result = (|| -> anyhow::Result<PathBuf> {
                                     let converted = crate::resource::convert(
                                         &bytes,
+                                        &route,
                                         kind,
                                         script.as_deref(),
                                         image_frame,

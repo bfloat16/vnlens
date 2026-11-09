@@ -159,7 +159,11 @@ impl Workspace {
                         }
                         let path = entry?.path();
                         if path.is_file()
-                            && let Some(route) = game.route_path(&path)
+                            && let nvlens_core::ResourceRoute::Archive(route) = game.resource_route(
+                                &path.to_string_lossy(),
+                                nvlens_core::ResourceOrigin::File,
+                                &[],
+                            )
                             && route.tag == "xp3/krkr"
                         {
                             inputs.push((path, route.options));

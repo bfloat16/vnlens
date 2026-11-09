@@ -60,7 +60,7 @@ fn standalone_archives_cannot_bypass_engine_identification() {
 fn lists_disk_without_mounting_archives_or_reading_files() {
     nvlens_archive::init();
     let dir = temp();
-    let cancel = AtomicBool::new(false);
+    let cancel = Arc::new(AtomicBool::new(false));
     let mut invalid = vec![0; 32];
     invalid[..4].copy_from_slice(b"YPF\0");
     fs::write(dir.0.join("broken.arc"), invalid).unwrap();
@@ -144,9 +144,9 @@ fn archive_sets_open_one_logical_archive_and_export_physical_names() -> Result<(
 }
 
 #[test]
-fn propeller_mpeg_mpk_is_a_video_leaf_without_an_archive_route() -> Result<()> {
+fn propeller_mpeg_mpk_resolves_its_video_route_only_on_access() -> Result<()> {
     let dir = temp();
-    let cancel = AtomicBool::new(false);
+    let cancel = Arc::new(AtomicBool::new(false));
     let mut game =
         nvlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?;
     game.engine = nvlens_engine::Engine::Propeller;
@@ -155,12 +155,137 @@ fn propeller_mpeg_mpk_is_a_video_leaf_without_an_archive_route() -> Result<()> {
     BinaryWriter::u32_le(0xba01_0000, &mut header);
     fs::write(&path, header)?;
     let item = Item::from_target(Target::File(path, Arc::new(game)), Some(12));
-    assert_eq!(item.kind, ResourceKind::Video);
-    assert!(!item.container);
+    assert_eq!(item.kind, ResourceKind::Archive);
+    assert!(item.container);
     assert!(open(&item.target, &cancel, false)?.is_none());
     let resource = crate::resource::read(&item.target, false, &cancel)?;
-    assert_eq!(&*resource.bytes, &header);
+    assert!(resource.bytes.is_empty());
+    let input = resource
+        .video
+        .as_ref()
+        .ok_or_else(|| anyhow!("Missing video input"))?;
+    assert_eq!(&*input.source.read_at(0, header.len())?, &header);
     assert!(resource.image.is_none() && resource.script.is_none() && !resource.audio);
+    Ok(())
+}
+
+#[test]
+fn preview_and_export_share_the_selected_image_and_audio_routes() -> Result<()> {
+    let dir = temp();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let game = Arc::new(
+        nvlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?,
+    );
+    let image = nvlens_image::Image {
+        meta: nvlens_image::ImageMeta {
+            width: 1,
+            height: 1,
+            bpp: 32,
+            offset_x: 0,
+            offset_y: 0,
+            offset_unit: nvlens_image::OffsetUnit::Pixels,
+        },
+        pixels: nvlens_image::PixelBuffer::Rgba8(vec![12, 34, 56, 255]),
+    };
+    let png = image.to_png()?;
+    // ARC entries have no type field. Both disk and archive access must use
+    // the identified host's resource route, even with an unknown entry name.
+    fs::write(dir.0.join("cg.png"), &png)?;
+    fs::write(dir.0.join("cg.arc"), fixture("00001", &png))?;
+    let archive = Arc::new(
+        MountedArchive::open(dir.0.join("cg.arc"), false, game.clone())?
+            .ok_or_else(|| anyhow!("Missing fixture archive"))?,
+    );
+    for target in [
+        Target::File(dir.0.join("cg.png"), game.clone()),
+        Target::Entry { archive, index: 0 },
+    ] {
+        let resource = crate::resource::read(&target, false, &cancel)?;
+        assert_eq!(resource.route, ResourceRoute::Image("image/standard"));
+        assert!(resource.image.is_some());
+        assert!(resource.script.is_none());
+        let exported = crate::resource::convert(
+            &resource.bytes,
+            &resource.route,
+            crate::resource::ExportKind::Png,
+            None,
+            0,
+        )?;
+        assert_eq!(exported, png);
+        assert!(
+            crate::resource::convert(
+                &resource.bytes,
+                &resource.route,
+                crate::resource::ExportKind::Wav,
+                None,
+                0
+            )
+            .is_err()
+        );
+    }
+    let pcm = nvlens_audio::Pcm {
+        meta: nvlens_audio::AudioMeta {
+            codec: "fixture",
+            channels: 2,
+            sample_rate: 48000,
+            frames: Some(2),
+        },
+        samples: Arc::from([0.25, -0.5, 0.75, -1.]),
+    };
+    let wav = pcm.to_wav()?;
+    let path = dir.0.join("voice.wav");
+    fs::write(&path, &wav)?;
+    let resource = crate::resource::read(&Target::File(path, game), false, &cancel)?;
+    assert_eq!(resource.route, ResourceRoute::Audio("audio/standard"));
+    assert!(resource.audio);
+    let exported = crate::resource::convert(
+        &resource.bytes,
+        &resource.route,
+        crate::resource::ExportKind::Wav,
+        None,
+        0,
+    )?;
+    assert_eq!(
+        nvlens_audio::decode_as("audio/standard", &exported)?.samples,
+        pcm.samples
+    );
+    Ok(())
+}
+
+#[test]
+fn foreign_headerless_prefix_is_not_sent_to_global_decoders() -> Result<()> {
+    let dir = temp();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut game =
+        nvlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?;
+    game.engine = nvlens_engine::Engine::Bgi;
+    let path = dir.0.join("unknown");
+    let mut bytes = vec![0; 44];
+    BinaryWriter::u16_le(2, &mut bytes);
+    BinaryWriter::u16_le(16, &mut bytes[2..]);
+    fs::write(&path, &bytes)?;
+    let resource = crate::resource::read(&Target::File(path, Arc::new(game)), false, &cancel)?;
+    assert_eq!(resource.route, ResourceRoute::Other(ResourceKind::Unknown));
+    assert_eq!(&*resource.bytes, &bytes);
+    assert!(resource.image.is_none() && resource.script.is_none() && !resource.audio);
+    Ok(())
+}
+
+#[test]
+fn a_selected_native_decoder_error_does_not_fall_through() -> Result<()> {
+    let dir = temp();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut game =
+        nvlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?;
+    game.engine = nvlens_engine::Engine::Siglus;
+    let path = dir.0.join("broken.g00");
+    fs::write(&path, b"not a G00")?;
+    let target = Target::File(path, Arc::new(game));
+    assert!(crate::resource::read(&target, false, &cancel).is_err());
+    assert_eq!(
+        &*crate::resource::read(&target, true, &cancel)?.bytes,
+        b"not a G00"
+    );
     Ok(())
 }
 

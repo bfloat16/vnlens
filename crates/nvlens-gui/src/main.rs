@@ -9,6 +9,7 @@ mod playback;
 mod preferences;
 mod resource;
 mod titlebar;
+mod video;
 mod workspace;
 
 use gpui::{App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size};

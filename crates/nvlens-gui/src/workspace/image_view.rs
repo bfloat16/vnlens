@@ -153,6 +153,9 @@ impl Workspace {
         self.image_view.frames.reveal = Some(frame);
         let request = self.request.clone();
         let sender = self.sender.clone();
+        let nvlens_core::ResourceRoute::Image(tag) = preview.route else {
+            return;
+        };
         let bytes = preview.bytes.clone();
         cx.background_executor()
             .spawn(async move {
@@ -160,8 +163,7 @@ impl Workspace {
                     if request.load(Ordering::Relaxed) {
                         return Err(nvlens_core::Error::Cancelled.into());
                     }
-                    let image = nvlens_image::decode_frame(&bytes, frame)?
-                        .ok_or_else(|| anyhow::anyhow!("Image format is unavailable"))?;
+                    let image = nvlens_image::decode_frame_as(tag, &bytes, frame)?;
                     if request.load(Ordering::Relaxed) {
                         return Err(nvlens_core::Error::Cancelled.into());
                     }

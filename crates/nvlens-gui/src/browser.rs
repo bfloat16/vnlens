@@ -4,7 +4,7 @@
 
 use crate::archive::{self, Extraction, MountedArchive, Node, Progress};
 use anyhow::{Context, Result, anyhow};
-use nvlens_core::ResourceKind;
+use nvlens_core::{ResourceKind, ResourceOrigin, ResourceRoute};
 use nvlens_engine::{ArchiveSet, Identification};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -96,15 +96,37 @@ impl Target {
     pub fn archive_hint(&self) -> bool {
         match self {
             Self::ArchiveSet(..) => true,
-            Self::File(path, game) => game.route_path(path).is_some(),
+            Self::File(..) => matches!(self.resource_route(&[]), Ok(ResourceRoute::Archive(_))),
             Self::Entry { archive, index } => {
                 archive.has_references(*index)
-                    || (!matches!(
-                        archive.entries[*index].kind,
-                        ResourceKind::Script | ResourceKind::Data
-                    ) && archive.game.route(&archive.paths[*index]).is_some())
+                    || matches!(self.resource_route(&[]), Ok(ResourceRoute::Archive(_)))
             }
             _ => false,
+        }
+    }
+    /// Preserves native storage names for headerless formats; recovered names
+    /// supply a route only when the stored name has no known format.
+    /// Classification never reads payloads; callers supply a prefix on access.
+    pub fn resource_route(&self, header: &[u8]) -> Result<ResourceRoute> {
+        match self {
+            Self::File(path, game) => {
+                Ok(game.resource_route(&path.to_string_lossy(), ResourceOrigin::File, header))
+            }
+            Self::Entry { archive, index } => {
+                let entry = &archive.entries[*index];
+                let origin = ResourceOrigin::Entry(entry.kind);
+                let route = archive.game.resource_route(&entry.name, origin, header);
+                if matches!(route, ResourceRoute::Other(_)) && archive.paths[*index] != entry.name {
+                    Ok(archive
+                        .game
+                        .resource_route(&archive.paths[*index], origin, header))
+                } else {
+                    Ok(route)
+                }
+            }
+            _ => Err(anyhow!(
+                "Resource routing requires an identified file or entry"
+            )),
         }
     }
     pub fn read(&self, raw: bool, cancel: &AtomicBool) -> Result<Vec<u8>> {
@@ -116,7 +138,7 @@ impl Target {
                 let bytes =
                     std::fs::read(path).with_context(|| format!("Reading {}", path.display()))?;
                 if !raw
-                    && let Some(tag) = game.script_format_for(&self.name())
+                    && let ResourceRoute::Script(tag) = self.resource_route(&bytes)?
                     && let std::borrow::Cow::Owned(decoded) =
                         nvlens_script::decode_as(tag, &bytes, game.resource_options())?
                 {
@@ -186,23 +208,23 @@ impl Item {
         let container = target.is_directory() || target.archive_hint();
         let (kind, count) = match &target {
             Target::ArchiveSet(set, _) => (ResourceKind::Archive, Some(set.members.len())),
-            Target::File(path, game) => (game.resource_kind_for_path(path), None),
+            Target::File(..) => (
+                target
+                    .resource_route(&[])
+                    .map_or(ResourceKind::Unknown, |route| route.kind()),
+                None,
+            ),
             Target::ArchiveDirectory { archive, directory } => (
                 ResourceKind::Archive,
                 Some(archive.directories[*directory].items.len()),
             ),
-            Target::Entry { archive, index } => {
-                let kind = archive.entries[*index].kind;
-                (
-                    if kind == ResourceKind::Unknown {
-                        ResourceKind::guess_from_name(&archive.paths[*index])
-                    } else {
-                        kind
-                    },
-                    None,
-                )
-            }
-            _ => (ResourceKind::guess_from_name(&name), None),
+            Target::Entry { .. } => (
+                target
+                    .resource_route(&[])
+                    .map_or(ResourceKind::Unknown, |route| route.kind()),
+                None,
+            ),
+            _ => (ResourceKind::Unknown, None),
         };
         Self {
             name,

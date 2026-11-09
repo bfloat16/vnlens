@@ -123,6 +123,9 @@ impl Workspace {
         if missing.is_empty() {
             return;
         }
+        let nvlens_core::ResourceRoute::Image(tag) = preview.route else {
+            return;
+        };
         let bytes = preview.bytes.clone();
         let request = frames.request.clone();
         let sender = self.sender.clone();
@@ -133,8 +136,7 @@ impl Workspace {
                         break;
                     }
                     let result = (|| {
-                        let image = nvlens_image::decode_frame(&bytes, frame)?
-                            .ok_or_else(|| anyhow::anyhow!("Image format is unavailable"))?;
+                        let image = nvlens_image::decode_frame_as(tag, &bytes, frame)?;
                         if request.load(Ordering::Relaxed) {
                             return Err(nvlens_core::Error::Cancelled.into());
                         }

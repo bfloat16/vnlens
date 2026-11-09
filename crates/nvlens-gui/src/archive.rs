@@ -8,7 +8,9 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use nvlens_core::{Catalog, Entry, Opened};
+use nvlens_core::{
+    ArchiveRoute, Catalog, Entry, Opened, ResourceKind, ResourceOrigin, ResourceRoute,
+};
 
 // Include the virtual-path setting because it changes the child's listing.
 type ReferenceArchives = HashMap<(usize, bool), Arc<MountedArchive>>;
@@ -39,11 +41,20 @@ impl MountedArchive {
         virtual_paths: bool,
         game: Arc<nvlens_engine::Identification>,
     ) -> Result<Option<Self>> {
-        let Some(route) = game.route_path(&path) else {
+        let ResourceRoute::Archive(route) = game.route_path(&path)? else {
             return Ok(None);
         };
+        Self::open_routed(path, &route, virtual_paths, game).map(Some)
+    }
+
+    fn open_routed(
+        path: PathBuf,
+        route: &ArchiveRoute,
+        virtual_paths: bool,
+        game: Arc<nvlens_engine::Identification>,
+    ) -> Result<Self> {
         let opened = Catalog::load()
-            .open(&path, &route)
+            .open(&path, route)
             .with_context(|| format!("Opening {} with {:?}", path.display(), game.engine))?;
         let mut paths: Vec<_> = opened
             .archive
@@ -59,7 +70,7 @@ impl MountedArchive {
                     path;
             }
         }
-        Ok(Some(Self {
+        Ok(Self {
             source_path: path.canonicalize()?,
             path,
             directories: directories(&paths),
@@ -75,7 +86,7 @@ impl MountedArchive {
             source: Arc::new(Mutex::new(opened)),
             game,
             _backing: None,
-        }))
+        })
     }
 
     /// Materializes only the selected nested container, preserving its extension.
@@ -85,15 +96,17 @@ impl MountedArchive {
         virtual_paths: bool,
         game: Arc<nvlens_engine::Identification>,
     ) -> Result<Option<Self>> {
-        if game.route(name).is_none() {
+        let ResourceRoute::Archive(route) =
+            game.resource_route(name, ResourceOrigin::Entry(ResourceKind::Unknown), bytes)
+        else {
             return Ok(None);
-        }
+        };
         let backing = TemporaryArchive::new()?;
         let file_name = name.rsplit(['/', '\\']).next().unwrap_or("archive");
         let path = nvlens_io::filesystem::write_under(&backing.0, file_name, bytes)?;
-        let Some(mut opened) = Self::open(path, virtual_paths, game)? else {
-            return Ok(None);
-        };
+        // Keep the selected route and its options: the temporary filename does
+        // not contain the original parent path used to select engine keys.
+        let mut opened = Self::open_routed(path, &route, virtual_paths, game)?;
         opened.path = PathBuf::from(name);
         opened._backing = Some(Arc::new(backing));
         Ok(Some(opened))
