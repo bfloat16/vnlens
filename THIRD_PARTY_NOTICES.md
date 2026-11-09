@@ -17,3 +17,15 @@ Copyright (c) 2026 XuanRikka
 This project adapts code from [GARbro](https://github.com/morkt/GARbro).
 
 Copyright (c) 2014-2020 morkt
+
+## AFHook
+
+This project adapts code from [AFHook](https://github.com/eplightning/afhook).
+
+Copyright (c) 2014 eplightning
+
+## deoptimizeobs
+
+This project adapts code from [deoptimizeobs](https://github.com/tsdko/deoptimizeobs).
+
+Released into the public domain under the Unlicense by tsdko.
