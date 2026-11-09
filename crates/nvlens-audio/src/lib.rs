@@ -8,6 +8,7 @@ pub mod bgi;
 mod format;
 pub mod levels;
 mod model;
+pub mod rugp;
 mod siglus;
 pub mod spectrogram;
 mod standard;

@@ -18,14 +18,9 @@ const HEADER_SIZE: usize = 0x0C;
 const CHUNK_STRIDE: usize = 0x10;
 const ENC_CHUNK_TYPE: u32 = 2;
 
-/// Heuristic detector: the `"FCD\0"` magic.
-fn looks_like(head: &[u8]) -> bool {
-    head.len() >= 4 && &head[..4] == MAGIC
-}
-
 /// Returns the encryption chunk index after validating the chunk table.
 fn encryption_chunk(data: &[u8]) -> Result<Option<usize>> {
-    if !looks_like(data) {
+    if !data.starts_with(MAGIC) {
         return Ok(None);
     }
     let mut reader = BinaryReader::new(data);
@@ -43,11 +38,6 @@ fn encryption_chunk(data: &[u8]) -> Result<Option<usize>> {
 /// Indicates whether the container requires the custom Blowfish key tables.
 pub fn is_encrypted(data: &[u8]) -> Result<bool> {
     Ok(encryption_chunk(data)?.is_some())
-}
-
-/// Per-file audio key = MD5(seed[12] || salt[0x4000]).
-fn derive_key(seed: &[u8; 12], salt: &[u8]) -> [u8; 16] {
-    md5::digest_parts(&[seed, salt])
 }
 
 /// If `data` is an FCD container carrying an encryption (type-2) chunk, decrypt
@@ -69,7 +59,7 @@ pub fn decrypt_payload_if_encrypted(
             reason: "invalid FCD seed".into(),
         })?;
     let mut buf = data[HEADER_SIZE + CHUNK_STRIDE * count..].to_vec();
-    Blowfish::new(datas, &derive_key(seed, salt))
+    Blowfish::new(datas, &md5::digest_parts(&[seed, salt]))
         .map_err(|e| Error::Corrupt {
             offset: seed_off as u64,
             reason: e.to_string(),
@@ -79,28 +69,5 @@ pub fn decrypt_payload_if_encrypted(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn looks_like_matches_magic() {
-        assert!(looks_like(b"FCD\0\x01\x02"));
-        assert!(!looks_like(b"OGGS"));
-        assert!(!looks_like(b"FC"));
-    }
-
-    #[test]
-    fn distinguishes_unencrypted_data_from_truncated_chunk_tables() {
-        let mut plain = [0u8; HEADER_SIZE];
-        plain[..4].copy_from_slice(MAGIC);
-        assert!(!is_encrypted(&plain).unwrap());
-        assert!(
-            decrypt_payload_if_encrypted(&plain, &[], &[])
-                .unwrap()
-                .is_none()
-        );
-        plain[7] = 1;
-        assert!(is_encrypted(&plain).is_err());
-    }
-}
+#[path = "../../tests/ages_mk2/fcd.rs"]
+mod tests;

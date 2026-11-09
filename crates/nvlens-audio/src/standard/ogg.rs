@@ -79,19 +79,3 @@ fn corrupt(reason: &str) -> Error {
         reason: format!("Ogg Vorbis: {reason}"),
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_corrupt_ogg_headers_and_honors_cancellation() {
-        assert!(metadata(b"OggS\0\x02short").is_err());
-        let cancelled = AtomicBool::new(true);
-        assert!(matches!(
-            decode(b"OggS\0\x02", &cancelled),
-            Err(Error::Cancelled)
-        ));
-    }
-}

@@ -4,11 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+autotests = false
 
 [dependencies]
 nvlens-core.workspace = true
 nvlens-crypto.workspace = true
 nvlens-io.workspace = true
+nvlens-bin.workspace = true
 lewton.workspace = true
 ogg.workspace = true
 opus1.workspace = true
