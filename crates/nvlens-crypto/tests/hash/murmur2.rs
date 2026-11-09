@@ -11,5 +11,13 @@ fn independent_vectors() {
     ] {
         assert_eq!(hash(input, 0), expected);
     }
-    assert_eq!(hash(&(0..32).collect::<Vec<u8>>(), 0), 0xf1bc_6c23);
+    let bytes: Vec<u8> = (0..32).collect();
+    assert_eq!(hash(&bytes, 0), 0xf1bc_6c23);
+    for step in 1..=7 {
+        let mut streaming = Murmur2::new(bytes.len() as u64, 0);
+        for chunk in bytes.chunks(step) {
+            streaming.update(chunk);
+        }
+        assert_eq!(streaming.finish(), 0xf1bc_6c23);
+    }
 }

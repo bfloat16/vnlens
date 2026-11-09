@@ -2,7 +2,7 @@
 
 use std::io::Read;
 
-use flate2::read::ZlibDecoder;
+pub use flate2::read::ZlibDecoder;
 
 use super::CompressError;
 

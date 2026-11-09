@@ -5,19 +5,37 @@ const MOD_ADLER: u32 = 65_521;
 /// Computes Adler-32 with the standard initial value.
 #[must_use]
 pub fn checksum(data: &[u8]) -> u32 {
-    let mut a = 1u32;
-    let mut b = 0u32;
+    let mut state = Adler32::default();
+    state.update(data);
+    state.checksum()
+}
 
-    for chunk in data.chunks(5_552) {
-        for &byte in chunk {
-            a += u32::from(byte);
-            b += a;
-        }
-        a %= MOD_ADLER;
-        b %= MOD_ADLER;
+/// Incremental Adler-32 for independently sized streaming buffers.
+#[derive(Clone, Copy, Debug)]
+pub struct Adler32 {
+    a: u32,
+    b: u32,
+}
+impl Default for Adler32 {
+    fn default() -> Self {
+        Self { a: 1, b: 0 }
     }
-
-    (b << 16) | a
+}
+impl Adler32 {
+    pub fn update(&mut self, data: &[u8]) {
+        for chunk in data.chunks(5_552) {
+            for &byte in chunk {
+                self.a += u32::from(byte);
+                self.b += self.a;
+            }
+            self.a %= MOD_ADLER;
+            self.b %= MOD_ADLER;
+        }
+    }
+    #[must_use]
+    pub fn checksum(self) -> u32 {
+        (self.b << 16) | self.a
+    }
 }
 
 #[cfg(test)]
