@@ -29,3 +29,7 @@ Copyright (c) 2014 eplightning
 This project adapts code from [deoptimizeobs](https://github.com/tsdko/deoptimizeobs).
 
 Released into the public domain under the Unlicense by tsdko.
+
+## FFmpeg
+
+Video preview dynamically links the [FFmpeg](https://ffmpeg.org) libraries (`avcodec`, `avformat`, `avutil`, `swresample`, `swscale` and their dependencies), distributed as the LGPL shared build from [FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds). FFmpeg is licensed under the GNU Lesser General Public License version 2.1 or later; its source code is available from <https://ffmpeg.org/download.html>, and the build's own `LICENSE.txt` lists the licenses of the bundled libraries. The DLLs may be replaced with any compatible FFmpeg 9 shared build.
