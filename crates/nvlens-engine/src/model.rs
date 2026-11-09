@@ -1,10 +1,12 @@
 //! Immutable identification results. Secret material is redacted in Debug.
 
-use nvlens_core::{ArchiveOptions, ArchiveRoute};
+use nvlens_core::{ArchiveOptions, ArchiveRoute, ResourceKind};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
+    Propeller,
+    Rugp,
     Escude,
     SystemNnn,
     Exhibit,
@@ -44,6 +46,9 @@ impl Identification {
                 None
             };
         }
+        if self.engine == Engine::Propeller {
+            return ext.eq_ignore_ascii_case("msc").then_some("msc/propeller");
+        }
         if self.engine == Engine::SystemNnn {
             return match ext.to_ascii_lowercase().as_str() {
                 "spt" => Some("spt/systemnnn"),
@@ -71,6 +76,7 @@ impl Identification {
     #[must_use]
     pub fn script_format(&self) -> Option<&'static str> {
         match self.engine {
+            Engine::Rugp => Some("object/rugp"),
             Engine::Escude => Some("script/escude"),
             Engine::Exhibit => Some("rld/exhibit"),
             Engine::Yuris => Some("ybn/yuris"),
@@ -103,6 +109,8 @@ impl Identification {
             }
         }
         let tag = match self.engine {
+            Engine::Propeller if extension == "mpk" => "mpk/propeller",
+            Engine::Rugp if extension == "rio" => "rio/rugp",
             Engine::Escude if extension == "bin" => "bin/escude",
             Engine::SystemNnn if extension == "gpk" => "gpk/systemnnn",
             Engine::SystemNnn if extension == "vpk" => "vpk/systemnnn",
@@ -141,6 +149,45 @@ impl Identification {
 
     #[must_use]
     pub fn route_path(&self, path: &Path) -> Option<ArchiveRoute> {
+        if self.engine == Engine::Propeller
+            && self.resource_kind_for_path(path) == ResourceKind::Video
+        {
+            return None;
+        }
         self.route(&path.to_string_lossy())
+    }
+
+    /// Classifies the identified host's disk files. Stuff uses `.mpk` for both
+    /// MPK archives and MPEG program streams (sub_402380's movie resources).
+    /// Inspect only the start code to disambiguate that extension. Unreadable
+    /// files retain their name-based route so opening reports the original error.
+    #[must_use]
+    pub fn resource_kind_for_path(&self, path: &Path) -> ResourceKind {
+        if self.engine == Engine::Propeller
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("mpk"))
+            && matches!(
+                nvlens_io::ArcView::open(path).and_then(|view| view.read_u32_le(0)),
+                Ok(0xba01_0000)
+            )
+        {
+            return ResourceKind::Video;
+        }
+        if self.engine == Engine::Propeller {
+            match path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "ogv" => return ResourceKind::Audio,
+                "mgr" => return ResourceKind::Image,
+                "msc" => return ResourceKind::Script,
+                _ => {}
+            }
+        }
+        ResourceKind::guess_from_name(&path.to_string_lossy())
     }
 }

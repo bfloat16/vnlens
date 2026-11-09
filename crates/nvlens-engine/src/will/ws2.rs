@@ -1,26 +1,35 @@
-//! AdvHD parameter tables, located through decoded x64 MOVZX/LEA/MOV
-//! table access. Each byte opcode indexes one pointer to signed type tags,
+//! AdvHD parameter tables, located through decoded x64 MOVZX/LEA/MOV or
+//! x86 MOVZX/MOV table access (sub_4E4890). The x86 compiler can interleave
+//! stack writes and use a different register for the loaded pointer.
+//! Each byte opcode indexes one native-width pointer to signed type tags,
 //! terminated by a negative byte; null pointers denote undefined opcodes.
 
-use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
+use iced_x86::{
+    Decoder, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory, MemorySize,
+    Mnemonic, OpAccess, OpKind, Register,
+};
 use nvlens_core::{Error, Result};
 use nvlens_io::{BinaryReader, pe::PeImage};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(super) fn table(pe: &PeImage<'_>, cancel: &AtomicBool) -> Result<Option<Vec<u8>>> {
-    if pe.machine != 0x8664 {
-        return Ok(None);
-    }
+    let bitness = match pe.machine {
+        0x14c => 32,
+        0x8664 => 64,
+        _ => return Ok(None),
+    };
     let mut result = None;
+    let mut info = InstructionInfoFactory::new();
     for section in pe.sections.iter().filter(|s| s.executable) {
         let data = pe.section_data(section)?;
         let mut decoder = Decoder::with_ip(
-            64,
+            bitness,
             data,
             pe.image_base + u64::from(section.virtual_address),
             DecoderOptions::NONE,
         );
         let mut previous = iced_x86::Instruction::default();
+        let mut opcode_register = None;
         let mut decoded = 0usize;
         while decoder.can_decode() {
             if decoded.is_multiple_of(1024) && cancel.load(Ordering::Relaxed) {
@@ -28,7 +37,47 @@ pub(super) fn table(pe: &PeImage<'_>, cancel: &AtomicBool) -> Result<Option<Vec<
             }
             decoded += 1;
             let current = decoder.decode();
-            if previous.mnemonic() == Mnemonic::Movzx
+            if bitness == 32
+                && let Some(index) = opcode_register
+                && let Some(address) = x86_table(index, &current)
+                && let Some(candidate) = read_table(pe, address)
+            {
+                if result.as_ref().is_some_and(|old| old != &candidate) {
+                    return Err(Error::UnknownScheme(Some(
+                        "Conflicting AdvHD WS2 parameter tables".into(),
+                    )));
+                }
+                result = Some(candidate);
+            }
+            if bitness == 32 {
+                // Keep the zero-extended opcode only within straight-line code.
+                // Instruction info includes partial and implicit register writes.
+                if current.is_invalid() || current.flow_control() != FlowControl::Next {
+                    opcode_register = None;
+                } else if current.mnemonic() == Mnemonic::Movzx
+                    && current.op0_kind() == OpKind::Register
+                    && current.op0_register().is_gpr32()
+                    && current.op1_kind() == OpKind::Memory
+                    && current.memory_size() == MemorySize::UInt8
+                {
+                    opcode_register = Some(current.op0_register());
+                } else if let Some(index) = opcode_register
+                    && info.info(&current).used_registers().iter().any(|used| {
+                        used.register().full_register() == index.full_register()
+                            && matches!(
+                                used.access(),
+                                OpAccess::Write
+                                    | OpAccess::CondWrite
+                                    | OpAccess::ReadWrite
+                                    | OpAccess::ReadCondWrite
+                            )
+                    })
+                {
+                    opcode_register = None;
+                }
+            }
+            if bitness == 64
+                && previous.mnemonic() == Mnemonic::Movzx
                 && previous.op0_kind() == OpKind::Register
                 && previous.op1_kind() == OpKind::Register
                 && matches!(
@@ -84,12 +133,33 @@ pub(super) fn table(pe: &PeImage<'_>, cancel: &AtomicBool) -> Result<Option<Vec<
     Ok(result)
 }
 
+fn x86_table(index: Register, table_load: &Instruction) -> Option<u64> {
+    if table_load.mnemonic() != Mnemonic::Mov
+        || table_load.op0_kind() != OpKind::Register
+        || !table_load.op0_register().is_gpr32()
+        || table_load.op1_kind() != OpKind::Memory
+        || table_load.memory_size() != MemorySize::UInt32
+        || table_load.memory_base() != Register::None
+        || table_load.memory_index() != index
+        || table_load.memory_index_scale() != 4
+    {
+        return None;
+    }
+    // The table is an absolute PE data address in x86 builds. Its 256 native
+    // pointers are validated by read_table before this candidate is accepted.
+    Some(u64::from(table_load.memory_displacement32()))
+}
+
 fn read_table(pe: &PeImage<'_>, address: u64) -> Option<Vec<u8>> {
     let mut pointers = BinaryReader::new(pe.at_va(address)?);
     let mut out = Vec::new();
     let mut defined = false;
     for _ in 0..256 {
-        let address = pointers.read_u64_le().ok()?;
+        let address = if pe.machine == 0x14c {
+            u64::from(pointers.read_u32_le().ok()?)
+        } else {
+            pointers.read_u64_le().ok()?
+        };
         if address == 0 {
             out.push(0xfe);
             continue;
@@ -143,81 +213,5 @@ fn wide(register: Register) -> Register {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use nvlens_io::BinaryWriter;
-
-    fn fixture(base: u64, register: u8) -> Vec<u8> {
-        let mut data = vec![0; 0x1600];
-        data[..2].copy_from_slice(b"MZ");
-        BinaryWriter::u32_le(0x80, &mut data[0x3c..]);
-        data[0x80..0x84].copy_from_slice(b"PE\0\0");
-        BinaryWriter::u16_le(0x8664, &mut data[0x84..]);
-        BinaryWriter::u16_le(1, &mut data[0x86..]);
-        BinaryWriter::u16_le(0xf0, &mut data[0x94..]);
-        BinaryWriter::u16_le(0x20b, &mut data[0x98..]);
-        BinaryWriter::u64_le(base, &mut data[0xb0..]);
-        BinaryWriter::u32_le(0x200, &mut data[0xd4..]);
-        BinaryWriter::u32_le(0x1000, &mut data[0x194..]);
-        BinaryWriter::u32_le(0x1400, &mut data[0x198..]);
-        BinaryWriter::u32_le(0x200, &mut data[0x19c..]);
-        BinaryWriter::u32_le(0x60000020, &mut data[0x1ac..]);
-        let code = if register == 14 {
-            [
-                0x41, 0x0f, 0xb6, 0xc0, 0x4c, 0x8d, 0x35, 0xf5, 0, 0, 0, 0x4d, 0x8b, 0x34, 0xc6,
-                0xc3,
-            ]
-        } else {
-            [
-                0x41, 0x0f, 0xb6, 0xc0, 0x48, 0x8d, 0x1d, 0xf5, 0, 0, 0, 0x48, 0x8b, 0x1c, 0xc3,
-                0xc3,
-            ]
-        };
-        data[0x200..0x210].copy_from_slice(&code);
-        for i in 0..256 {
-            BinaryWriter::u64_le(base + 0x1900, &mut data[0x300 + i * 8..]);
-        }
-        data[0xb00..0xb03].copy_from_slice(&[6, 8, 255]);
-        data
-    }
-    #[test]
-    fn x64_table_detection_follows_relocated_operands_and_registers() {
-        for (base, reg) in [(0x140000000, 14), (0x180000000, 3)] {
-            let bytes = fixture(base, reg);
-            let image = PeImage::parse(&bytes).unwrap().unwrap();
-            let schema = table(&image, &AtomicBool::new(false)).unwrap().unwrap();
-            assert_eq!(schema, [6, 8, 255].repeat(256));
-            assert!(matches!(
-                table(&image, &AtomicBool::new(true)),
-                Err(Error::Cancelled)
-            ));
-        }
-        let mut bytes = fixture(0x140000000, 14);
-        bytes[0x20e] = 0xce; // REX/SIB now indexes RCX, unlike the MOVZX destination.
-        assert!(
-            table(
-                &PeImage::parse(&bytes).unwrap().unwrap(),
-                &AtomicBool::new(false)
-            )
-            .unwrap()
-            .is_none()
-        );
-    }
-    #[test]
-    fn schema_terminators_strings_and_repeat_rules() {
-        assert!(valid_schema(&[6, 8, 1, 7, 9]));
-        assert!(!valid_schema(&[6]));
-        assert!(!valid_schema(&[7, 7]));
-        assert!(!valid_schema(&[11]));
-        let mut bytes = fixture(0x140000000, 14);
-        BinaryWriter::u64_le(0, &mut bytes[0x300..]);
-        let schema = table(
-            &PeImage::parse(&bytes).unwrap().unwrap(),
-            &AtomicBool::new(false),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(schema[0], 254);
-    }
-}
+#[path = "../../tests/will/ws2.rs"]
+mod tests;

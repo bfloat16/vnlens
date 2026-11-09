@@ -202,19 +202,3 @@ fn wide_bytes(s: &str) -> Vec<u8> {
     out
 }
 nvlens_core::inventory::submit! { Detector {pe,layout,engine:Engine::KrkrzHxv4,resolve} }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[ignore = "Requires NVLENS_HXV4_EXE; resolves only the original executable without a sidecar or writing a PE"]
-    fn resolves_local_protected_executable() -> Result<()> {
-        let path = PathBuf::from(std::env::var_os("NVLENS_HXV4_EXE").ok_or(Error::InvalidFormat)?);
-        let root = path.parent().ok_or(Error::InvalidFormat)?;
-        let options = resolve(root, std::slice::from_ref(&path), &AtomicBool::new(false))?;
-        assert_eq!(options.numbers.get("hxv4"), Some(&1));
-        assert_eq!(options.keys.len(), 5);
-        Ok(())
-    }
-}

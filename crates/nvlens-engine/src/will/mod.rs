@@ -29,13 +29,22 @@ fn resolve(
             continue;
         };
         if let Some(table) = ws2::table(&image, cancel)? {
+            // sub_4E4E40/sub_4CC610 use CP932 and one-byte terminators in the
+            // x86 reader; the x64 reader stores UTF-16LE code units directly.
+            let codepage = if image.machine == 0x14c { 932 } else { 1200 };
             let key = nvlens_core::Secret::new(table);
-            if options.keys.get("will_ws2").is_some_and(|old| old != &key) {
+            if options.keys.get("will_ws2").is_some_and(|old| old != &key)
+                || options
+                    .numbers
+                    .get("will_ws2_codepage")
+                    .is_some_and(|old| *old != codepage)
+            {
                 return Err(nvlens_core::Error::UnknownScheme(Some(
                     "Conflicting AdvHD WS2 layouts".into(),
                 )));
             }
             options.keys.insert("will_ws2", key);
+            options.numbers.insert("will_ws2_codepage", codepage);
         }
     }
     Ok(options)
