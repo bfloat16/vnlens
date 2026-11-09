@@ -6,7 +6,7 @@ use nvlens_script::ir::Script;
 
 use super::*;
 
-const FONT: &str = "Cascadia Mono";
+const FONT: &str = MONO_FONT;
 const FONT_SIZE: f32 = 12.;
 const CELL_PADDING: f32 = 10.;
 
@@ -152,9 +152,9 @@ impl Workspace {
                                         if node.is_none() || (!selected && column == 0) {
                                             SECONDARY
                                         } else if !selected && column == 1 {
-                                            0x9dcaff
+                                            ACCENT_TEXT
                                         } else {
-                                            0xf5f5f7
+                                            TEXT
                                         },
                                     ))
                                     .when(column == 1, |cell| {
@@ -176,7 +176,7 @@ impl Workspace {
                                                 .when(expandable, |button| {
                                                     button
                                                         .cursor_pointer()
-                                                        .hover(|style| style.bg(rgb(0x37373b)))
+                                                        .hover(|style| style.bg(rgb(BORDER)))
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
                                                                 cx.stop_propagation();
@@ -252,10 +252,10 @@ impl Workspace {
                             .bg(rgb(PANEL))
                             .border_b_1()
                             .border_color(rgb(BORDER))
-                            .text_color(rgb(0x9dcaff))
+                            .text_color(rgb(ACCENT_TEXT))
                             .block_mouse_except_scroll()
                             .cursor_pointer()
-                            .hover(|style| style.bg(rgb(0x37373b)))
+                            .hover(|style| style.bg(rgb(BORDER)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.toggle_record(row, cx);
@@ -296,373 +296,5 @@ impl Workspace {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use nvlens_script::ir::{Arg, Instruction, Opcode, Span, Value};
-    use std::prelude::rust_2024::test;
-
-    #[test]
-    fn prepares_complete_cells_without_a_window_and_honors_cancellation() -> anyhow::Result<()> {
-        let value = "Japanese 日本語\n\t".repeat(4096);
-        let script = Script {
-            ir_version: nvlens_script::ir::VERSION,
-            format: "test".into(),
-            format_version: 1,
-            sections: Vec::new(),
-            instructions: vec![Instruction {
-                id: 0,
-                span: Span {
-                    offset: 0x1_0000_0020,
-                    size: 4,
-                },
-                source_line: Some(3),
-                opcode: Opcode {
-                    namespace: "test".into(),
-                    code: 255,
-                    operation: nvlens_script::ir::Operation::Unknown,
-                    variant: None,
-                    native_mnemonic: None,
-                },
-                args: vec![Arg {
-                    native_name: None,
-                    name: nvlens_script::ir::ArgName::Value,
-                    span: Span {
-                        offset: 36,
-                        size: 0,
-                    },
-                    value: Value::Text(value.clone()),
-                    attributes: Vec::new(),
-                }],
-                attributes: Vec::new(),
-            }],
-        };
-        let cancelled = AtomicBool::new(false);
-        let table = Table::new(&script, &cancelled)?;
-        assert_eq!(table.rows[0].cells[0].as_ref(), "100000020");
-        assert_eq!(table.rows[0].cells[1].as_ref(), "unknown");
-        assert_eq!(
-            table.rows[0].cells[2].as_ref(),
-            format!("native=test:0xFF, value={value:?}")
-        );
-        cancelled.store(true, Ordering::Relaxed);
-        assert!(matches!(
-            Table::new(&script, &cancelled),
-            Err(nvlens_core::Error::Cancelled)
-        ));
-        Ok(())
-    }
-
-    /// NVLENS_PSB_GAME=<game> cargo test -p nvlens-gui validates_psb_scenario_preview -- --ignored --nocapture
-    #[test]
-    #[ignore = "Requires NVLENS_PSB_GAME with data.xp3; reads PSB scenario previews without a window"]
-    fn validates_psb_scenario_preview() -> anyhow::Result<()> {
-        nvlens_archive::init();
-        nvlens_script::init();
-        let root = PathBuf::from(
-            std::env::var_os("NVLENS_PSB_GAME")
-                .ok_or_else(|| anyhow::anyhow!("Set NVLENS_PSB_GAME"))?,
-        );
-        let cancel = AtomicBool::new(false);
-        let game = Arc::new(
-            nvlens_engine::identify(&root, &cancel)?
-                .ok_or_else(|| anyhow::anyhow!("Engine not identified"))?,
-        );
-        let path = root.join("data.xp3");
-        let route = game
-            .route_path(&path)
-            .ok_or_else(|| anyhow::anyhow!("No archive route"))?;
-        let mut recovery =
-            nvlens_archive::krkr::NameRecovery::open(&[(path.clone(), route.options)], &cancel)?;
-        while recovery.step(&cancel)? {}
-        assert_eq!(recovery.progress().failed, 0);
-        let mut checked = 0;
-        let mut rows = 0;
-        for (_, names) in recovery.paths() {
-            let archive = Arc::new(
-                crate::archive::MountedArchive::open(path.clone(), false, game.clone())?
-                    .ok_or_else(|| anyhow::anyhow!("Archive not recognized"))?
-                    .with_paths(names)?,
-            );
-            for (index, name) in archive.paths.iter().enumerate() {
-                if !name.ends_with(".ks.scn") {
-                    continue;
-                }
-                let resource = crate::resource::read(
-                    &Target::Entry {
-                        archive: archive.clone(),
-                        index,
-                    },
-                    false,
-                    &cancel,
-                )?;
-                assert!(resource.psb.is_some(), "{name}");
-                assert!(resource.script.is_none(), "{name}");
-                let mut preview = Preview::new(resource, &cancel)?;
-                assert!(preview.lines.is_none(), "{name}");
-                let psb = preview
-                    .psb
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Missing PSB tree"))?;
-                let table = preview
-                    .ir_table
-                    .as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("Missing PSB table"))?;
-                assert_eq!(table.psb_json(0, psb).transpose()?, Some(psb.to_json()?));
-                let scenes = table
-                    .visible
-                    .iter()
-                    .copied()
-                    .find(|&row| table.rows[row].cells[1].as_ref() == "scenes")
-                    .ok_or_else(|| anyhow::anyhow!("Missing scenes field in {name}"))?;
-                assert!(table.expandable(scenes), "{name}");
-                assert!(!table.rows[scenes].expanded);
-                let visible = table.visible.clone();
-                table.toggle(scenes, None);
-                assert!(table.visible.len() > visible.len());
-                table.toggle(scenes, None);
-                assert_eq!(table.visible, visible);
-                rows += table.rows.len();
-                checked += 1;
-            }
-        }
-        assert!(checked > 0);
-        println!(
-            "Validated {checked} PSB scenario previews with {rows} tree rows without a window"
-        );
-        Ok(())
-    }
-
-    /// NVLENS_ESCUDE_GAME=<game> cargo test -p nvlens-gui validates_escude_preview_data -- --ignored --nocapture
-    #[test]
-    #[ignore = "Requires NVLENS_ESCUDE_GAME; validates source text, structured rows and navigation without a window"]
-    fn validates_escude_preview_data() -> anyhow::Result<()> {
-        nvlens_archive::init();
-        nvlens_script::init();
-        let root = PathBuf::from(
-            std::env::var_os("NVLENS_ESCUDE_GAME")
-                .ok_or_else(|| anyhow::anyhow!("Set NVLENS_ESCUDE_GAME"))?,
-        );
-        let cancel = AtomicBool::new(false);
-        let game = Arc::new(
-            nvlens_engine::identify(&root, &cancel)?
-                .ok_or_else(|| anyhow::anyhow!("Engine not identified"))?,
-        );
-        let mut sources = 0;
-        let mut structures = 0;
-        for file in [
-            "haison2_fd.bin",
-            "script.bin",
-            "data.bin",
-            "gfx.bin",
-            "snd.bin",
-        ] {
-            let archive = Arc::new(
-                crate::archive::MountedArchive::open(root.join(file), false, game.clone())?
-                    .ok_or_else(|| anyhow::anyhow!("Archive not recognized"))?,
-            );
-            for (index, entry) in archive.entries.iter().enumerate() {
-                if entry.kind != nvlens_core::ResourceKind::Script {
-                    continue;
-                }
-                let target = Target::Entry {
-                    archive: archive.clone(),
-                    index,
-                };
-                assert!(!target.archive_hint(), "{}", entry.name);
-                assert!(crate::browser::open(&target, &cancel, false)?.is_none());
-                let resource = crate::resource::read(&target, false, &cancel)?;
-                let raw_resource = crate::resource::read(&target, true, &cancel)?;
-                assert!(raw_resource.script.is_none());
-                assert!(raw_resource.bytes.starts_with(b"acp\0"));
-                let mut preview = Preview::new(resource, &cancel)?;
-                if file == "haison2_fd.bin" || entry.name == "credit.txt" {
-                    assert!(preview.script.is_none());
-                    assert!(preview.ir_table.is_none());
-                    assert!(preview.lines.is_some());
-                    let original = target.read(false, &cancel)?;
-                    let expected = nvlens_script::decode_text_as("text/escude", &original)?
-                        .ok_or_else(|| anyhow::anyhow!("No source text"))?;
-                    assert_eq!(std::str::from_utf8(&preview.bytes)?, expected);
-                    sources += 1;
-                } else {
-                    let script = preview
-                        .script
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("No structure for {}", entry.name))?;
-                    if script.format == "scenario/escude" {
-                        for instruction in &script.instructions {
-                            if instruction.opcode.namespace == "escude.scenario"
-                                && instruction.opcode.code == 44
-                            {
-                                assert!(
-                                    instruction
-                                        .opcode
-                                        .native_mnemonic
-                                        .as_deref()
-                                        .is_some_and(|s| s.starts_with("proc_"))
-                                );
-                            }
-                        }
-                    }
-                    let table = preview
-                        .ir_table
-                        .as_mut()
-                        .ok_or_else(|| anyhow::anyhow!("Missing preview table"))?;
-                    assert!(preview.lines.is_none());
-                    let visible = table.visible.clone();
-                    assert_eq!(visible.len(), script.instructions.len());
-                    if let Some(&row) = visible.iter().find(|&&row| table.expandable(row)) {
-                        table.toggle(row, None);
-                        assert!(table.visible.len() > visible.len());
-                        table.toggle(row, None);
-                        assert_eq!(table.visible, visible);
-                    }
-                    let exported = crate::resource::convert(
-                        &preview.bytes,
-                        crate::resource::ExportKind::Ir,
-                        Some(script),
-                        0,
-                    )?;
-                    assert_eq!(exported, script.to_json()?);
-                    structures += 1;
-                }
-            }
-        }
-        assert_eq!(sources, 119);
-        assert_eq!(structures, 201);
-        println!(
-            "Validated {sources} text previews (118 pseudo-C sources) and {structures} structured previews without a window"
-        );
-        Ok(())
-    }
-
-    /// NVLENS_SYSTEMNNN_GAME=<game> cargo test -p nvlens-gui validates_systemnnn_record_preview -- --ignored --nocapture
-    #[test]
-    #[ignore = "Requires NVLENS_SYSTEMNNN_GAME; prepares and expands script rows without a window"]
-    fn validates_systemnnn_record_preview() -> anyhow::Result<()> {
-        nvlens_script::init();
-        let root = PathBuf::from(
-            std::env::var_os("NVLENS_SYSTEMNNN_GAME")
-                .ok_or_else(|| anyhow::anyhow!("Set NVLENS_SYSTEMNNN_GAME"))?,
-        )
-        .join("spt");
-        let cancelled = AtomicBool::new(false);
-        let mut total = 0;
-        let start = Instant::now();
-        for name in [
-            "BCmkri_backscript.spt",
-            "etc.spt",
-            "s100.spt",
-            "s200.spt",
-            "s300.spt",
-            "s400.spt",
-            "sys.spt",
-        ] {
-            let bytes = std::fs::read(root.join(name))?;
-            let script = nvlens_script::disassemble_as("spt/systemnnn", &bytes, None)?
-                .ok_or_else(|| anyhow::anyhow!("SPT not recognized"))?;
-            let mut table = Table::new(&script, &cancelled)?;
-            let roots = table.visible.clone();
-            assert_eq!(roots.len(), script.instructions.len());
-            for (instruction, &row) in roots.iter().enumerate() {
-                assert_eq!(table.instruction_index(row), Some(instruction));
-                if script.instructions[instruction].opcode.variant
-                    == Some(nvlens_script::ir::Qualifier::ResourceTable)
-                {
-                    assert!(!table.rows[row].cells[2].contains("hex["));
-                    table.toggle(row, None);
-                    assert!(table.visible.len() >= roots.len());
-                    let strings: Vec<_> = table.rows[row + 1..table.rows[row].end]
-                        .iter()
-                        .filter(|row| row.cells[1].starts_with("string["))
-                        .collect();
-                    assert!(!strings.is_empty());
-                    assert!(strings.iter().all(|row| row.cells[2].starts_with("{text:")));
-                    table.toggle(row, None);
-                    assert_eq!(table.visible, roots);
-                }
-            }
-            total += roots.len();
-        }
-        assert_eq!(total, 101_511);
-        println!(
-            "Prepared and expanded {total} SPT instructions in {:?}",
-            start.elapsed()
-        );
-        Ok(())
-    }
-
-    /// NVLENS_YURIS_GAME=<game> cargo test -p nvlens-gui validates_game_script_tables -- --ignored --nocapture
-    #[test]
-    #[ignore = "Requires NVLENS_YURIS_GAME; prepares every script preview without a window"]
-    fn validates_game_script_tables() -> anyhow::Result<()> {
-        nvlens_archive::init();
-        nvlens_script::init();
-        let root = PathBuf::from(
-            std::env::var_os("NVLENS_YURIS_GAME")
-                .ok_or_else(|| anyhow::anyhow!("Set NVLENS_YURIS_GAME"))?,
-        );
-        let archive = Arc::new(
-            crate::archive::MountedArchive::open(
-                root.join("pac/Scripts.ypf"),
-                false,
-                Arc::new(
-                    nvlens_engine::identify(&root, &AtomicBool::new(false))?
-                        .ok_or_else(|| anyhow::anyhow!("Engine not identified"))?,
-                ),
-            )?
-            .ok_or_else(|| anyhow::anyhow!("Archive not recognized"))?,
-        );
-        let cancelled = AtomicBool::new(false);
-        let start = Instant::now();
-        let mut checked = 0;
-        let mut records = 0;
-        let mut checked_reported_script = false;
-        let mut slowest = (Duration::ZERO, String::new());
-        for (index, entry) in archive.entries.iter().enumerate() {
-            let read_start = Instant::now();
-            let resource = crate::resource::read(
-                &Target::Entry {
-                    archive: archive.clone(),
-                    index,
-                },
-                false,
-                &cancelled,
-            )?;
-            let read_time = read_start.elapsed();
-            let prepare_start = Instant::now();
-            let preview = Preview::new(resource, &cancelled)?;
-            let prepare_time = prepare_start.elapsed();
-            let script = preview
-                .script
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Script not recognized"))?;
-            let table = preview
-                .ir_table
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Table not prepared"))?;
-            assert_eq!(table.visible.len(), script.instructions.len());
-            let name = entry.name.rsplit(['/', '\\']).next().unwrap_or("");
-            if name == "yst00003.ybn" {
-                checked_reported_script = true;
-                println!(
-                    "{name}: {} instructions, read/disassemble {read_time:?}, prepare {prepare_time:?}",
-                    table.visible.len()
-                );
-            }
-            if prepare_time > slowest.0 {
-                slowest = (prepare_time, entry.name.clone());
-            }
-            records += table.visible.len();
-            checked += 1;
-        }
-        assert!(checked_reported_script);
-        println!(
-            "Prepared {checked} script previews ({records} records) in {:?}; slowest preparation {:?} ({})",
-            start.elapsed(),
-            slowest.0,
-            slowest.1
-        );
-        Ok(())
-    }
-}
+#[path = "../../tests/workspace/script_view.rs"]
+mod tests;

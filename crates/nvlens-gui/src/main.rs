@@ -1,5 +1,5 @@
 //! Native desktop entry point.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod archive;
@@ -8,6 +8,7 @@ mod icons;
 mod playback;
 mod preferences;
 mod resource;
+mod titlebar;
 mod workspace;
 
 use gpui::{App, AppContext, Application, Bounds, WindowBounds, WindowOptions, px, size};
@@ -37,10 +38,7 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(960.), px(600.))),
-                    titlebar: Some(gpui::TitlebarOptions {
-                        title: Some("nvlens".into()),
-                        ..Default::default()
-                    }),
+                    titlebar: Some(titlebar::options()),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| workspace::Workspace::new(window, cx, preferences)),

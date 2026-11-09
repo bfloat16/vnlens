@@ -41,6 +41,27 @@ const DATA: Icon = icon!("data", 0xc2b08c);
 const FILE: Icon = icon!("file", 0xa1a1aa);
 
 const ICONS: &[Icon] = &[
+    icon!("window-minimize", 0xffffff),
+    icon!("window-maximize", 0xffffff),
+    icon!("window-restore", 0xffffff),
+    icon!("window-close", 0xffffff),
+    icon!("home", 0xffffff),
+    icon!("chevron-left", 0xffffff),
+    icon!("chevron-right", 0xffffff),
+    icon!("folder-open", 0xffffff),
+    icon!("file-plus", 0xffffff),
+    icon!("export", 0xffffff),
+    icon!("import", 0xffffff),
+    icon!("sidebar", 0xffffff),
+    icon!("settings", 0xffffff),
+    icon!("check", 0xffffff),
+    icon!("alert", 0xffffff),
+    icon!("spinner", 0xffffff),
+    icon!("copy", 0xffffff),
+    icon!("play", 0xffffff),
+    icon!("pause", 0xffffff),
+    icon!("zoom-in", 0xffffff),
+    icon!("zoom-out", 0xffffff),
     FOLDER,
     ARCHIVE,
     IMAGE,
@@ -85,6 +106,15 @@ impl AssetSource for Assets {
     }
 }
 
+/// Embedded interface glyph tinted with the given color.
+pub fn glyph(path: &'static str, size: f32, color: u32) -> Svg {
+    svg()
+        .path(path)
+        .size(px(size))
+        .flex_shrink_0()
+        .text_color(rgb(color))
+}
+
 pub fn file_icon(item: &Item, selected: bool) -> Svg {
     let icon = for_item(item);
     svg()
@@ -98,8 +128,19 @@ fn for_item(item: &Item) -> Icon {
     if item.target.is_directory() {
         return FOLDER;
     }
-    if item.container {
+    if item.container && matches!(item.kind, ResourceKind::Archive | ResourceKind::Unknown) {
         return ARCHIVE;
+    }
+    // Resource readers know the payload type; an object owning references is
+    // still a script, configuration or image, rather than an archive format.
+    match item.kind {
+        ResourceKind::Image => return IMAGE,
+        ResourceKind::Audio => return AUDIO,
+        ResourceKind::Script => return SCRIPT,
+        ResourceKind::Data => return CONFIG,
+        ResourceKind::Font => return FONT,
+        ResourceKind::Video => return VIDEO,
+        _ => {}
     }
     let name = item.name.to_ascii_lowercase();
     let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
@@ -141,6 +182,8 @@ fn for_item(item: &Item) -> Icon {
             ResourceKind::Image => IMAGE,
             ResourceKind::Audio => AUDIO,
             ResourceKind::Script => SCRIPT,
+            ResourceKind::Data => CONFIG,
+            ResourceKind::Font => FONT,
             ResourceKind::Video => VIDEO,
             ResourceKind::Unknown => match extension {
                 "bin" | "dat" | "data" | "db" | "sqlite" | "sqlite3" | "sav" => DATA,

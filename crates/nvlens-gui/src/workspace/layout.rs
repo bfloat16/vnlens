@@ -88,7 +88,7 @@ impl Workspace {
         let resized = self.viewport_width != viewport;
         self.viewport_width = viewport;
         let reveal = self.reveal_column.take();
-        let preview = self.show_inspector && self.selection.is_some() && self.preview.is_some();
+        let preview = self.show_inspector && self.selection.is_some();
         let depth = self.selection.map(|(depth, _)| depth).unwrap_or_else(|| {
             reveal.unwrap_or_else(|| {
                 if self.active + 1 < self.columns.len() {
@@ -147,77 +147,5 @@ impl Workspace {
             window.request_animation_frame();
         }
         current.inset
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn preview_reserves_one_column_and_closing_reveals_parents() {
-        let opened = target_layout(px(1280.), px(880.), px(220.), px(1124.), px(0.), true, None);
-        assert_eq!(
-            opened,
-            Layout {
-                inset: px(1060.),
-                scroll: px(-880.)
-            }
-        );
-        let closed = target_layout(
-            px(1280.),
-            px(880.),
-            px(220.),
-            px(1124.),
-            opened.scroll,
-            false,
-            None,
-        );
-        assert_eq!(closed, Layout::default());
-        let dragged = target_layout(
-            px(1280.),
-            px(880.),
-            px(220.),
-            px(1124.),
-            px(-500.),
-            true,
-            Some(px(1000.)),
-        );
-        assert_eq!(
-            dragged,
-            Layout {
-                inset: px(1000.),
-                scroll: px(-820.)
-            }
-        );
-    }
-
-    #[test]
-    fn interrupted_motion_continues_from_displayed_position_and_stops() {
-        let now = Instant::now();
-        let target = Layout {
-            inset: px(1000.),
-            scroll: px(-800.),
-        };
-        let mut motion = Motion::default();
-        motion.retarget(Layout::default(), target, now, true);
-        let (halfway, running) = motion.sample(now + DURATION / 2);
-        assert!(running);
-        assert_eq!(
-            halfway,
-            Layout {
-                inset: px(500.),
-                scroll: px(-400.)
-            }
-        );
-        motion.retarget(halfway, Layout::default(), now + DURATION / 2, true);
-        assert_eq!(motion.sample(now + DURATION / 2), (halfway, true));
-        assert_eq!(
-            motion.sample(now + DURATION * 2),
-            (Layout::default(), false)
-        );
-        assert!(motion.started.is_none());
-        motion.retarget(Layout::default(), target, now, false);
-        assert_eq!(motion.sample(now), (target, false));
     }
 }

@@ -1,24 +1,25 @@
 //! Folder navigation shared by disk directories and mounted archive directories.
-//! Listing uses filesystem metadata or archive indices; file contents are read
-//! only when a file or a nested container is selected.
+//! Listing uses filesystem metadata or archive indices. rUGP navigation also
+//! resolves the displayed objects' immediate references before publishing rows.
 
 use crate::archive::{self, Extraction, MountedArchive, Node, Progress};
 use anyhow::{Context, Result, anyhow};
 use nvlens_core::ResourceKind;
-use nvlens_engine::Identification;
+use nvlens_engine::{ArchiveSet, Identification};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-
 #[derive(Clone, Debug)]
 pub enum Target {
     /// Virtual root populated only with paths explicitly opened by the user.
     Opened,
     Directory(PathBuf, Arc<Identification>),
     File(PathBuf, Arc<Identification>),
+    /// One reader entry point with its installed companion files.
+    ArchiveSet(Arc<ArchiveSet>, Arc<Identification>),
     ArchiveDirectory {
         archive: Arc<MountedArchive>,
         directory: usize,
@@ -35,6 +36,7 @@ impl Target {
             (Self::Opened, Self::Opened) => true,
             (Self::Directory(a, _), Self::Directory(b, _))
             | (Self::File(a, _), Self::File(b, _)) => a == b,
+            (Self::ArchiveSet(a, _), Self::ArchiveSet(b, _)) => a.primary == b.primary,
             (
                 Self::ArchiveDirectory {
                     archive: a,
@@ -67,6 +69,12 @@ impl Target {
     pub fn name(&self) -> String {
         match self {
             Self::Opened => "Opened".into(),
+            Self::ArchiveSet(set, _) => set
+                .primary
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
             Self::Directory(path, _) | Self::File(path, _) => path
                 .file_name()
                 .unwrap_or_else(|| path.as_os_str())
@@ -87,10 +95,14 @@ impl Target {
     }
     pub fn archive_hint(&self) -> bool {
         match self {
+            Self::ArchiveSet(..) => true,
             Self::File(path, game) => game.route_path(path).is_some(),
             Self::Entry { archive, index } => {
-                archive.entries[*index].kind != ResourceKind::Script
-                    && archive.game.route(&archive.paths[*index]).is_some()
+                archive.has_references(*index)
+                    || (!matches!(
+                        archive.entries[*index].kind,
+                        ResourceKind::Script | ResourceKind::Data
+                    ) && archive.game.route(&archive.paths[*index]).is_some())
             }
             _ => false,
         }
@@ -147,6 +159,24 @@ impl Item {
         let target = if metadata.is_dir() {
             Target::Directory(path, game)
         } else {
+            if let Some(parent) = path.parent() {
+                let files = std::fs::read_dir(parent)?
+                    .map(|entry| -> std::io::Result<_> {
+                        let entry = entry?;
+                        Ok((entry.file_type()?.is_file(), entry.path()))
+                    })
+                    .collect::<std::io::Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter_map(|(file, path)| file.then_some(path))
+                    .collect::<Vec<_>>();
+                if let Some(set) = game
+                    .archive_sets(&files)
+                    .into_iter()
+                    .find(|set| set.members.contains(&path))
+                {
+                    return Ok(Self::from_set(set, game));
+                }
+            }
             Target::File(path, game)
         };
         Ok(Self::from_target(target, Some(metadata.len())))
@@ -155,15 +185,17 @@ impl Item {
         let name = target.name();
         let container = target.is_directory() || target.archive_hint();
         let (kind, count) = match &target {
+            Target::ArchiveSet(set, _) => (ResourceKind::Archive, Some(set.members.len())),
+            Target::File(path, game) => (game.resource_kind_for_path(path), None),
             Target::ArchiveDirectory { archive, directory } => (
                 ResourceKind::Archive,
                 Some(archive.directories[*directory].items.len()),
             ),
             Target::Entry { archive, index } => {
-                let kind = ResourceKind::guess_from_name(&archive.paths[*index]);
+                let kind = archive.entries[*index].kind;
                 (
                     if kind == ResourceKind::Unknown {
-                        archive.entries[*index].kind
+                        ResourceKind::guess_from_name(&archive.paths[*index])
                     } else {
                         kind
                     },
@@ -181,6 +213,13 @@ impl Item {
             target,
         }
     }
+
+    fn from_set(set: ArchiveSet, game: Arc<Identification>) -> Self {
+        let size = set.members.iter().try_fold(0u64, |sum, path| {
+            sum.checked_add(std::fs::metadata(path).ok()?.len())
+        });
+        Self::from_target(Target::ArchiveSet(Arc::new(set), game), size)
+    }
 }
 
 #[derive(Debug)]
@@ -196,7 +235,7 @@ impl Folder {
         }
     }
     pub fn archive(archive: Arc<MountedArchive>, directory: usize) -> Self {
-        let items = archive.directories[directory]
+        let items: Vec<Item> = archive.directories[directory]
             .items
             .iter()
             .map(|item| {
@@ -235,6 +274,45 @@ impl Folder {
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
     }
+
+    /// Resolve one layer on the navigation worker so an empty reference owner
+    /// is already a leaf when clicked. Opening a cached child prepares its own
+    /// rows later; this never recursively scans the object graph or decodes media.
+    fn prepare_references(&mut self, cancel: &AtomicBool, virtual_paths: bool) -> Result<()> {
+        let Target::ArchiveDirectory { archive, .. } = &self.target else {
+            return Ok(());
+        };
+        if archive.game.engine != nvlens_engine::Engine::Rugp {
+            return Ok(());
+        }
+        for item in &mut self.items {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(nvlens_core::Error::Cancelled.into());
+            }
+            let Target::Entry { archive, index } = &item.target else {
+                continue;
+            };
+            if archive.has_references(*index) {
+                // A broken child must not hide its siblings. Keep its navigation
+                // route so selecting it reports the original parsing error.
+                if let Err(error) = archive.open_references(*index, virtual_paths) {
+                    if matches!(
+                        error.downcast_ref::<nvlens_core::Error>(),
+                        Some(nvlens_core::Error::Cancelled)
+                    ) {
+                        return Err(error);
+                    }
+                    tracing::debug!(entry = %item.name, error = %error, "Preparing object references");
+                }
+                item.container = item.target.archive_hint();
+            }
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(nvlens_core::Error::Cancelled.into());
+        }
+        self.sort();
+        Ok(())
+    }
 }
 
 /// Opens only the selected engine's route. Ordinary files have no archive route.
@@ -242,8 +320,8 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
     if cancel.load(Ordering::Relaxed) {
         return Err(nvlens_core::Error::Cancelled.into());
     }
-    match target {
-        Target::Opened => Ok(Some(Folder::empty(Target::Opened))),
+    let mut folder = match target {
+        Target::Opened => Some(Folder::empty(Target::Opened)),
         Target::Directory(path, game) => {
             let mut items = Vec::new();
             for entry in
@@ -265,32 +343,59 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
                 target: target.clone(),
                 items,
             };
+            let files = folder
+                .items
+                .iter()
+                .filter_map(|item| match &item.target {
+                    Target::File(path, _) => Some(path.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for set in game.archive_sets(&files) {
+                folder.items.retain(|item| {
+                    !matches!(&item.target,
+                    Target::File(path, _) if set.members.contains(path))
+                });
+                folder.items.push(Item::from_set(set, game.clone()));
+            }
             folder.sort();
-            Ok(Some(folder))
+            Some(folder)
         }
         Target::ArchiveDirectory { archive, directory } => {
-            Ok(Some(Folder::archive(archive.clone(), *directory)))
+            Some(Folder::archive(archive.clone(), *directory))
         }
         Target::File(path, game) => {
-            Ok(
-                MountedArchive::open(path.clone(), virtual_paths, game.clone())?
-                    .map(|archive| Folder::archive(Arc::new(archive), 0)),
-            )
+            MountedArchive::open(path.clone(), virtual_paths, game.clone())?
+                .map(|archive| Folder::archive(Arc::new(archive), 0))
+        }
+        Target::ArchiveSet(set, game) => {
+            MountedArchive::open(set.primary.clone(), virtual_paths, game.clone())?
+                .map(|archive| Folder::archive(Arc::new(archive), 0))
         }
         Target::Entry { archive, index } => {
             if !target.archive_hint() {
                 return Ok(None);
             }
-            let bytes = target.read(false, cancel)?;
-            Ok(MountedArchive::open_nested(
-                &archive.paths[*index],
-                &bytes,
-                virtual_paths,
-                archive.game.clone(),
-            )?
-            .map(|archive| Folder::archive(Arc::new(archive), 0)))
+            if archive.has_references(*index) {
+                archive
+                    .open_references(*index, virtual_paths)?
+                    .map(|archive| Folder::archive(archive, 0))
+            } else {
+                let bytes = target.read(false, cancel)?;
+                MountedArchive::open_nested(
+                    &archive.paths[*index],
+                    &bytes,
+                    virtual_paths,
+                    archive.game.clone(),
+                )?
+                .map(|archive| Folder::archive(Arc::new(archive), 0))
+            }
         }
+    };
+    if let Some(folder) = &mut folder {
+        folder.prepare_references(cancel, virtual_paths)?;
     }
+    Ok(folder)
 }
 
 /// Expands selected folders iteratively only for an explicit export request.
@@ -353,7 +458,20 @@ pub fn export(
                 cancelled: true,
             });
         }
-        if let Target::Directory(path, _) = &target {
+        if let Target::ArchiveSet(set, game) = &target {
+            // Grouping is presentation only: disk export keeps every physical
+            // member at its original relative path, with no synthetic folder.
+            let parent = name.rsplit_once('/').map_or("", |(parent, _)| parent);
+            pending.extend(set.members.iter().rev().map(|path| {
+                let member = path.file_name().unwrap_or_default().to_string_lossy();
+                let relative = if parent.is_empty() {
+                    member.into_owned()
+                } else {
+                    format!("{parent}/{member}")
+                };
+                Step::Visit(Target::File(path.clone(), game.clone()), relative)
+            }));
+        } else if let Target::Directory(path, _) = &target {
             let canonical = match std::fs::canonicalize(path) {
                 Ok(path) => path,
                 Err(error) => {
@@ -452,166 +570,5 @@ pub fn export(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use nvlens_io::BinaryWriter;
-    use std::fs;
-    use std::sync::atomic::AtomicU64;
-
-    struct Temp(PathBuf);
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    fn temp() -> Temp {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "nvlens-browser-{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        fs::write(path.join("AdvHD.exe"), []).unwrap();
-        fs::write(path.join("Script2.arc"), []).unwrap();
-        fs::write(path.join("Graphic.arc"), []).unwrap();
-        Temp(path)
-    }
-    fn fixture(name: &str, payload: &[u8]) -> Vec<u8> {
-        let mut index = vec![0; 8];
-        BinaryWriter::u32_le(payload.len() as u32, &mut index);
-        for unit in name.encode_utf16().chain([0]) {
-            let mut word = [0; 2];
-            BinaryWriter::u16_le(unit, &mut word);
-            index.extend(word);
-        }
-        let mut bytes = vec![0; 8];
-        BinaryWriter::u32_le(1, &mut bytes);
-        BinaryWriter::u32_le(index.len() as u32, &mut bytes[4..]);
-        bytes.extend(index);
-        bytes.extend_from_slice(payload);
-        bytes
-    }
-
-    #[test]
-    fn opened_root_starts_empty() {
-        let folder = open(&Target::Opened, &AtomicBool::new(false), false)
-            .unwrap()
-            .unwrap();
-        assert!(matches!(folder.target, Target::Opened));
-        assert!(folder.items.is_empty());
-    }
-
-    #[test]
-    fn standalone_archives_cannot_bypass_engine_identification() {
-        let dir = temp();
-        for name in ["AdvHD.exe", "Script2.arc", "Graphic.arc"] {
-            fs::remove_file(dir.0.join(name)).unwrap();
-        }
-        let archive = dir.0.join("valid.arc");
-        fs::write(&archive, fixture("data.txt", b"contents")).unwrap();
-        assert!(Item::from_path(archive).is_err());
-        assert!(Item::from_path(dir.0.clone()).is_err());
-    }
-
-    #[test]
-    fn lists_disk_without_mounting_archives_or_reading_files() {
-        nvlens_archive::init();
-        let dir = temp();
-        let cancel = AtomicBool::new(false);
-        let mut invalid = vec![0; 32];
-        invalid[..4].copy_from_slice(b"YPF\0");
-        fs::write(dir.0.join("broken.arc"), invalid).unwrap();
-        fs::write(dir.0.join("note.txt"), b"old").unwrap();
-        fs::create_dir(dir.0.join("folder")).unwrap();
-        let folder = open(
-            &Item::from_path(dir.0.clone()).unwrap().target,
-            &cancel,
-            false,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(folder.items.len(), 6);
-        let archive = folder
-            .items
-            .iter()
-            .find(|item| item.name == "broken.arc")
-            .unwrap();
-        assert!(archive.container);
-        assert!(open(&archive.target, &cancel, false).is_err());
-        let file = folder
-            .items
-            .iter()
-            .find(|item| item.name == "note.txt")
-            .unwrap();
-        fs::write(dir.0.join("note.txt"), b"changed after listing").unwrap();
-        let resource = crate::resource::read(&file.target, false, &cancel).unwrap();
-        assert_eq!(&*resource.bytes, b"changed after listing");
-    }
-
-    #[test]
-    fn traverses_disk_archive_directories_and_nested_archives() {
-        nvlens_archive::init();
-        let dir = temp();
-        let cancel = AtomicBool::new(false);
-        let inner = fixture("leaf.txt", b"leaf");
-        fs::write(dir.0.join("outer.arc"), fixture("nested/inner.arc", &inner)).unwrap();
-        let disk = open(
-            &Item::from_path(dir.0.clone()).unwrap().target,
-            &cancel,
-            false,
-        )
-        .unwrap()
-        .unwrap();
-        let outer = open(
-            &disk
-                .items
-                .iter()
-                .find(|item| item.name == "outer.arc")
-                .unwrap()
-                .target,
-            &cancel,
-            false,
-        )
-        .unwrap()
-        .unwrap();
-        let nested = open(&outer.items[0].target, &cancel, false)
-            .unwrap()
-            .unwrap();
-        assert!(nested.items[0].container);
-        let inner = open(&nested.items[0].target, &cancel, false)
-            .unwrap()
-            .unwrap();
-        assert_eq!(inner.items[0].target.read(false, &cancel).unwrap(), b"leaf");
-        assert!(!inner.items[0].container);
-    }
-
-    #[test]
-    fn disk_export_continues_after_failure_and_honors_cancellation() {
-        let dir = temp();
-        let cancel = AtomicBool::new(false);
-        let missing = dir.0.join("missing.txt");
-        let good = dir.0.join("good.txt");
-        fs::write(&missing, b"gone").unwrap();
-        fs::write(&good, b"ok").unwrap();
-        let items = vec![
-            Item::from_path(missing.clone()).unwrap(),
-            Item::from_path(good).unwrap(),
-        ];
-        fs::remove_file(missing).unwrap();
-        let out = dir.0.join("out");
-        let result = export(&items, &out, false, &cancel, |_, _| {}).unwrap();
-        assert_eq!((result.progress.succeeded, result.progress.failed), (1, 1));
-        assert_eq!(fs::read(out.join("good.txt")).unwrap(), b"ok");
-        cancel.store(true, Ordering::Relaxed);
-        let result = export(&items, &dir.0.join("cancelled"), false, &cancel, |_, _| {}).unwrap();
-        assert!(result.cancelled);
-        assert_eq!(result.progress.completed, 0);
-        assert!(!dir.0.join("cancelled").exists());
-    }
-}
+#[path = "../tests/browser.rs"]
+mod tests;

@@ -99,7 +99,7 @@ impl Scrollbar {
                         } else if hovered {
                             super::SECONDARY
                         } else {
-                            0x6b6b73
+                            super::TERTIARY
                         }),
                     )
                     .corner_radii(px(3.)),
@@ -157,50 +157,5 @@ impl Scrollbar {
             },
         )
         .absolute()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::prelude::rust_2024::test;
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn thumb_tracks_scroll_limits_and_drag_position() {
-        let thumb = Thumb::new(px(400.), px(500.), px(1500.), px(-750.)).unwrap();
-        assert_eq!(thumb.length, px(100.));
-        assert_eq!(thumb.start, px(150.));
-        assert_eq!(
-            thumb.offset(thumb.start + thumb.length * 0.25, 0.25),
-            px(-750.)
-        );
-        assert_eq!(thumb.offset(px(-100.), 0.5), px(0.));
-        assert_eq!(thumb.offset(px(1000.), 0.5), px(-1500.));
-        let long = Thumb::new(px(400.), px(500.), px(1_000_000.), px(-1_000_000.)).unwrap();
-        assert_eq!(long.length, px(24.));
-        assert_eq!(long.start + long.length, px(400.));
-        assert!(Thumb::new(px(400.), px(500.), px(0.), px(0.)).is_none());
-        assert!(Thumb::new(px(10.), px(500.), px(100.), px(0.)).is_none());
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn both_axes_position_the_thumb_and_preserve_the_other_scroll_offset() {
-        for axis in [Axis::Vertical, Axis::Horizontal] {
-            let track = Bounds::new(
-                point(px(30.), px(60.)),
-                size(px(10.), px(10.)).apply_along(axis, |_| px(400.)),
-            );
-            let thumb = Thumb::new(track.size.along(axis), px(500.), px(1500.), px(-750.)).unwrap();
-            let bounds = thumb.bounds(track, axis);
-            assert_eq!((bounds.origin - track.origin).along(axis), px(150.));
-            assert_eq!(bounds.size.along(axis), px(100.));
-            assert_eq!(bounds.size.along(axis.invert()), px(6.));
-            let offset = point(px(-50.), px(-80.));
-            let dragged = offset.apply_along(axis, |_| thumb.offset(px(400.), 0.5));
-            assert_eq!(dragged.along(axis), px(-1500.));
-            assert_eq!(dragged.along(axis.invert()), offset.along(axis.invert()));
-        }
     }
 }

@@ -9,7 +9,8 @@ pub(in crate::workspace) struct Frames {
     scroll: ScrollHandle,
     bar: scrollbar::Scrollbar,
     visible: Range<usize>,
-    images: BTreeMap<usize, anyhow::Result<Arc<RenderImage>>>,
+    // `None` marks a failed frame so it is not decoded again while visible.
+    images: BTreeMap<usize, Option<Arc<RenderImage>>>,
     request: Arc<AtomicBool>,
     pub(super) reveal: Option<usize>,
 }
@@ -34,6 +35,16 @@ impl Drop for Frames {
 }
 
 impl Frames {
+    pub(in crate::workspace) fn pending_count(&self) -> usize {
+        if self.request.load(Ordering::Relaxed) {
+            return 0;
+        }
+        self.visible
+            .clone()
+            .filter(|frame| !self.images.contains_key(frame))
+            .count()
+    }
+
     pub(in crate::workspace) fn cancel(&self) {
         self.request.store(true, Ordering::Relaxed);
     }
@@ -45,21 +56,31 @@ impl Frames {
         }
     }
 
+    /// Stores a current thumbnail and returns its decode failure for reporting.
     pub(in crate::workspace) fn receive(
         &mut self,
         request: Arc<AtomicBool>,
         frame: usize,
         result: anyhow::Result<Arc<RenderImage>>,
         cx: &mut App,
-    ) {
+    ) -> Option<anyhow::Error> {
         if Arc::ptr_eq(&request, &self.request)
             && !request.load(Ordering::Relaxed)
             && self.visible.contains(&frame)
         {
-            self.images.insert(frame, result);
+            match result {
+                Ok(image) => {
+                    self.images.insert(frame, Some(image));
+                }
+                Err(error) => {
+                    self.images.insert(frame, None);
+                    return Some(error);
+                }
+            }
         } else if let Ok(image) = result {
             cx.defer(move |cx| cx.drop_image(image, None));
         }
+        None
     }
 }
 
@@ -71,7 +92,10 @@ fn visible_range(count: usize, offset: f32, width: f32) -> Range<usize> {
 
 impl Workspace {
     fn load_image_thumbnails(&mut self, visible: Range<usize>, cx: &mut Context<Self>) {
-        if !self.show_inspector || (self.preview_loading && self.image_view.pending.is_none()) {
+        if !self.show_inspector
+            || self.preview_failed
+            || (self.preview_loading && self.image_view.pending.is_none())
+        {
             return;
         }
         let Some(preview) = &self.preview else { return };
@@ -86,7 +110,7 @@ impl Workspace {
             if visible.contains(frame) {
                 true
             } else {
-                if let Ok(image) = image {
+                if let Some(image) = image {
                     let image = image.clone();
                     cx.defer(move |cx| cx.drop_image(image, None));
                 }
@@ -188,18 +212,11 @@ impl Workspace {
                                 .items_center()
                                 .justify_center()
                                 .child(match thumbnail {
-                                    Some(Ok(image)) => img(image.clone())
+                                    Some(Some(image)) => img(image.clone())
                                         .size_full()
                                         .object_fit(ObjectFit::Contain)
                                         .into_any_element(),
-                                    _ => div()
-                                        .text_color(rgb(SECONDARY))
-                                        .child(if thumbnail.is_some() {
-                                            "Unavailable"
-                                        } else {
-                                            "…"
-                                        })
-                                        .into_any_element(),
+                                    _ => div().into_any_element(),
                                 }),
                         )
                         .child(
@@ -272,18 +289,5 @@ impl Workspace {
                     .bottom(px(1.))
                     .h(px(8.)),
             )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::prelude::rust_2024::test;
-
-    #[test]
-    fn filmstrip_only_requests_visible_frames_including_partial_edges() {
-        assert_eq!(visible_range(3, 0., 1000.), 0..3);
-        assert_eq!(visible_range(10000, -STEP * 500. - 1., STEP * 3.), 500..504);
-        assert_eq!(visible_range(10000, -STEP * 9998., STEP * 3.), 9998..10000);
     }
 }

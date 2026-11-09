@@ -1,8 +1,9 @@
 //! Task status stays beside the path, with details expanding above its tile.
 
 use super::browser_view::glass;
-use super::view::button;
+use super::view::{button, spinner, tooltip};
 use super::*;
+use crate::icons::glyph;
 
 impl Workspace {
     pub(super) fn status_dock(
@@ -14,19 +15,11 @@ impl Workspace {
         let busy = self.pending > 0
             || self.name_jobs.iter().any(|job| job.running)
             || self.preview_loading
+            || self.image_view.frames.pending_count() > 0
             || self.extracting
             || self.converting
             || self.columns.iter().any(|column| column.loading);
-        let failed = !self.errors.is_empty()
-            || self.preview_error.is_some()
-            || self.columns.iter().any(|column| column.error.is_some());
-        let color = if busy {
-            ACCENT
-        } else if failed {
-            0xff8a82
-        } else {
-            0x30d158
-        };
+        let failed = !self.errors.is_empty();
         div()
             .absolute()
             .left(px(12.))
@@ -48,50 +41,30 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(14.))
-                            .text_color(rgb(color))
                             .cursor_pointer()
                             .occlude()
-                            .hover(|style| style.bg(rgb(0x363639)))
+                            .hover(|style| style.bg(rgb(CONTROL)))
+                            .tooltip(tooltip("Activity"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_status = !this.show_status;
                                 cx.notify();
                             }))
-                            .child(
-                                div()
-                                    .child(if busy {
-                                        "•••"
-                                    } else if failed {
-                                        "!"
-                                    } else {
-                                        "✓"
-                                    })
-                                    .map(|icon| {
-                                        if !busy {
-                                            return icon.into_any_element();
-                                        }
-                                        icon.with_animation(
-                                            "status-busy",
-                                            Animation::new(Duration::from_millis(1200)).repeat(),
-                                            |icon, progress| {
-                                                icon.opacity(
-                                                    0.4 + 0.6
-                                                        * (progress * std::f32::consts::PI).sin(),
-                                                )
-                                            },
-                                        )
-                                        .into_any_element()
-                                    }),
-                            )
+                            .child(if busy {
+                                spinner("status-busy", 15., ACCENT).into_any_element()
+                            } else if failed {
+                                glyph("icons/alert.svg", 16., DANGER).into_any_element()
+                            } else {
+                                glyph("icons/check.svg", 16., SUCCESS).into_any_element()
+                            })
                             .when(busy && failed, |tile| {
                                 tile.child(
                                     div()
                                         .absolute()
                                         .top(px(4.))
                                         .right(px(4.))
-                                        .size(px(4.))
+                                        .size(px(5.))
                                         .rounded_full()
-                                        .bg(rgb(0xff8a82)),
+                                        .bg(rgb(DANGER)),
                                 )
                             }),
                     )
@@ -109,11 +82,11 @@ impl Workspace {
                     button(
                         "export-preview",
                         "Export…",
-                        false,
+                        true,
                         !self.extracting
                             && !self.converting
                             && !self.preview_loading
-                            && self.preview_error.is_none()
+                            && !self.preview_failed
                             && self.preview.is_some(),
                     )
                     .occlude()
@@ -136,7 +109,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .font_family("Segoe UI")
+            .font_family(UI_FONT)
             .text_size(px(11.))
             .text_color(rgb(SECONDARY))
             .occlude()
@@ -152,63 +125,55 @@ impl Workspace {
             .children(
                 self.columns
                     .iter()
-                    .enumerate()
-                    .filter_map(|(depth, column)| {
-                        if column.loading {
-                            Some(
-                                status_line(
-                                    format!("Loading… · {}", column.folder.target.export_name()),
-                                    ACCENT,
-                                )
-                                .into_any_element(),
-                            )
-                        } else {
-                            column.error.as_ref().map(|error| {
-                                div()
-                                    .flex()
-                                    .flex_shrink_0()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(status_line(error.clone(), 0xff8a82).flex_1().min_w_0())
-                                    .child(button("retry-folder", "Retry", false, true).on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.retry_column(depth, cx)
-                                        }),
-                                    ))
-                                    .into_any_element()
-                            })
-                        }
+                    .filter(|column| column.loading)
+                    .map(|column| {
+                        status_line(
+                            format!("Loading… · {}", column.folder.target.export_name()),
+                            ACCENT,
+                        )
                     }),
             )
             .when(self.preview_loading, |view| {
                 let name = self.selected_item().map_or("", |item| item.name.as_str());
                 view.child(status_line(format!("Preparing preview… · {name}"), ACCENT))
             })
-            .when_some(self.preview_error.as_ref(), |view, error| {
-                view.child(status_line(format!("Preview: {error}"), 0xff8a82))
+            .when(self.image_view.frames.pending_count() > 0, |view| {
+                view.child(status_line(
+                    format!(
+                        "Preparing thumbnails… · {} remaining",
+                        self.image_view.frames.pending_count()
+                    ),
+                    ACCENT,
+                ))
             })
-            .when(
-                !self.preview_loading && self.preview_error.is_none(),
-                |view| {
-                    if let Some(item) = self.selected_item().filter(|_| self.preview.is_some()) {
-                        view.child(status_line(
-                            format!("Preview ready · {}", item.name),
-                            SECONDARY,
-                        ))
-                    } else if let Some(column) = self
-                        .columns
-                        .last()
-                        .filter(|column| !column.loading && column.error.is_none())
-                    {
-                        view.child(status_line(
-                            format!("{} items", column.folder.items.len()),
-                            SECONDARY,
-                        ))
-                    } else {
-                        view
-                    }
-                },
-            )
+            .when(!self.preview_loading && !self.preview_failed, |view| {
+                if let Some(item) = self.selected_item().filter(|_| self.preview.is_some()) {
+                    view.child(status_line(
+                        if self
+                            .preview
+                            .as_ref()
+                            .and_then(|preview| preview.audio.as_ref())
+                            .is_some_and(|audio| audio.duration() == 0.)
+                        {
+                            format!("Empty audio · {}", item.name)
+                        } else {
+                            format!("Preview ready · {}", item.name)
+                        },
+                        SECONDARY,
+                    ))
+                } else if let Some(column) = self
+                    .columns
+                    .last()
+                    .filter(|column| !column.loading && !column.failed)
+                {
+                    view.child(status_line(
+                        format!("{} items", column.folder.items.len()),
+                        SECONDARY,
+                    ))
+                } else {
+                    view
+                }
+            })
             .when(self.converting, |view| {
                 view.child(status_line("Exporting…".into(), ACCENT))
             })
@@ -249,7 +214,7 @@ impl Workspace {
                     ),
                     ACCENT,
                 ))
-                .child(div().h(px(3.)).rounded_full().bg(rgb(BORDER)).child(
+                .child(div().h(px(4.)).rounded_full().bg(rgb(BORDER)).child(
                     div().h_full().rounded_full().bg(rgb(ACCENT)).w(relative(
                         if self.progress.total == 0 {
                             0.
@@ -259,8 +224,7 @@ impl Workspace {
                     )),
                 ))
             })
-            .child(self.status_actions(cx))
-            .when(self.show_errors && !self.errors.is_empty(), |view| {
+            .when(!self.errors.is_empty(), |view| {
                 view.child(
                     uniform_list(
                         "error-list",
@@ -269,24 +233,54 @@ impl Workspace {
                             range
                                 .map(|index| {
                                     div()
-                                        .id(("error", index))
-                                        .h(px(28.))
-                                        .px_2()
-                                        .text_color(rgb(0xff8a82))
-                                        .truncate()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                this.errors[index].clone(),
-                                            ));
-                                        }))
-                                        .child(this.errors[index].clone())
+                                        .h(px(ERROR_ROW))
+                                        .pl_2()
+                                        .pr_1()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .rounded(px(6.))
+                                        .text_color(rgb(DANGER))
+                                        .hover(|style| style.bg(rgba(0xffffff0d)))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(this.errors[index].clone()),
+                                        )
+                                        .child(
+                                            error_action(("copy-error", index), "icons/copy.svg")
+                                                .tooltip(tooltip("Copy"))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(
+                                                            this.errors[index].clone(),
+                                                        ),
+                                                    );
+                                                })),
+                                        )
+                                        .child(
+                                            error_action(
+                                                ("dismiss-error", index),
+                                                "icons/window-close.svg",
+                                            )
+                                            .tooltip(tooltip("Dismiss"))
+                                            .on_click(
+                                                cx.listener(move |this, _, _, cx| {
+                                                    if index < this.errors.len() {
+                                                        this.errors.remove(index);
+                                                    }
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        )
                                 })
                                 .collect()
                         }),
                     )
                     .track_scroll(self.error_scroll.clone())
-                    .h(px(140.))
+                    .h(px(self.errors.len().min(6) as f32 * ERROR_ROW))
                     .flex_shrink_0()
                     .map(|view| {
                         scroll::wheel(
@@ -296,6 +290,9 @@ impl Workspace {
                         )
                     }),
                 )
+            })
+            .when(self.extracting || self.output.is_some(), |view| {
+                view.child(self.status_actions(cx))
             })
     }
 
@@ -324,28 +321,23 @@ impl Workspace {
                         .on_click(move |_, _, cx| cx.open_with_system(&path)),
                 )
             })
-            .when(!self.errors.is_empty(), |view| {
-                view.child(
-                    button(
-                        "errors",
-                        format!("Errors ({})", self.errors.len()),
-                        self.show_errors,
-                        true,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_errors = !this.show_errors;
-                        cx.notify();
-                    })),
-                )
-            })
-            .child(div().flex_1())
-            .child(
-                button("close-status", "×", false, true).on_click(cx.listener(|this, _, _, cx| {
-                    this.show_status = false;
-                    cx.notify();
-                })),
-            )
     }
+}
+
+const ERROR_ROW: f32 = 28.;
+
+fn error_action(id: impl Into<ElementId>, icon: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(22.))
+        .flex_shrink_0()
+        .rounded(px(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xffffff1a)))
+        .child(glyph(icon, 12., SECONDARY))
 }
 
 fn status_line(text: String, color: u32) -> Div {

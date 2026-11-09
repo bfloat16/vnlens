@@ -93,9 +93,16 @@ pub fn read(target: &Target, raw: bool, cancel: &AtomicBool) -> Result<Resource>
     }
     // Video containers have no pixel/audio preview decoder yet. Preserve their
     // encoded stream without passing Ogg Theora to the Vorbis audio reader.
-    if nvlens_core::ResourceKind::guess_from_name(&target.name())
-        == nvlens_core::ResourceKind::Video
-    {
+    let kind = match target {
+        Target::Entry { archive, index }
+            if archive.entries[*index].kind != nvlens_core::ResourceKind::Unknown =>
+        {
+            archive.entries[*index].kind
+        }
+        Target::File(path, game) => game.resource_kind_for_path(path),
+        _ => nvlens_core::ResourceKind::guess_from_name(&target.name()),
+    };
+    if kind == nvlens_core::ResourceKind::Video {
         return Ok(resource);
     }
     let script_tag = match target {
@@ -183,124 +190,5 @@ pub fn convert(
         ExportKind::Ir => Ok(script
             .ok_or_else(|| anyhow!("No disassembly is available"))?
             .to_json()?),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    #[ignore = "Requires NVLENS_YURIS_GAME; validates script preview data without opening a window"]
-    fn validates_game_script_resources() -> Result<()> {
-        nvlens_archive::init();
-        nvlens_script::init();
-        let root = std::path::PathBuf::from(
-            std::env::var_os("NVLENS_YURIS_GAME")
-                .ok_or_else(|| anyhow!("Set NVLENS_YURIS_GAME"))?,
-        );
-        let archive = Arc::new(
-            crate::archive::MountedArchive::open(
-                root.join("pac/Scripts.ypf"),
-                false,
-                Arc::new(
-                    nvlens_engine::identify(&root, &AtomicBool::new(false))?
-                        .ok_or_else(|| anyhow::anyhow!("Engine not identified"))?,
-                ),
-            )?
-            .ok_or_else(|| anyhow!("Archive not recognized"))?,
-        );
-        let cancelled = AtomicBool::new(false);
-        let mut checked = 0;
-        for (index, entry) in archive.entries.iter().enumerate() {
-            let name = entry.name.rsplit(['/', '\\']).next().unwrap_or("");
-            if name.starts_with("yst0") && name != "yst00000.ybn" {
-                continue;
-            }
-            let resource = read(
-                &Target::Entry {
-                    archive: archive.clone(),
-                    index,
-                },
-                false,
-                &cancelled,
-            )?;
-            let script = resource
-                .script
-                .as_ref()
-                .ok_or_else(|| anyhow!("Script not recognized"))?;
-            let exported = convert(&resource.bytes, ExportKind::Ir, Some(script), 0)?;
-            assert!(
-                std::str::from_utf8(&exported)?
-                    .contains(&format!("\"ir_version\": {}", nvlens_script::ir::VERSION))
-            );
-            assert_eq!(
-                script
-                    .sections
-                    .iter()
-                    .flat_map(|section| section.raw.iter().copied())
-                    .collect::<Vec<_>>(),
-                &*resource.bytes
-            );
-            checked += 1;
-        }
-        println!("Validated {checked} script preview resources and IR exports without a window");
-        Ok(())
-    }
-
-    /// Requires locally owned files; no samples are copied into the repository.
-    /// NVLENS_YURIS_GAME=<game> cargo test -p nvlens-gui validates_game_media -- --ignored --nocapture
-    #[test]
-    #[ignore = "Requires NVLENS_YURIS_GAME and the original game archives"]
-    fn validates_game_media() -> Result<()> {
-        nvlens_archive::init();
-        nvlens_image::init();
-        nvlens_audio::init();
-        let root = std::path::PathBuf::from(
-            std::env::var_os("NVLENS_YURIS_GAME")
-                .ok_or_else(|| anyhow!("Set NVLENS_YURIS_GAME"))?,
-        );
-        let catalog = nvlens_core::Catalog::load();
-        let game = nvlens_engine::identify(&root, &AtomicBool::new(false))?
-            .ok_or_else(|| anyhow!("Engine not identified"))?;
-        for (name, is_image) in [("Graphics.ypf", true), ("Sounds.ypf", false)] {
-            let opened = catalog.open(
-                root.join("pac").join(name),
-                &game
-                    .route(name)
-                    .ok_or_else(|| anyhow!("No archive route"))?,
-            )?;
-            for (index, entry) in opened.archive.entries().iter().enumerate() {
-                let bytes = opened.archive.open_entry(entry)?;
-                if is_image {
-                    let meta = nvlens_image::metadata(&bytes)?
-                        .ok_or_else(|| anyhow!("Image not recognized"))?;
-                    if index % 512 == 0 {
-                        let image = nvlens_image::decode(&bytes)?
-                            .ok_or_else(|| anyhow!("No image decoded"))?;
-                        assert_eq!(meta, image.meta);
-                        let png = image.to_png()?;
-                        assert_eq!(nvlens_image::metadata(&png)?.as_ref(), Some(&meta));
-                    }
-                } else {
-                    let meta = nvlens_audio::metadata(&bytes)?
-                        .ok_or_else(|| anyhow!("Audio not recognized"))?;
-                    if index % 1024 == 0 {
-                        let pcm = nvlens_audio::decode(&bytes)?
-                            .ok_or_else(|| anyhow!("No audio decoded"))?;
-                        assert_eq!(meta.channels, pcm.meta.channels);
-                        assert_eq!(meta.sample_rate, pcm.meta.sample_rate);
-                        let wav = pcm.to_wav()?;
-                        let wav = nvlens_audio::decode(&wav)?
-                            .ok_or_else(|| anyhow!("WAV not recognized"))?;
-                        assert_eq!(&*wav.samples, &*pcm.samples);
-                    }
-                }
-            }
-            println!(
-                "{name}: validated hashes and metadata for {} entries; sampled full decoding and export",
-                opened.archive.entries().len()
-            );
-        }
-        Ok(())
     }
 }

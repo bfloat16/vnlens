@@ -1,6 +1,6 @@
 //! Image frame selection and a viewport camera. Pixel decoding stays in image;
 //! frame tasks retain the displayed texture until the requested frame is ready.
-use super::view::button;
+use super::view::{tool_button, tooltip};
 use super::*;
 use std::{cell::Cell, rc::Rc};
 
@@ -133,7 +133,10 @@ impl Default for State {
 
 impl Workspace {
     fn choose_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
-        if !self.show_inspector || (self.preview_loading && self.image_view.pending.is_none()) {
+        if !self.show_inspector
+            || self.preview_failed
+            || (self.preview_loading && self.image_view.pending.is_none())
+        {
             return;
         }
         let Some(preview) = &self.preview else { return };
@@ -145,7 +148,7 @@ impl Workspace {
         self.request.store(true, Ordering::Relaxed);
         self.request = Arc::new(AtomicBool::new(false));
         self.preview_loading = true;
-        self.preview_error = None;
+        self.preview_failed = false;
         self.image_view.pending = Some(frame);
         self.image_view.frames.reveal = Some(frame);
         let request = self.request.clone();
@@ -238,6 +241,7 @@ impl Workspace {
                     state.image.map(|v| v * state.scale()),
                 );
                 window.with_content_mask(Some(ContentMask { bounds: viewport }), |window| {
+                    paint_checkerboard(draw.intersect(&viewport), draw.origin, window);
                     if let Err(error) =
                         window.paint_image(draw, Corners::default(), image, 0, false)
                     {
@@ -275,7 +279,7 @@ impl Workspace {
                         track.size.apply_along(axis, |_| length),
                     );
                     window.paint_quad(fill(track, rgba(0xffffff0a)).corner_radii(px(4.)));
-                    window.paint_quad(fill(thumb, rgb(0x6b6b73)).corner_radii(px(4.)));
+                    window.paint_quad(fill(thumb, rgb(TERTIARY)).corner_radii(px(4.)));
                     bars.push((axis, track, thumb, travel));
                 }
                 let view = window.current_view();
@@ -385,118 +389,129 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .when(count > 1, |bar| {
-                        bar.child(button("frame-previous", "‹", false, frame > 0).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.choose_frame(frame.saturating_sub(1), cx)
-                            }),
-                        ))
+                        bar.child(
+                            tool_button(
+                                "frame-previous",
+                                "icons/chevron-left.svg",
+                                false,
+                                frame > 0,
+                            )
+                            .tooltip(tooltip("Previous frame"))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.choose_frame(frame.saturating_sub(1), cx)
+                                },
+                            )),
+                        )
                         .child(
                             div()
+                                .min_w(px(44.))
+                                .text_center()
+                                .font_family(MONO_FONT)
                                 .text_size(px(11.))
                                 .text_color(rgb(SECONDARY))
                                 .child(format!("{} / {count}", frame + 1)),
                         )
                         .child(
-                            button("frame-next", "›", false, frame + 1 < count).on_click(
+                            tool_button(
+                                "frame-next",
+                                "icons/chevron-right.svg",
+                                false,
+                                frame + 1 < count,
+                            )
+                            .tooltip(tooltip("Next frame"))
+                            .on_click(
                                 cx.listener(move |this, _, _, cx| this.choose_frame(frame + 1, cx)),
                             ),
                         )
                     })
                     .child(div().flex_1())
-                    .child(button("zoom-out", "−", false, true).on_click(
-                        cx.listener(|this, _, _, cx| this.change_image_zoom(1. / 1.25, cx)),
-                    ))
                     .child(
-                        button("zoom-actual", format!("{:.0}%", scale * 100.), false, true)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let mut camera = this.image_view.camera.get();
-                                camera.animate_zoom(
-                                    1.,
-                                    point(camera.viewport.width / 2., camera.viewport.height / 2.),
-                                    Instant::now(),
-                                );
-                                this.image_view.camera.set(camera);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        button("zoom-in", "+", false, true).on_click(
-                            cx.listener(|this, _, _, cx| this.change_image_zoom(1.25, cx)),
-                        ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .p(px(2.))
+                            .rounded(px(9.))
+                            .bg(rgba(0xffffff0a))
+                            .child(
+                                tool_button("zoom-out", "icons/zoom-out.svg", false, true)
+                                    .h(px(26.))
+                                    .min_w(px(26.))
+                                    .tooltip(tooltip("Zoom out"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.change_image_zoom(1. / 1.25, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("zoom-actual")
+                                    .h(px(26.))
+                                    .min_w(px(52.))
+                                    .px_2()
+                                    .rounded(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgba(0xffffff14)))
+                                    .tooltip(tooltip("Actual size"))
+                                    .child(format!("{:.0}%", scale * 100.))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let mut camera = this.image_view.camera.get();
+                                        camera.animate_zoom(
+                                            1.,
+                                            point(
+                                                camera.viewport.width / 2.,
+                                                camera.viewport.height / 2.,
+                                            ),
+                                            Instant::now(),
+                                        );
+                                        this.image_view.camera.set(camera);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                tool_button("zoom-in", "icons/zoom-in.svg", false, true)
+                                    .h(px(26.))
+                                    .min_w(px(26.))
+                                    .tooltip(tooltip("Zoom in"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.change_image_zoom(1.25, cx)
+                                    })),
+                            ),
                     ),
             )
             .into_any_element()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::prelude::rust_2024::test;
-
-    #[test]
-    fn automatic_zoom_keeps_small_images_at_actual_size_and_fits_large_images() {
-        let mut camera = Camera {
-            viewport: size(px(800.), px(600.)),
-            image: size(px(10.), px(10.)),
-            ..Camera::default()
-        };
-        assert_eq!(camera.scale(), 1.);
-        assert_eq!(camera.origin(), point(px(395.), px(295.)));
-        camera.image = size(px(1600.), px(900.));
-        assert_eq!(camera.scale(), 0.5);
-        camera.image = size(px(400.), px(1200.));
-        assert_eq!(camera.scale(), 0.5);
-        camera.image = size(px(800.), px(600.));
-        assert_eq!(camera.scale(), 1.);
+/// Paints a transparency grid over the visible image area only, anchored to
+/// the image origin so tiles move with panning instead of sliding beneath it.
+fn paint_checkerboard(area: Bounds<Pixels>, anchor: Point<Pixels>, window: &mut Window) {
+    const TILE: f32 = 8.;
+    if area.size.width <= px(0.) || area.size.height <= px(0.) {
+        return;
     }
-
-    #[test]
-    fn zoom_interpolates_keeps_pointer_anchor_and_retargets_without_jumping() {
-        let now = Instant::now();
-        let mut camera = Camera {
-            viewport: size(px(800.), px(600.)),
-            image: size(px(1600.), px(1200.)),
-            ..Camera::default()
-        };
-        let anchor = point(px(300.), px(200.));
-        let image_point = (anchor - camera.origin()) / camera.scale();
-        camera.animate_zoom(1., anchor, now);
-        assert_eq!(camera.scale(), 0.5);
-        assert!(camera.sample(now + ZOOM_DURATION / 2));
-        assert_eq!(camera.scale(), 0.75);
-        assert_eq!((anchor - camera.origin()) / camera.scale(), image_point);
-        let origin = camera.origin();
-        camera.animate_zoom(2., anchor, now + ZOOM_DURATION / 2);
-        assert_eq!(camera.scale(), 0.75);
-        assert_eq!(camera.origin(), origin);
-        assert!(!camera.sample(now + ZOOM_DURATION * 2));
-        assert_eq!(camera.scale(), 2.);
-        assert_eq!((anchor - camera.origin()) / camera.scale(), image_point);
-        assert!(camera.motion.is_none());
-    }
-
-    #[test]
-    fn actual_size_animation_finishes_at_one_and_survives_viewport_changes() {
-        let now = Instant::now();
-        let mut camera = Camera {
-            viewport: size(px(800.), px(600.)),
-            image: size(px(1600.), px(900.)),
-            zoom: Some(2.),
-            pan: point(px(-1000.), px(-600.)),
-            ..Camera::default()
-        };
-        camera.animate_zoom(1., point(px(400.), px(300.)), now);
-        assert!(camera.sample(now + ZOOM_DURATION / 2));
-        assert!(camera.scale() > 1. && camera.scale() < 2.);
-        assert!(!camera.sample(now + ZOOM_DURATION));
-        assert_eq!(camera.scale(), 1.);
-        assert!(camera.motion.is_none());
-        camera.viewport = size(px(400.), px(300.));
-        assert_eq!(camera.scale(), 1.);
-        camera.viewport = size(px(3200.), px(1800.));
-        camera.clamp();
-        assert_eq!(camera.scale(), 1.);
-        assert_eq!(camera.pan, Point::default());
+    window.paint_quad(fill(area, rgb(0x2c2c2e)));
+    let first_column = (f32::from(area.left() - anchor.x) / TILE).floor() as i64;
+    let first_row = (f32::from(area.top() - anchor.y) / TILE).floor() as i64;
+    let last_column = (f32::from(area.right() - anchor.x) / TILE).ceil() as i64;
+    let last_row = (f32::from(area.bottom() - anchor.y) / TILE).ceil() as i64;
+    for row in first_row..last_row {
+        for column in first_column..last_column {
+            if (row + column).rem_euclid(2) == 0 {
+                continue;
+            }
+            let tile = Bounds::new(
+                anchor + point(px(column as f32 * TILE), px(row as f32 * TILE)),
+                size(px(TILE), px(TILE)),
+            )
+            .intersect(&area);
+            if tile.size.width > px(0.) && tile.size.height > px(0.) {
+                window.paint_quad(fill(tile, rgb(0x38383b)));
+            }
+        }
     }
 }

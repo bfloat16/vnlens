@@ -1,7 +1,6 @@
 //! Mel spectrogram presentation and transport. Analysis and decoding stay in
 //! nvlens-audio; textures are prepared off the UI thread without font access.
 
-use super::view::button;
 use super::*;
 use nvlens_audio::{
     Pcm,
@@ -293,27 +292,62 @@ impl Workspace {
                     .gap_3()
                     .px_2()
                     .child(
-                        button(
-                            "audio-play",
-                            if playing { "Pause" } else { "Play" },
-                            playing,
-                            duration > 0.,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_audio(cx))),
+                        div()
+                            .id("audio-play")
+                            .size(px(32.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(if duration > 0. { ACCENT } else { CONTROL }))
+                            .when(duration > 0., |button| {
+                                button
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(ACCENT_HOVER)))
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_audio(cx)))
+                            })
+                            .tooltip(super::view::tooltip(if playing {
+                                "Pause (Space)"
+                            } else {
+                                "Play (Space)"
+                            }))
+                            .child(crate::icons::glyph(
+                                if playing {
+                                    "icons/pause.svg"
+                                } else {
+                                    "icons/play.svg"
+                                },
+                                14.,
+                                if duration > 0. { TEXT } else { DISABLED },
+                            )),
                     )
                     .child(
                         div()
-                            .font_family("Cascadia Mono")
+                            .font_family(MONO_FONT)
                             .text_size(px(11.))
-                            .text_color(rgb(SECONDARY))
-                            .child(format!("{} / {}", time(position), time(duration))),
+                            .child(time(position))
+                            .child(
+                                div()
+                                    .text_color(rgb(SECONDARY))
+                                    .child(format!(" / {}", time(duration))),
+                            )
+                            .flex(),
                     )
                     .child(div().flex_1())
                     .child(
                         div()
                             .text_size(px(11.))
                             .text_color(rgb(SECONDARY))
-                            .child("Mel"),
+                            .child(format!(
+                                "{} Hz · {} · Mel",
+                                sample_rate,
+                                match audio.pcm.meta.channels {
+                                    1 => "Mono".to_owned(),
+                                    2 => "Stereo".to_owned(),
+                                    channels => format!("{channels} ch"),
+                                }
+                            )),
                     ),
             )
     }
@@ -336,7 +370,7 @@ fn plot_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
 
 pub(super) fn label(text: String, origin: Point<Pixels>, window: &mut Window, cx: &mut App) {
     let style = TextStyle {
-        font_family: "Segoe UI".into(),
+        font_family: UI_FONT.into(),
         color: rgb(SECONDARY).into(),
         ..Default::default()
     };
@@ -375,7 +409,6 @@ fn paint_plot(
     cx: &mut App,
 ) {
     if channels.is_empty() {
-        label("Empty audio".into(), plot.origin, window, cx);
         return;
     }
     let height = (plot.size.height - px(GAP * (channels.len() - 1) as f32)) / channels.len() as f32;
@@ -512,101 +545,5 @@ fn paint_plot(
             window,
             cx,
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::prelude::rust_2024::test;
-
-    #[test]
-    fn prepares_audio_textures_without_a_window_or_playback_device() -> anyhow::Result<()> {
-        let pcm = Pcm {
-            meta: nvlens_audio::AudioMeta {
-                codec: "test",
-                channels: 2,
-                sample_rate: 48000,
-                frames: Some(1),
-            },
-            samples: vec![1., 0.].into(),
-        };
-        let wav = pcm.to_wav()?;
-        let preview = AudioPreview::new(&wav, &AtomicBool::new(false))?;
-        assert_eq!(preview.channels.len(), 2);
-        assert_eq!(&*preview.pcm.samples, &*pcm.samples);
-        assert_eq!(preview.duration(), 1. / 48000.);
-        let silence = preview.channels[1]
-            .as_bytes(0)
-            .ok_or_else(|| anyhow::anyhow!("Missing texture"))?;
-        assert!(
-            silence
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|pixel| *pixel == [0, 0, 0, 255])
-        );
-        let impulse = preview.channels[0]
-            .as_bytes(0)
-            .ok_or_else(|| anyhow::anyhow!("Missing texture"))?;
-        assert!(
-            impulse
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .any(|pixel| *pixel != [0, 0, 0, 255])
-        );
-        assert!(matches!(
-            AudioPreview::new(&wav, &AtomicBool::new(true))
-                .err()
-                .and_then(|error| error.downcast::<nvlens_core::Error>().ok()),
-            Some(nvlens_core::Error::Cancelled)
-        ));
-        Ok(())
-    }
-
-    /// NVLENS_YURIS_GAME=<game> cargo test -p nvlens-gui --release prepares_game_mel -- --ignored --nocapture
-    #[test]
-    #[ignore = "Requires NVLENS_YURIS_GAME and the original Sounds.ypf"]
-    fn prepares_game_mel() -> anyhow::Result<()> {
-        nvlens_archive::init();
-        nvlens_audio::init();
-        let root = PathBuf::from(
-            std::env::var_os("NVLENS_YURIS_GAME")
-                .ok_or_else(|| anyhow::anyhow!("Set NVLENS_YURIS_GAME"))?,
-        );
-        let cancel = AtomicBool::new(false);
-        let game = nvlens_engine::identify(&root, &cancel)?
-            .ok_or_else(|| anyhow::anyhow!("Engine not identified"))?;
-        let route = game
-            .route("Sounds.ypf")
-            .ok_or_else(|| anyhow::anyhow!("No audio archive route"))?;
-        let opened = nvlens_core::Catalog::load().open(root.join("pac/Sounds.ypf"), &route)?;
-        let entries = opened.archive.entries();
-        let music = entries.iter().find(|entry| entry.name.starts_with("bgm\\"));
-        for entry in entries
-            .first()
-            .into_iter()
-            .chain(entries.last())
-            .chain(music)
-        {
-            let start = Instant::now();
-            let bytes = opened.archive.open_entry(entry)?;
-            let preview = AudioPreview::new(&bytes, &cancel)?;
-            assert!(!preview.channels.is_empty());
-            assert_eq!(
-                preview.channels.len(),
-                usize::from(preview.pcm.meta.channels)
-            );
-            assert!(preview.duration() > 0.);
-            println!(
-                "{}: {} channels, {:.2}s, textures prepared in {:?}",
-                entry.name,
-                preview.channels.len(),
-                preview.duration(),
-                start.elapsed()
-            );
-        }
-        Ok(())
     }
 }

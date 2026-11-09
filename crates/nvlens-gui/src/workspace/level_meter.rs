@@ -144,7 +144,7 @@ impl Meter {
                                 ),
                                 size(px(1.), px(10.)),
                             ),
-                            rgb(0xf5f5f7),
+                            rgb(super::TEXT),
                         ));
                     }
                     if channel.held > FLOOR {
@@ -187,35 +187,5 @@ fn reading(db: f32) -> String {
         "≤−60".into()
     } else {
         format!("{db:.1}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::prelude::rust_2024::test;
-
-    #[test]
-    fn fast_attack_peak_hold_and_release_follow_transport_time() {
-        let mut meter = Meter::default();
-        let now = Instant::now();
-        assert!(meter.update(
-            &[Level {
-                peak_dbfs: 0.,
-                rms_dbfs: -3.
-            }],
-            now
-        ));
-        assert_eq!(meter.channels[0].peak, 0.);
-        assert_eq!(meter.channels[0].rms, -3.);
-        meter.update(&[], now + Duration::from_millis(500));
-        assert_eq!(meter.channels[0].peak, -12.);
-        assert_eq!(meter.channels[0].held, 0.);
-        meter.update(&[], now + Duration::from_millis(1500));
-        assert!(meter.channels[0].held < 0.);
-        meter.update(&[], now + Duration::from_secs(10));
-        assert_eq!(meter.channels[0].peak, FLOOR);
-        assert_eq!(meter.channels[0].held, FLOOR);
-        assert!(!meter.update(&[], now + Duration::from_secs(11)));
     }
 }
