@@ -159,7 +159,7 @@ fn parse_index(
         let name = resolve_name(&names, usize::try_from(name_offset).ok()?)?;
         let offset = index_size.checked_add(data_offset)?;
         let entry = Entry {
-            kind: ResourceKind::guess_from_name(&name),
+            kind: ResourceKind::Unknown,
             name,
             offset,
             size: stored_size,

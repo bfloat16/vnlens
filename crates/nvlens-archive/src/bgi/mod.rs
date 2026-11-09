@@ -55,11 +55,22 @@ impl Header {
 impl ArchiveFormat for BgiArchiveFormat {
     fn open(&self, view: &Arc<ArcView>, _: &ArchiveOptions) -> Result<Box<dyn Archive>> {
         let header = Header::parse(view.slice(0, 16)?)?;
-        let index_size = u64::from(header.count) * header.record_size;
-        let base = 16 + index_size;
+        let index_size = u64::from(header.count)
+            .checked_mul(header.record_size)
+            .ok_or_else(|| Error::Corrupt {
+                offset: 12,
+                reason: "BGI index size overflow".into(),
+            })?;
+        let base = 16u64
+            .checked_add(index_size)
+            .ok_or_else(|| Error::Corrupt {
+                offset: 12,
+                reason: "BGI data base overflow".into(),
+            })?;
         let mut reader = BinaryReader::new(view.slice(16, index_size)?);
         let mut entries = Vec::new();
         for _ in 0..header.count {
+            let record_offset = 16 + reader.position() as u64;
             let mut record = BinaryReader::new(reader.read_bytes(header.record_size as usize)?);
             let name = record.read_bytes(header.name_size)?;
             let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())];
@@ -73,14 +84,20 @@ impl ArchiveFormat for BgiArchiveFormat {
             };
             if errors {
                 return Err(Error::Corrupt {
-                    offset: 16 + reader.position() as u64 - header.record_size,
+                    offset: record_offset,
                     reason: "Invalid BGI CP932 entry name".into(),
                 });
             }
+            let offset = base
+                .checked_add(u64::from(record.read_u32_le()?))
+                .ok_or_else(|| Error::Corrupt {
+                    offset: record_offset,
+                    reason: "BGI entry offset overflow".into(),
+                })?;
             let entry = Entry {
-                kind: ResourceKind::guess_from_name(&name),
+                kind: ResourceKind::Unknown,
                 name: name.into_owned(),
-                offset: base + u64::from(record.read_u32_le()?),
+                offset,
                 size: u64::from(record.read_u32_le()?),
                 packed: None,
             };
@@ -108,6 +125,22 @@ struct BgiArchive {
 impl Archive for BgiArchive {
     fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+    fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        // DCProcPlayMovieByMF (sub_1400F22B0) resolves an ARC entry to its
+        // stored range. YCArchiveStream::Read (sub_1401026D0) passes those
+        // bytes unchanged to Media Foundation (sub_140110A60).
+        let header = self.view.slice(entry.offset, entry.size.min(16))?;
+        if header.starts_with(b"DSC FORMAT 1.00\0")
+            || matches!(header.get(4..8), Some(b"bw  " | b"hw  "))
+        {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(nvlens_io::RangeSource::new(
+            self.view.clone(),
+            entry.offset,
+            entry.size,
+        )?)))
     }
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         let bytes = self.view.slice(entry.offset, entry.size)?;

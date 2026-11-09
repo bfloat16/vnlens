@@ -5,7 +5,7 @@
 use nvlens_core::{
     Archive, ArchiveFormat, ArchiveOptions, Entry, Error, Format, ResourceKind, Result,
 };
-use nvlens_crypto::{cipher::escude::IndexCipher, compress::acp};
+use nvlens_crypto::cipher::escude::IndexCipher;
 use nvlens_io::{ArcView, BinaryReader, BinaryWriter, ReadAt};
 use std::{borrow::Cow, cell::RefCell, path::PathBuf, sync::Arc};
 
@@ -97,13 +97,8 @@ fn read_index(view: &dyn ReadAt) -> Result<Vec<Entry>> {
             ));
         }
         let name = name.into_owned();
-        let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-        let kind = match extension.as_str() {
-            "bin" | "001" | "c" | "h" | "inc" | "lsf" | "mot" | "sfx" => ResourceKind::Script,
-            _ => ResourceKind::guess_from_name(&name),
-        };
         let entry = Entry {
-            kind,
+            kind: ResourceKind::Unknown,
             name,
             offset: u64::from(r.read_u32_le()?),
             size: u64::from(r.read_u32_le()?),
@@ -130,18 +125,10 @@ impl Archive for Package {
     }
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         let bytes = self.view.slice(entry.offset, entry.size)?;
-        if bytes.starts_with(b"acp\0") {
-            let decoded = acp::unpack(bytes).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::InvalidInput {
-                    bad(entry.offset, &error.to_string())
-                } else {
-                    error.into()
-                }
-            })?;
-            Ok(Cow::Owned(decoded))
-        } else {
-            Ok(Cow::Borrowed(bytes))
-        }
+        nvlens_script::escude::decode_envelope(bytes).map_err(|error| match error {
+            Error::Corrupt { reason, .. } => bad(entry.offset, &reason),
+            error => error,
+        })
     }
     fn open_entry_raw(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         Ok(Cow::Borrowed(self.view.slice(entry.offset, entry.size)?))

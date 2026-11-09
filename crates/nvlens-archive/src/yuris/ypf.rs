@@ -94,11 +94,13 @@ impl YpfArchive {
             let size = u64::from(reader.read_u32_le()?);
             let offset = reader.read_u64_le()?;
             checksums.push(reader.read_u32_le()?);
+            // Preserve the index's resource class. Engine routing resolves
+            // filename and content variants only when the entry is accessed.
             let kind = match file_type {
                 0 => ResourceKind::Script,
                 1..=4 | 7..=9 => ResourceKind::Image,
                 5 | 6 => ResourceKind::Audio,
-                _ => ResourceKind::guess_from_name(&name),
+                _ => ResourceKind::Unknown,
             };
             let entry = Entry {
                 name,
@@ -136,9 +138,49 @@ impl YpfArchive {
     }
 }
 
+impl YpfArchive {
+    fn index(&self, entry: &Entry) -> Result<usize> {
+        self.entries
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, entry))
+            .or_else(|| {
+                self.entries.iter().position(|candidate| {
+                    candidate.offset == entry.offset
+                        && candidate.name == entry.name
+                        && candidate.size == entry.size
+                })
+            })
+            .ok_or_else(|| corrupt(entry.offset, "Entry does not belong to this YPF"))
+    }
+}
+
 impl Archive for YpfArchive {
     fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+    fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        let index = self.index(entry)?;
+        if entry
+            .name
+            .rsplit('.')
+            .next()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("ybn"))
+        {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(super::stream::YpfSource {
+            source: Arc::new(nvlens_io::RangeSource::new(
+                self.view.clone(),
+                entry.offset,
+                entry.size,
+            )?),
+            packed: entry.packed.is_some_and(|packed| packed.is_packed),
+            size: entry
+                .packed
+                .map_or(entry.size, |packed| packed.unpacked_size),
+            checksum: self.checksums[index],
+            offset: entry.offset,
+        })))
     }
     fn virtual_paths(&self) -> Result<Vec<(usize, String)>> {
         let Some(table) = self.entries.iter().find(|entry| {
@@ -171,18 +213,7 @@ impl Archive for YpfArchive {
         Ok(Cow::Borrowed(self.view.slice(entry.offset, entry.size)?))
     }
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
-        let index = self
-            .entries
-            .iter()
-            .position(|candidate| std::ptr::eq(candidate, entry))
-            .or_else(|| {
-                self.entries.iter().position(|candidate| {
-                    candidate.offset == entry.offset
-                        && candidate.name == entry.name
-                        && candidate.size == entry.size
-                })
-            })
-            .ok_or_else(|| corrupt(entry.offset, "Entry does not belong to this archive"))?;
+        let index = self.index(entry)?;
         let stored = self.view.slice(entry.offset, entry.size)?;
         if murmur2::hash(stored, 0) != self.checksums[index] {
             return Err(corrupt(entry.offset, "Stored payload hash mismatch"));

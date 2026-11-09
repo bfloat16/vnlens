@@ -194,7 +194,7 @@ fn build_entries(info_entries: &[ArchiveInfoEntry], body_len: u64) -> Result<Vec
     for item in info_entries {
         let entry = Entry {
             name: item.name.clone(),
-            kind: ResourceKind::guess_from_name(&item.name),
+            kind: ResourceKind::Unknown,
             offset: item.offset,
             size: item.size,
             packed: None,

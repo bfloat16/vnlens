@@ -521,6 +521,15 @@ fn xor31_segments_plain_entries_and_bad_payloads_remain_lazy() -> Result<()> {
     let archive = Xp3Archive::open(&view, &options)?;
     assert_eq!(archive.entries.len(), 4);
     assert_eq!(&*archive.open_entry(&archive.entries[0])?, &plain);
+    let source = archive
+        .open_entry_source(&archive.entries[0])?
+        .ok_or(Error::InvalidFormat)?;
+    assert_eq!(&*source.read_at(5, 40)?, &plain[5..45]);
+    assert_eq!(&*source.read_at(0, 12)?, &plain[..12]);
+    let mut reader = source.reader(Arc::new(std::sync::atomic::AtomicBool::new(false)))?;
+    let mut streamed = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut streamed)?;
+    assert_eq!(&streamed, &plain);
     assert_eq!(&*archive.open_entry_raw(&archive.entries[0])?, &raw);
     assert!(matches!(
         archive.open_entry(&archive.entries[1])?,

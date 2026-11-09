@@ -51,7 +51,7 @@ fn mount_does_not_decode_scripts_and_retains_nested_names_and_raw_payloads() -> 
         .insert("propeller_msc", nvlens_core::Secret::new(vec![0x88]));
     let archive = Mpk.open(&view, &options)?;
     assert_eq!(archive.entries()[0].name, "\\nested\\sound.ogv");
-    assert_eq!(archive.entries()[0].kind, ResourceKind::Audio);
+    assert_eq!(archive.entries()[0].kind, ResourceKind::Unknown);
     assert!(matches!(
         archive.open_entry(&archive.entries()[0])?,
         Cow::Borrowed(b"OggS")

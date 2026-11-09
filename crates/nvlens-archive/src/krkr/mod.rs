@@ -73,7 +73,7 @@ fn chunk<'a>(r: &mut BinaryReader<'a>) -> Result<(&'a [u8], &'a [u8])> {
         .map_err(|_| corrupt(r.position() as u64, "XP3 chunk size does not fit memory"))?;
     Ok((tag, r.read_bytes(len)?))
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Segment {
     offset: u64,
     stored: u64,
@@ -94,7 +94,7 @@ struct Xp3Archive {
     entries: Vec<Entry>,
     records: Vec<Record>,
     names: BTreeMap<String, usize>,
-    filter: Option<Filter>,
+    filter: Option<Arc<Filter>>,
     xor31: bool,
 }
 impl ArchiveFormat for Xp3 {
@@ -132,14 +132,14 @@ impl Xp3Archive {
                 .iter()
                 .map(|b| BinaryReader::u32_le(b))
                 .collect::<Vec<_>>();
-            Some(
+            Some(Arc::new(
                 Filter::from_params_and_table(key(options, "hxv4_params")?, &words)
                     .map_err(|e| Error::UnknownScheme(Some(e)))?
                     .with_holder_words(
                         BinaryReader::u32_le(nonce),
                         BinaryReader::u32_le(&nonce[4..]),
                     ),
-            )
+            ))
         } else {
             None
         };
@@ -285,7 +285,7 @@ impl Xp3Archive {
             };
             for path in paths {
                 let entry = Entry {
-                    kind: ResourceKind::guess_from_name(&path),
+                    kind: ResourceKind::Unknown,
                     name: path,
                     offset: begin,
                     size: end - begin,
@@ -396,6 +396,9 @@ impl Xp3Archive {
 impl Archive for Xp3Archive {
     fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+    fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        Ok(Some(self.source(entry)?))
     }
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         let record = self.record(entry)?;

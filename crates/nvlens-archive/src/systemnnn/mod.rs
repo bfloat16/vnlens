@@ -16,6 +16,13 @@ impl Archive for Package {
     fn entries(&self) -> &[Entry] {
         &self.entries
     }
+    fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        Ok(Some(Arc::new(nvlens_io::RangeSource::new(
+            self.view.clone(),
+            entry.offset,
+            entry.size,
+        )?)))
+    }
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         Ok(Cow::Borrowed(self.view.slice(entry.offset, entry.size)?))
     }

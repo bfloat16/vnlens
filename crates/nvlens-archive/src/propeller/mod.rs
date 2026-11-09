@@ -53,21 +53,9 @@ impl ArchiveFormat for Mpk {
                 return Err(corrupt(at, "Invalid MPK CP932 name"));
             }
             let name = name.into_owned();
-            let kind = match name
-                .rsplit('.')
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "mgr" => ResourceKind::Image,
-                "msc" => ResourceKind::Script,
-                "ogv" => ResourceKind::Audio,
-                _ => ResourceKind::guess_from_name(&name),
-            };
             let entry = Entry {
                 name,
-                kind,
+                kind: ResourceKind::Unknown,
                 offset: u64::from(reader.read_u32_le()?),
                 size: u64::from(reader.read_u32_le()?),
                 packed: None,
@@ -93,6 +81,21 @@ struct Pack {
 impl Archive for Pack {
     fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+    fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        if entry
+            .name
+            .rsplit('.')
+            .next()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("msc"))
+        {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(nvlens_io::RangeSource::new(
+            self.view.clone(),
+            entry.offset,
+            entry.size,
+        )?)))
     }
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         let bytes = self.view.slice(entry.offset, entry.size)?;

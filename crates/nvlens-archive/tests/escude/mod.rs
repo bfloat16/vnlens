@@ -76,7 +76,7 @@ fn both_indexes_preserve_names_and_never_read_payloads() -> Result<()> {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "../good.c");
         assert_eq!(entries[1].name, "bad.bin");
-        assert_eq!(entries[1].kind, ResourceKind::Script);
+        assert_eq!(entries[1].kind, ResourceKind::Unknown);
     }
     Ok(())
 }

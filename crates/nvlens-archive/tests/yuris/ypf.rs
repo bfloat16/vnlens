@@ -81,6 +81,18 @@ fn index_mount_is_lazy_and_identified_name_key_is_verified() {
     let archive =
         YpfArchive::open(Arc::new(ArcView::open(&file.0).unwrap()), [0; 4], 0xa7).unwrap();
     assert_eq!(archive.entries()[1].name, "folder/ok.txt");
+    assert!(
+        archive
+            .open_entry_source(&archive.entries()[0])
+            .unwrap()
+            .is_none()
+    );
+    let source = archive
+        .open_entry_source(&archive.entries()[1])
+        .unwrap()
+        .unwrap();
+    assert_eq!(&*source.read_at(1, 3).unwrap(), b"ell");
+    assert_eq!(&*source.read_at(0, 5).unwrap(), b"hello");
     assert_eq!(
         &*archive.open_entry(&archive.entries()[1]).unwrap(),
         b"hello"

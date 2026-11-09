@@ -35,9 +35,24 @@ impl ArchiveFormat for MovieFormat {
             return Err(Error::Unsupported(format!("OMV version {version:#x}")));
         }
         r.set_position(76)?;
-        let index_size = u64::from(r.read_u32_le()?) * 28 + u64::from(r.read_u32_le()?) * 32;
+        let index_size = u64::from(r.read_u32_le()?)
+            .checked_mul(28)
+            .and_then(|a| {
+                u64::from(r.read_u32_le().ok()?)
+                    .checked_mul(32)
+                    .and_then(|b| a.checked_add(b))
+            })
+            .ok_or_else(|| Error::Corrupt {
+                offset: 76,
+                reason: "OMV index size overflow".into(),
+            })?;
+        let offset = 168u64
+            .checked_add(index_size)
+            .ok_or_else(|| Error::Corrupt {
+                offset: 76,
+                reason: "OMV data offset overflow".into(),
+            })?;
         view.slice(168, index_size)?;
-        let offset = 168 + index_size;
         let name = format!(
             "{}.ogv",
             view.path()
@@ -65,6 +80,13 @@ struct Movie {
 impl Archive for Movie {
     fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+    fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        Ok(Some(Arc::new(nvlens_io::RangeSource::new(
+            self.view.clone(),
+            entry.offset,
+            entry.size,
+        )?)))
     }
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         Ok(Cow::Borrowed(self.view.slice(entry.offset, entry.size)?))

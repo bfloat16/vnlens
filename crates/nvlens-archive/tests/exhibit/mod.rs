@@ -54,7 +54,7 @@ fn split_hex_volume_is_lazy_and_bad_neighbor_does_not_block_good_entry() {
     let view = Arc::new(ArcView::open(&path).unwrap());
     let archive = Grp.open(&view, &ArchiveOptions::default()).unwrap();
     assert_eq!(archive.entries().len(), 2);
-    assert_eq!(archive.entries()[0].name, "00123.ogg");
+    assert_eq!(archive.entries()[0].name, "00123");
     // Neither mapping nor payload validation occurs at mount/list time.
     std::fs::write(dir.0.join("res2a0a.grp"), b"abc").unwrap();
     assert!(matches!(

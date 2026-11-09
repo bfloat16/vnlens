@@ -73,13 +73,15 @@ fn frame_reads_keep_raw_ranges_and_include_only_required_dependencies() -> Resul
         assert_eq!(&*raw, if index == 1 { &delta } else { &key });
         let decoded = frames.open_entry(&frames.entries[index])?;
         assert_eq!(BinaryReader::u32_le(&decoded[12..]), dependencies);
-        let image = nvlens_image::decode(&decoded)?.ok_or(Error::InvalidFormat)?;
+        let image = nvlens_image::decode_as("frame/rugp", &decoded)?;
         let nvlens_image::PixelBuffer::Rgba8(pixels) = image.pixels else {
             return Err(Error::InvalidFormat);
         };
         assert_eq!(pixels, expected.repeat(16));
     }
-    assert!(nvlens_image::decode(&frames.open_entry(&frames.entries[3])?).is_err());
+    assert!(
+        nvlens_image::decode_as("frame/rugp", &frames.open_entry(&frames.entries[3])?).is_err()
+    );
     drop(frames);
     Ok(())
 }

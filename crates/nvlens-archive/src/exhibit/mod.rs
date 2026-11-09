@@ -113,8 +113,8 @@ impl ArchiveFormat for Grp {
                     .checked_add(i)
                     .ok_or_else(|| corrupt(r.position(), "AiFS resource ID overflow"))?;
                 result.entries.push(Entry {
-                    name: format!("{id:05}.ogg"),
-                    kind: ResourceKind::Audio,
+                    name: format!("{id:05}"),
+                    kind: ResourceKind::Unknown,
                     offset,
                     size,
                     packed: None,
@@ -133,6 +133,22 @@ impl Archive for Group {
         &self.entries
     }
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
+        Ok(Cow::Borrowed(
+            self.entry_view(entry)?.slice(entry.offset, entry.size)?,
+        ))
+    }
+    fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        Ok(Some(Arc::new(nvlens_io::RangeSource::new(
+            self.entry_view(entry)?.clone(),
+            entry.offset,
+            entry.size,
+        )?)))
+    }
+}
+impl Group {
+    // Share the lazily opened volume between extraction and independent
+    // playback cursors; neither path copies the entire encoded resource.
+    fn entry_view(&self, entry: &Entry) -> Result<&Arc<ArcView>> {
         let i = self
             .entries
             .iter()
@@ -142,13 +158,12 @@ impl Archive for Group {
         let mapped = volume
             .opened
             .get_or_init(|| ArcView::open(&volume.path).map(Arc::new));
-        let mapped = mapped.as_ref().map_err(|e| {
+        Ok(mapped.as_ref().map_err(|e| {
             std::io::Error::new(
                 e.kind(),
                 format!("Opening AiFS volume {}: {e}", volume.path.display()),
             )
-        })?;
-        Ok(Cow::Borrowed(mapped.slice(entry.offset, entry.size)?))
+        })?)
     }
 }
 fn corrupt(offset: usize, reason: &str) -> Error {

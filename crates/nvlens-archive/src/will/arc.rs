@@ -97,7 +97,7 @@ fn parse_index(view: &ArcView) -> Option<Vec<Entry>> {
         let name = String::from_utf16(&units).ok()?;
 
         let entry = Entry {
-            kind: ResourceKind::guess_from_name(&name),
+            kind: ResourceKind::Unknown,
             name,
             offset,
             size,
@@ -125,6 +125,16 @@ struct WillV2Archive {
 impl Archive for WillV2Archive {
     fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+    fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        if is_script(&entry.name) || has_ext(&entry.name, "psp") {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(nvlens_io::RangeSource::new(
+            self.view.clone(),
+            entry.offset,
+            entry.size,
+        )?)))
     }
 
     fn open_entry_raw(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {

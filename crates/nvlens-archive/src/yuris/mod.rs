@@ -1,5 +1,6 @@
 //! YU-RIS YPF detection and registration. Payloads are opened independently.
 
+mod stream;
 mod ypf;
 
 use nvlens_core::{ArcView, Archive, ArchiveFormat, Format, Result};
