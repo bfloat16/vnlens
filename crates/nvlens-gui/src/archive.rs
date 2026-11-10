@@ -54,7 +54,7 @@ impl MountedArchive {
         game: Arc<nvlens_engine::Identification>,
     ) -> Result<Self> {
         let opened = Catalog::load()
-            .open(&path, route)
+            .open_view(Arc::new(game.files.open(&path)?), route)
             .with_context(|| format!("Opening {} with {:?}", path.display(), game.engine))?;
         let mut paths: Vec<_> = opened
             .archive
@@ -71,7 +71,7 @@ impl MountedArchive {
             }
         }
         Ok(Self {
-            source_path: path.canonicalize()?,
+            source_path: game.files.canonicalize(&path)?,
             path,
             directories: directories(&paths),
             entries: opened.archive.entries().into(),

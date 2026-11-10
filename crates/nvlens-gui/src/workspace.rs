@@ -314,7 +314,8 @@ impl Preview {
 enum Event {
     Names(names::Update),
     NamesRefreshed(anyhow::Result<Vec<names::Refresh>>),
-    Imported(Vec<anyhow::Result<Item>>),
+    Imported(Arc<AtomicBool>, Vec<anyhow::Result<Item>>),
+    ImportProgress(Arc<AtomicBool>, u64, u64),
     Folder(u64, anyhow::Result<Option<Folder>>),
     Preview(Arc<AtomicBool>, anyhow::Result<Box<Preview>>),
     ImageFrame(Arc<AtomicBool>, usize, anyhow::Result<Arc<RenderImage>>),
@@ -346,10 +347,10 @@ pub struct Workspace {
     preview_vertical_bar: scrollbar::Scrollbar,
     preview_horizontal_bar: scrollbar::Scrollbar,
     image_view: image_view::State,
-    error_scroll: UniformListScrollHandle,
     sender: mpsc::Sender<Event>,
     _events_task: Task<()>,
     pending: usize,
+    imports: Vec<Arc<AtomicBool>>,
     request: Arc<AtomicBool>,
     preview: Option<Preview>,
     preview_loading: bool,
@@ -373,7 +374,7 @@ pub struct Workspace {
     progress: Progress,
     output: Option<PathBuf>,
     status: String,
-    errors: Vec<String>,
+    error: Option<String>,
 }
 
 impl Workspace {
@@ -435,10 +436,10 @@ impl Workspace {
             preview_vertical_bar: scrollbar::Scrollbar::default(),
             preview_horizontal_bar: scrollbar::Scrollbar::default(),
             image_view: image_view::State::default(),
-            error_scroll: UniformListScrollHandle::new(),
             sender,
             _events_task: task,
             pending: 0,
+            imports: Vec::new(),
             request: Arc::new(AtomicBool::new(false)),
             preview: None,
             preview_loading: false,
@@ -462,7 +463,7 @@ impl Workspace {
             progress: Progress::default(),
             output: None,
             status: "Ready".into(),
-            errors: Vec::new(),
+            error: None,
         }
     }
 
@@ -473,7 +474,24 @@ impl Workspace {
             Event::PreferencesSaved(Err(error)) => {
                 self.error(format!("Cannot save preferences: {error:#}"))
             }
-            Event::Imported(results) => self.receive_imports(results, cx),
+            Event::Imported(request, results) => {
+                self.imports.retain(|old| !Arc::ptr_eq(old, &request));
+                if request.load(Ordering::Relaxed) {
+                    self.pending = self.pending.saturating_sub(1);
+                    self.status = "Opening cancelled".into();
+                } else {
+                    self.receive_imports(results, cx);
+                    self.status = "Ready".into();
+                }
+            }
+            Event::ImportProgress(request, done, total)
+                if self.imports.iter().any(|job| Arc::ptr_eq(job, &request)) =>
+            {
+                self.status = format!(
+                    "Reading game resources: {:.1}%",
+                    done as f64 * 100. / total.max(1) as f64
+                );
+            }
             Event::Folder(id, result) => self.receive_folder(id, result, cx),
             Event::Preview(request, result) if Arc::ptr_eq(&request, &self.request) => {
                 self.preview_loading = false;
@@ -554,9 +572,9 @@ impl Workspace {
         }
     }
 
-    /// Records a failure and opens the status panel, the only place errors appear.
+    /// Records the latest failure and opens the status panel, the only place errors appear.
     fn error(&mut self, error: String) {
-        self.errors.push(error);
+        self.error = Some(error);
         self.show_status = true;
     }
 
@@ -659,12 +677,26 @@ impl Workspace {
 
     fn open_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.pending += 1;
+        let request = Arc::new(AtomicBool::new(false));
+        self.imports.push(request.clone());
+        self.status = "Reading game resources…".into();
         let sender = self.sender.clone();
         cx.background_executor()
             .spawn(async move {
-                let _ = sender.send(Event::Imported(
-                    paths.into_iter().map(Item::from_path).collect(),
-                ));
+                let last = std::sync::Mutex::new(Instant::now());
+                let progress = |done, total| {
+                    if let Ok(mut last) = last.lock()
+                        && (last.elapsed().as_millis() >= 100 || done == total)
+                    {
+                        *last = Instant::now();
+                        let _ = sender.send(Event::ImportProgress(request.clone(), done, total));
+                    }
+                };
+                let results = paths
+                    .into_iter()
+                    .map(|path| Item::from_path_cancellable(path, &request, &progress))
+                    .collect();
+                let _ = sender.send(Event::Imported(request, results));
             })
             .detach();
         cx.notify();
@@ -863,6 +895,9 @@ impl Workspace {
         let Some(name) = self.selected_item().map(|item| item.target.export_name()) else {
             return;
         };
+        let Some(target) = self.selected_item().map(|item| item.target.clone()) else {
+            return;
+        };
         let Some(preview) = &self.preview else {
             return;
         };
@@ -889,6 +924,7 @@ impl Workspace {
                             .spawn(async move {
                                 let result = (|| -> anyhow::Result<PathBuf> {
                                     let converted = crate::resource::convert(
+                                        &target,
                                         &bytes,
                                         &route,
                                         kind,
@@ -1081,6 +1117,13 @@ impl Workspace {
     }
 
     fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.imports.is_empty() {
+            for request in &self.imports {
+                request.store(true, Ordering::Relaxed);
+            }
+            cx.notify();
+            return;
+        }
         if self.show_settings {
             self.toggle_settings(&Settings, window, cx);
             return;
@@ -1212,6 +1255,9 @@ impl Workspace {
 
 impl Drop for Workspace {
     fn drop(&mut self) {
+        for request in &self.imports {
+            request.store(true, Ordering::Relaxed);
+        }
         self.cancel.store(true, Ordering::Relaxed);
         self.request.store(true, Ordering::Relaxed);
     }

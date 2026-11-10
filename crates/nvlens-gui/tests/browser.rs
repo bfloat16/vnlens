@@ -205,6 +205,7 @@ fn preview_and_export_share_the_selected_image_and_audio_routes() -> Result<()> 
         assert!(resource.image.is_some());
         assert!(resource.script.is_none());
         let exported = crate::resource::convert(
+            &target,
             &resource.bytes,
             &resource.route,
             crate::resource::ExportKind::Png,
@@ -214,6 +215,7 @@ fn preview_and_export_share_the_selected_image_and_audio_routes() -> Result<()> 
         assert_eq!(exported, png);
         assert!(
             crate::resource::convert(
+                &target,
                 &resource.bytes,
                 &resource.route,
                 crate::resource::ExportKind::Wav,
@@ -235,10 +237,12 @@ fn preview_and_export_share_the_selected_image_and_audio_routes() -> Result<()> 
     let wav = pcm.to_wav()?;
     let path = dir.0.join("voice.wav");
     fs::write(&path, &wav)?;
-    let resource = crate::resource::read(&Target::File(path, game), false, &cancel)?;
+    let target = Target::File(path, game);
+    let resource = crate::resource::read(&target, false, &cancel)?;
     assert_eq!(resource.route, ResourceRoute::Audio("audio/standard"));
     assert!(resource.audio);
     let exported = crate::resource::convert(
+        &target,
         &resource.bytes,
         &resource.route,
         crate::resource::ExportKind::Wav,

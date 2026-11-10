@@ -153,12 +153,12 @@ impl Workspace {
                 let mut progress = NameProgress::default();
                 let result = (|| -> anyhow::Result<()> {
                     let mut inputs = Vec::new();
-                    for entry in std::fs::read_dir(&game.root)? {
+                    for entry in game.files.read_dir(&game.root)? {
                         if request.load(Ordering::Relaxed) {
                             return Err(nvlens_core::Error::Cancelled.into());
                         }
-                        let path = entry?.path();
-                        if path.is_file()
+                        let path = entry.path;
+                        if !entry.metadata.directory
                             && let nvlens_core::ResourceRoute::Archive(route) = game.resource_route(
                                 &path.to_string_lossy(),
                                 nvlens_core::ResourceOrigin::File,
@@ -170,7 +170,7 @@ impl Workspace {
                         }
                     }
                     inputs.sort_by(|a, b| a.0.cmp(&b.0));
-                    let mut recovery = NameRecovery::open(&inputs, &request)?;
+                    let mut recovery = NameRecovery::open_in(&inputs, &game.files, &request)?;
                     let mut reported_revision = None;
                     let mut last = Instant::now();
                     loop {
@@ -226,8 +226,8 @@ impl Workspace {
         job.paths = update.paths;
         job.progress = update.progress;
         job.running = !update.finished;
-        if !update.errors.is_empty() {
-            self.errors.extend(update.errors);
+        if let Some(error) = update.errors.into_iter().last() {
+            self.error = Some(error);
         }
         self.refresh_names(cx);
     }

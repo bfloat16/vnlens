@@ -19,7 +19,7 @@ impl Workspace {
             || self.extracting
             || self.converting
             || self.columns.iter().any(|column| column.loading);
-        let failed = !self.errors.is_empty();
+        let failed = self.error.is_some();
         div()
             .absolute()
             .left(px(12.))
@@ -116,6 +116,18 @@ impl Workspace {
             .when(self.status != "Ready", |view| {
                 view.child(status_line(self.status.clone(), SECONDARY))
             })
+            .when(!self.imports.is_empty(), |view| {
+                view.child(
+                    button("cancel-opening", "Cancel opening", false, true).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            for request in &this.imports {
+                                request.store(true, Ordering::Relaxed);
+                            }
+                            cx.notify();
+                        },
+                    )),
+                )
+            })
             .when(self.pending > 0, |view| {
                 view.child(status_line(
                     format!("Opening… · {} requests", self.pending),
@@ -146,8 +158,11 @@ impl Workspace {
                     ACCENT,
                 ))
             })
-            .when(!self.preview_loading && !self.preview_failed, |view| {
-                if let Some(item) = self.selected_item().filter(|_| self.preview.is_some()) {
+            .when(!self.preview_loading, |view| {
+                if let Some(item) = self
+                    .selected_item()
+                    .filter(|_| !self.preview_failed && self.preview.is_some())
+                {
                     view.child(status_line(
                         if self
                             .preview
@@ -170,6 +185,8 @@ impl Workspace {
                         format!("{} items", column.folder.items.len()),
                         SECONDARY,
                     ))
+                } else if self.status == "Ready" && self.error.is_none() {
+                    view.child(status_line("Ready".into(), SECONDARY))
                 } else {
                     view
                 }
@@ -178,19 +195,16 @@ impl Workspace {
                 view.child(status_line("Exporting…".into(), ACCENT))
             })
             .children(self.name_jobs.iter().map(|job| {
-                div().flex().gap_2().items_center().child(
-                    status_line(
-                        format!(
-                            "{} · {} / {} · {} names · {} failed",
-                            job.label(),
-                            job.progress.completed,
-                            job.progress.total,
-                            job.progress.resolved,
-                            job.progress.failed
-                        ),
-                        if job.running { ACCENT } else { SECONDARY },
-                    )
-                    .flex_1(),
+                status_line(
+                    format!(
+                        "{} · {} / {} · {} names · {} failed",
+                        job.label(),
+                        job.progress.completed,
+                        job.progress.total,
+                        job.progress.resolved,
+                        job.progress.failed
+                    ),
+                    if job.running { ACCENT } else { SECONDARY },
                 )
             }))
             .when(self.name_jobs.iter().any(|job| job.running), |view| {
@@ -214,81 +228,68 @@ impl Workspace {
                     ),
                     ACCENT,
                 ))
-                .child(div().h(px(4.)).rounded_full().bg(rgb(BORDER)).child(
-                    div().h_full().rounded_full().bg(rgb(ACCENT)).w(relative(
-                        if self.progress.total == 0 {
-                            0.
-                        } else {
-                            self.progress.completed as f32 / self.progress.total as f32
-                        },
-                    )),
-                ))
+                .child(
+                    div()
+                        .h(px(4.))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(rgb(BORDER))
+                        .child(div().h_full().rounded_full().bg(rgb(ACCENT)).w(relative(
+                            if self.progress.total == 0 {
+                                0.
+                            } else {
+                                self.progress.completed as f32 / self.progress.total as f32
+                            },
+                        ))),
+                )
             })
-            .when(!self.errors.is_empty(), |view| {
+            .when_some(self.error.as_ref(), |view, error| {
+                let copied = error.clone();
                 view.child(
-                    uniform_list(
-                        "error-list",
-                        self.errors.len(),
-                        cx.processor(|this, range: Range<usize>, _, cx| {
-                            range
-                                .map(|index| {
-                                    div()
-                                        .h(px(ERROR_ROW))
-                                        .pl_2()
-                                        .pr_1()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.))
-                                        .rounded(px(6.))
-                                        .text_color(rgb(DANGER))
-                                        .hover(|style| style.bg(rgba(0xffffff0d)))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(this.errors[index].clone()),
-                                        )
-                                        .child(
-                                            error_action(("copy-error", index), "icons/copy.svg")
-                                                .tooltip(tooltip("Copy"))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    cx.write_to_clipboard(
-                                                        ClipboardItem::new_string(
-                                                            this.errors[index].clone(),
-                                                        ),
-                                                    );
-                                                })),
-                                        )
-                                        .child(
-                                            error_action(
-                                                ("dismiss-error", index),
-                                                "icons/window-close.svg",
-                                            )
-                                            .tooltip(tooltip("Dismiss"))
-                                            .on_click(
-                                                cx.listener(move |this, _, _, cx| {
-                                                    if index < this.errors.len() {
-                                                        this.errors.remove(index);
-                                                    }
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        )
-                                })
-                                .collect()
-                        }),
-                    )
-                    .track_scroll(self.error_scroll.clone())
-                    .h(px(self.errors.len().min(6) as f32 * ERROR_ROW))
-                    .flex_shrink_0()
-                    .map(|view| {
-                        scroll::wheel(
-                            view,
-                            Some(self.error_scroll.0.borrow().base_handle.clone()),
-                            None,
+                    div()
+                        .w_full()
+                        .flex_shrink_0()
+                        .pl_2()
+                        .pr_1()
+                        .py_1()
+                        .flex()
+                        .items_end()
+                        .gap(px(4.))
+                        .rounded(px(6.))
+                        .text_color(rgb(DANGER))
+                        .hover(|style| style.bg(rgba(0xffffff0d)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .my_auto()
+                                .whitespace_normal()
+                                .child(error.clone()),
                         )
-                    }),
+                        .child(
+                            div()
+                                .flex()
+                                .flex_shrink_0()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(
+                                    error_action("copy-error", "icons/copy.svg")
+                                        .tooltip(tooltip("Copy"))
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copied.clone(),
+                                            ));
+                                        })),
+                                )
+                                .child(
+                                    error_action("dismiss-error", "icons/window-close.svg")
+                                        .tooltip(tooltip("Dismiss"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.error = None;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
                 )
             })
             .when(self.extracting || self.output.is_some(), |view| {
@@ -324,8 +325,6 @@ impl Workspace {
     }
 }
 
-const ERROR_ROW: f32 = 28.;
-
 fn error_action(id: impl Into<ElementId>, icon: &'static str) -> Stateful<Div> {
     div()
         .id(id)
@@ -341,5 +340,10 @@ fn error_action(id: impl Into<ElementId>, icon: &'static str) -> Stateful<Div> {
 }
 
 fn status_line(text: String, color: u32) -> Div {
-    div().flex_shrink_0().text_color(rgb(color)).child(text)
+    div()
+        .w_full()
+        .flex_shrink_0()
+        .whitespace_normal()
+        .text_color(rgb(color))
+        .child(text)
 }

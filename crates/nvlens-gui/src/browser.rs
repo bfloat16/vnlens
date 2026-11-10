@@ -129,14 +129,44 @@ impl Target {
             )),
         }
     }
+    fn video_source(&self, raw: bool) -> Result<Option<Arc<dyn nvlens_io::ReadAt>>> {
+        let Self::File(path, game) = self else {
+            return Ok(None);
+        };
+        let ResourceRoute::Video(tag) = game.route_path(path)? else {
+            return Ok(None);
+        };
+        let source = game.files.source(path)?;
+        if raw {
+            return Ok(Some(source));
+        }
+        nvlens_video::decode_source_as(tag, source, &self.name(), game.resource_options())
+            .map(Some)
+            .map_err(Into::into)
+    }
     pub fn read(&self, raw: bool, cancel: &AtomicBool) -> Result<Vec<u8>> {
         if cancel.load(Ordering::Relaxed) {
             return Err(nvlens_core::Error::Cancelled.into());
         }
         match self {
             Self::File(path, game) => {
-                let bytes =
-                    std::fs::read(path).with_context(|| format!("Reading {}", path.display()))?;
+                if !raw && let Some(source) = self.video_source(false)? {
+                    let mut output = Vec::new();
+                    let mut offset = 0;
+                    while offset < source.len() {
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err(nvlens_core::Error::Cancelled.into());
+                        }
+                        let size = (source.len() - offset).min(65536) as usize;
+                        output.extend_from_slice(&source.read_at(offset, size)?);
+                        offset += size as u64;
+                    }
+                    return Ok(output);
+                }
+                let bytes = game
+                    .files
+                    .read(path)
+                    .with_context(|| format!("Reading {}", path.display()))?;
                 if !raw
                     && let ResourceRoute::Script(tag) = self.resource_route(&bytes)?
                     && let std::borrow::Cow::Owned(decoded) =
@@ -170,11 +200,19 @@ pub struct Item {
     pub container: bool,
 }
 impl Item {
+    #[cfg(test)]
     pub fn from_path(path: PathBuf) -> Result<Self> {
+        Self::from_path_cancellable(path, &AtomicBool::new(false), &|_, _| {})
+    }
+    pub fn from_path_cancellable(
+        path: PathBuf,
+        cancel: &AtomicBool,
+        progress: &(dyn Fn(u64, u64) + Sync),
+    ) -> Result<Self> {
         let metadata =
             std::fs::metadata(&path).with_context(|| format!("Opening {}", path.display()))?;
         let game = Arc::new(
-            nvlens_engine::identify(&path, &AtomicBool::new(false))?.ok_or_else(|| {
+            nvlens_engine::identify_with_progress(&path, cancel, progress)?.ok_or_else(|| {
                 anyhow!("Game engine was not identified; resource processing is disabled")
             })?,
         );
@@ -182,14 +220,11 @@ impl Item {
             Target::Directory(path, game)
         } else {
             if let Some(parent) = path.parent() {
-                let files = std::fs::read_dir(parent)?
-                    .map(|entry| -> std::io::Result<_> {
-                        let entry = entry?;
-                        Ok((entry.file_type()?.is_file(), entry.path()))
-                    })
-                    .collect::<std::io::Result<Vec<_>>>()?
+                let files = game
+                    .files
+                    .read_dir(parent)?
                     .into_iter()
-                    .filter_map(|(file, path)| file.then_some(path))
+                    .filter_map(|entry| (!entry.metadata.directory).then_some(entry.path))
                     .collect::<Vec<_>>();
                 if let Some(set) = game
                     .archive_sets(&files)
@@ -238,7 +273,7 @@ impl Item {
 
     fn from_set(set: ArchiveSet, game: Arc<Identification>) -> Self {
         let size = set.members.iter().try_fold(0u64, |sum, path| {
-            sum.checked_add(std::fs::metadata(path).ok()?.len())
+            sum.checked_add(game.files.metadata(path).ok()?.len)
         });
         Self::from_target(Target::ArchiveSet(Arc::new(set), game), size)
     }
@@ -346,20 +381,21 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
         Target::Opened => Some(Folder::empty(Target::Opened)),
         Target::Directory(path, game) => {
             let mut items = Vec::new();
-            for entry in
-                std::fs::read_dir(path).with_context(|| format!("Listing {}", path.display()))?
+            for entry in game
+                .files
+                .read_dir(path)
+                .with_context(|| format!("Listing {}", path.display()))?
             {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(nvlens_core::Error::Cancelled.into());
                 }
-                let entry = entry?;
-                let metadata = std::fs::metadata(entry.path()).ok();
-                let target = if metadata.as_ref().is_some_and(|m| m.is_dir()) {
-                    Target::Directory(entry.path(), game.clone())
+                let metadata = entry.metadata;
+                let target = if metadata.directory {
+                    Target::Directory(entry.path, game.clone())
                 } else {
-                    Target::File(entry.path(), game.clone())
+                    Target::File(entry.path, game.clone())
                 };
-                items.push(Item::from_target(target, metadata.map(|m| m.len())));
+                items.push(Item::from_target(target, Some(metadata.len)));
             }
             let mut folder = Folder {
                 target: target.clone(),
@@ -493,8 +529,8 @@ pub fn export(
                 };
                 Step::Visit(Target::File(path.clone(), game.clone()), relative)
             }));
-        } else if let Target::Directory(path, _) = &target {
-            let canonical = match std::fs::canonicalize(path) {
+        } else if let Target::Directory(path, game) = &target {
+            let canonical = match game.files.canonicalize(path) {
                 Ok(path) => path,
                 Err(error) => {
                     progress.failed += 1;
@@ -559,6 +595,26 @@ pub fn export(
             });
         }
         let result = (|| -> Result<()> {
+            if let Some(source) = target.video_source(raw)? {
+                let written = nvlens_io::filesystem::write_under_with(output, &name, |file| {
+                    use std::io::Write;
+                    let mut offset = 0;
+                    while offset < source.len() {
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err(std::io::Error::other(nvlens_core::Error::Cancelled));
+                        }
+                        let size = (source.len() - offset).min(65536) as usize;
+                        file.write_all(&source.read_at(offset, size)?)?;
+                        offset += size as u64;
+                    }
+                    Ok(())
+                });
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(nvlens_core::Error::Cancelled.into());
+                }
+                written?;
+                return Ok(());
+            }
             let bytes = target.read(raw, cancel)?;
             if cancel.load(Ordering::Relaxed) {
                 return Err(nvlens_core::Error::Cancelled.into());

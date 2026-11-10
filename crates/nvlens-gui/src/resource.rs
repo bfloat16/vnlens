@@ -67,7 +67,7 @@ impl ResourceResolver for Resources<'_> {
     }
 }
 
-struct FileResources<'a>(&'a std::path::Path);
+struct FileResources<'a>(&'a std::path::Path, &'a Arc<nvlens_io::FileSystem>);
 impl ResourceResolver for FileResources<'_> {
     fn resource_name(&self) -> Option<&str> {
         self.0.file_name()?.to_str()
@@ -94,7 +94,7 @@ impl ResourceResolver for FileResources<'_> {
         {
             path = root.join(relative);
         }
-        match std::fs::read(path) {
+        match self.1.read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
@@ -122,7 +122,7 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
     // Only the requested resource is opened. Streaming sources expose logical
     // bytes after archive transforms, and retain the archive's backing storage.
     let source: Option<Arc<dyn nvlens_io::ReadAt>> = match target {
-        Target::File(path, _) => Some(Arc::new(nvlens_io::ArcView::open(path)?)),
+        Target::File(path, game) => Some(game.files.source(path)?),
         Target::Entry { archive, index } => {
             let opened = archive
                 .source
@@ -156,6 +156,12 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
         };
     }
     if let ResourceRoute::Video(tag) = resource.route {
+        let options = match target {
+            Target::File(_, game) => game.resource_options(),
+            Target::Entry { archive, .. } => archive.game.resource_options(),
+            _ => return Err(anyhow!("Video decoding requires engine context")),
+        };
+        let source = nvlens_video::decode_source_as(tag, source, &target.name(), options)?;
         resource.video = Some(VideoInput {
             tag,
             source,
@@ -195,7 +201,7 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
                 Target::File(path, game) => nvlens_script::disassemble_with_options_as(
                     tag,
                     &resource.bytes,
-                    Some(&FileResources(path)),
+                    Some(&FileResources(path, &game.files)),
                     game.resource_options(),
                 )?,
                 _ => None,
@@ -212,7 +218,7 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
             }
         }
         ResourceRoute::Image(tag) => {
-            resource.image = Some(nvlens_image::decode_as(tag, &resource.bytes)?)
+            resource.image = Some(decode_image(target, tag, &resource.bytes)?)
         }
         ResourceRoute::Audio(tag) => {
             nvlens_audio::metadata_as(tag, &resource.bytes)?
@@ -222,6 +228,32 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
         _ => {}
     }
     Ok(resource)
+}
+
+fn decode_image(target: &Target, tag: &str, bytes: &[u8]) -> Result<nvlens_image::Image> {
+    Ok(match target {
+        Target::Entry { archive, index } => {
+            let opened = archive
+                .source
+                .lock()
+                .map_err(|_| anyhow!("Archive reader is unavailable"))?;
+            nvlens_image::decode_with_resources_as(
+                tag,
+                bytes,
+                Some(&Resources(
+                    &*opened.archive,
+                    &archive.paths,
+                    &archive.paths[*index],
+                )),
+            )?
+        }
+        Target::File(path, game) => nvlens_image::decode_with_resources_as(
+            tag,
+            bytes,
+            Some(&FileResources(path, &game.files)),
+        )?,
+        _ => return Err(anyhow!("Image decoding requires engine context")),
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -241,6 +273,7 @@ impl ExportKind {
 }
 
 pub fn convert(
+    target: &Target,
     bytes: &[u8],
     route: &ResourceRoute,
     kind: ExportKind,
@@ -249,7 +282,11 @@ pub fn convert(
 ) -> Result<Vec<u8>> {
     match (kind, route) {
         (ExportKind::Png, ResourceRoute::Image(tag)) => {
-            Ok(nvlens_image::decode_frame_as(tag, bytes, frame)?.to_png()?)
+            if frame == 0 {
+                Ok(decode_image(target, tag, bytes)?.to_png()?)
+            } else {
+                Ok(nvlens_image::decode_frame_as(tag, bytes, frame)?.to_png()?)
+            }
         }
         (ExportKind::Wav, ResourceRoute::Audio(tag)) => {
             Ok(nvlens_audio::decode_as(tag, bytes)?.to_wav()?)
