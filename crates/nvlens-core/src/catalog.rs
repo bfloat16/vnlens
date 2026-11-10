@@ -58,19 +58,31 @@ impl Catalog {
     /// Opens exactly the route selected by engine identification. No probing,
     /// extension fallback, or alternative reader is attempted.
     pub fn open(&self, path: impl AsRef<Path>, route: &crate::ArchiveRoute) -> Result<Opened> {
-        let format = self
-            .archives
-            .iter()
-            .find(|format| format.tag() == route.tag)
-            .ok_or_else(|| {
-                Error::Unsupported(format!("Archive route is not registered: {}", route.tag))
-            })?;
+        let format = self.format(route.tag)?;
         let view = Arc::new(ArcView::open(path)?);
         let archive = format.open(&view, &route.options)?;
         Ok(Opened {
             format_tag: format.tag(),
             archive,
         })
+    }
+
+    /// Opens a physical or embedded view in its existing game filesystem.
+    pub fn open_view(&self, view: Arc<ArcView>, route: &crate::ArchiveRoute) -> Result<Opened> {
+        let format = self.format(route.tag)?;
+        let archive = format.open(&view, &route.options)?;
+        Ok(Opened {
+            format_tag: format.tag(),
+            archive,
+        })
+    }
+
+    fn format(&self, tag: &str) -> Result<&dyn ArchiveFormat> {
+        self.archives
+            .iter()
+            .find(|format| format.tag() == tag)
+            .map(Box::as_ref)
+            .ok_or_else(|| Error::Unsupported(format!("Archive route is not registered: {tag}")))
     }
 }
 
