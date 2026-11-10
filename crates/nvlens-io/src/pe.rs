@@ -5,6 +5,7 @@
 use crate::{BinaryIo, BinaryReader};
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Section {
@@ -14,6 +15,7 @@ pub struct Section {
     pub raw_offset: u32,
     pub raw_size: u32,
     pub executable: bool,
+    pub characteristics: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -35,13 +37,14 @@ pub struct PeImage<'a> {
     pub machine: u16,
     pub entry_point: u32,
     pub sections: Vec<Section>,
-    header_size: u32,
+    pub header_size: u32,
+    pub image_size: u32,
     pe32_plus: bool,
     exports: Option<(u32, u32)>,
     imports: Option<(u32, u32)>,
     resources: Option<(u32, u32)>,
     tls: Option<(u32, u32)>,
-    replacements: BTreeMap<u32, Vec<u8>>,
+    replacements: BTreeMap<u32, Arc<[u8]>>,
 }
 
 impl std::fmt::Debug for PeImage<'_> {
@@ -89,7 +92,8 @@ impl<'a> PeImage<'a> {
         } else {
             fields.read_u64_le()?
         };
-        fields.set_position(60)?;
+        fields.set_position(56)?;
+        let image_size = fields.read_u32_le()?;
         let header_size = fields.read_u32_le()?;
         let directory_count_offset = if kind == 0x10b { 92 } else { 108 };
         let (exports, imports, resources, tls) = if optional.len() >= directory_count_offset + 4 {
@@ -135,6 +139,7 @@ impl<'a> PeImage<'a> {
                 raw_offset,
                 raw_size,
                 executable: flags & 0x2000_0000 != 0,
+                characteristics: flags,
             });
         }
         Ok(Some(Self {
@@ -144,6 +149,7 @@ impl<'a> PeImage<'a> {
             entry_point,
             sections,
             header_size,
+            image_size,
             pe32_plus: kind == 0x20b,
             exports,
             imports,
@@ -151,6 +157,61 @@ impl<'a> PeImage<'a> {
             tls,
             replacements: BTreeMap::new(),
         }))
+    }
+
+    /// Original file bytes, including overlays outside mapped sections.
+    #[must_use]
+    pub fn file_bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Locates the section containing an RVA, preferring the nearest base.
+    #[must_use]
+    pub fn section_at(&self, rva: u32) -> Option<&Section> {
+        self.sections
+            .iter()
+            .filter(|s| {
+                let size = self
+                    .replacements
+                    .get(&s.virtual_address)
+                    .map_or(u64::from(s.raw_size.max(s.virtual_size)), |data| {
+                        data.len() as u64
+                    });
+                rva.checked_sub(s.virtual_address)
+                    .is_some_and(|offset| u64::from(offset) < size)
+            })
+            .max_by_key(|s| s.virtual_address)
+    }
+
+    /// Borrows an RVA range without crossing a section boundary.
+    pub fn read(&self, rva: u32, size: usize) -> io::Result<&[u8]> {
+        self.at_rva(rva)
+            .and_then(|data| data.get(..size))
+            .ok_or_else(|| BinaryIo::unexpected_eof("PE range exceeds mapped storage"))
+    }
+
+    /// Restores a whole section to its declared virtual extent for analysis.
+    /// Original file bytes remain intact; recovered bytes can be shared by readers.
+    pub fn restore_section(
+        &mut self,
+        rva: u32,
+        bytes: Arc<[u8]>,
+        characteristics: u32,
+    ) -> io::Result<()> {
+        let section = self
+            .sections
+            .iter_mut()
+            .find(|s| s.virtual_address == rva)
+            .ok_or_else(|| BinaryIo::invalid_input("PE recovery section is absent"))?;
+        if bytes.len() as u64 > u64::from(section.virtual_size.max(section.raw_size)) {
+            return Err(BinaryIo::unexpected_eof(
+                "Recovered PE section exceeds its extent",
+            ));
+        }
+        section.characteristics = characteristics;
+        section.executable = characteristics & 0x2000_0000 != 0;
+        self.replacements.insert(rva, bytes);
+        Ok(())
     }
 
     pub fn section_data(&self, section: &Section) -> io::Result<&[u8]> {
@@ -178,7 +239,7 @@ impl<'a> PeImage<'a> {
                 "PE replacement section length mismatch",
             ));
         }
-        self.replacements.insert(rva, data);
+        self.replacements.insert(rva, data.into());
         Ok(())
     }
 
@@ -415,18 +476,18 @@ impl<'a> PeImage<'a> {
                         .min(self.bytes.len()),
             );
         }
-        for section in &self.sections {
-            let Some(offset) = rva.checked_sub(u64::from(section.virtual_address)) else {
-                continue;
-            };
-            if offset < u64::from(section.raw_size) {
-                return self
-                    .section_data(section)
-                    .ok()?
-                    .get(usize::try_from(offset).ok()?..);
-            }
-        }
-        None
+        let section = self.section_at(u32::try_from(rva).ok()?)?;
+        let offset = usize::try_from(rva - u64::from(section.virtual_address)).ok()?;
+        let data = self.section_data(section).ok()?;
+        let end = self
+            .sections
+            .iter()
+            .filter(|s| s.virtual_address > section.virtual_address)
+            .map(|s| (s.virtual_address - section.virtual_address) as usize)
+            .min()
+            .unwrap_or(data.len())
+            .min(data.len());
+        data.get(offset..end)
     }
 
     #[must_use]

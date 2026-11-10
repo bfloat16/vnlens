@@ -37,6 +37,16 @@ pub fn is_safe_relative_path(name: &str) -> bool {
 /// Writes under `root`, rejecting existing links and replacing files atomically.
 /// The caller must exclusively own the output tree while extraction is running.
 pub fn write_under(root: &Path, name: &str, data: &[u8]) -> io::Result<PathBuf> {
+    write_under_with(root, name, |file| file.write_all(data))
+}
+
+/// Streams into the same contained, atomic output path as write_under.
+/// A failed producer leaves the destination unchanged and removes its temporary.
+pub fn write_under_with(
+    root: &Path,
+    name: &str,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<PathBuf> {
     fs::create_dir_all(root)?;
     let root = root.canonicalize()?;
     let mut parent = root.clone();
@@ -55,7 +65,7 @@ pub fn write_under(root: &Path, name: &str, data: &[u8]) -> io::Result<PathBuf> 
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
             }
-            write_atomic(&next, data)?;
+            write_atomic(&next, write)?;
             return Ok(next);
         }
         match fs::create_dir(&next) {
@@ -127,7 +137,10 @@ fn is_link(meta: &fs::Metadata) -> bool {
     }
 }
 
-fn write_atomic(destination: &Path, data: &[u8]) -> io::Result<()> {
+fn write_atomic(
+    destination: &Path,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     for _ in 0..100 {
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -142,7 +155,7 @@ fn write_atomic(destination: &Path, data: &[u8]) -> io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         };
-        let written = file.write_all(data);
+        let written = write(&mut file);
         drop(file);
         let result = written.and_then(|()| fs::rename(&temporary, destination));
         if result.is_err() {

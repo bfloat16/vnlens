@@ -4,6 +4,27 @@ use super::*;
 use crate::BinaryWriter;
 
 #[test]
+fn recovered_sections_expand_rva_views_without_mutating_source() -> io::Result<()> {
+    let mut bytes = fixture(0x400000);
+    BinaryWriter::u32_le(0x800, &mut bytes[0x180..]);
+    let original = bytes.clone();
+    let mut image = PeImage::parse(&bytes)?.unwrap();
+    let recovered: Arc<[u8]> = vec![0xa5; 0x800].into();
+    image.restore_section(0x1000, recovered.clone(), 0x60000020)?;
+    assert!(image.sections[0].executable);
+    assert_eq!(image.at_rva(0x1700).unwrap(), &[0xa5; 0x100]);
+    assert_eq!(image.read(0x17fc, 4)?, &[0xa5; 4]);
+    assert!(image.read(0x17ff, 2).is_err());
+    assert_eq!(image.file_bytes(), original);
+    assert!(
+        image
+            .restore_section(0x1000, vec![0; 0x801].into(), 0)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn imports_and_ordinal_exports_preserve_relocated_slots() -> io::Result<()> {
     for base in [0x400000, 0x710000] {
         let mut b = fixture(base);

@@ -54,6 +54,54 @@ pub enum BitOrder {
     Lsb,
 }
 
+/// Control bits interleaved with byte payloads in one stream. Reading a byte
+/// leaves the current control byte intact until all of its bits are consumed.
+#[derive(Debug)]
+pub struct InterleavedBits<'a> {
+    reader: BinaryReader<'a>,
+    bits: u8,
+    remaining: u8,
+    order: BitOrder,
+}
+impl<'a> InterleavedBits<'a> {
+    #[must_use]
+    pub fn new(data: &'a [u8], order: BitOrder) -> Self {
+        Self {
+            reader: BinaryReader::new(data),
+            bits: 0,
+            remaining: 0,
+            order,
+        }
+    }
+    #[must_use]
+    pub fn position(&self) -> usize {
+        self.reader.position()
+    }
+    pub fn byte(&mut self) -> std::io::Result<u8> {
+        self.reader.read_u8()
+    }
+    pub fn bit(&mut self) -> std::io::Result<u32> {
+        if self.remaining == 0 {
+            self.bits = self.reader.read_u8()?;
+            self.remaining = 8;
+        }
+        let value = match self.order {
+            BitOrder::Msb => {
+                let value = self.bits >> 7;
+                self.bits <<= 1;
+                value
+            }
+            BitOrder::Lsb => {
+                let value = self.bits & 1;
+                self.bits >>= 1;
+                value
+            }
+        };
+        self.remaining -= 1;
+        Ok(u32::from(value))
+    }
+}
+
 /// Growable bit writer for codecs with interleaved, variable-width fields.
 #[derive(Debug)]
 pub struct BitWriter {
@@ -220,6 +268,26 @@ impl<'a> BitReader<'a> {
 }
 
 impl<'a> BinaryReader<'a> {
+    /// Borrows a checked byte range without maintaining a cursor.
+    pub fn bytes_at(data: &'a [u8], offset: usize, size: usize) -> std::io::Result<&'a [u8]> {
+        Self::new_at(data, offset)?.read_bytes(size)
+    }
+
+    /// Reads a little-endian integer at a checked byte offset.
+    pub fn u16_le_at(data: &[u8], offset: usize) -> std::io::Result<u16> {
+        BinaryReader::new_at(data, offset)?.read_u16_le()
+    }
+
+    /// Reads a little-endian integer at a checked byte offset.
+    pub fn u32_le_at(data: &[u8], offset: usize) -> std::io::Result<u32> {
+        BinaryReader::new_at(data, offset)?.read_u32_le()
+    }
+
+    /// Reads a little-endian integer at a checked byte offset.
+    pub fn u64_le_at(data: &[u8], offset: usize) -> std::io::Result<u64> {
+        BinaryReader::new_at(data, offset)?.read_u64_le()
+    }
+
     /// Reads MFC CString framing and returns its encoding flag and raw units.
     /// The flag is true for UTF-16; byte strings may also contain binary data.
     pub fn read_mfc_string(&mut self) -> std::io::Result<(bool, &'a [u8])> {

@@ -48,3 +48,29 @@ fn rejects_nonportable_and_escaping_names() {
         assert!(is_safe_relative_path(name), "{name}");
     }
 }
+
+#[test]
+fn streamed_output_is_atomic_and_removes_failed_temporaries() -> io::Result<()> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("nvlens-stream-{}-{stamp}", std::process::id()));
+    let destination = write_under(&root, "movie.webm", b"previous")?;
+    let result = write_under_with(&root, "movie.webm", |file| {
+        file.write_all(b"partial")?;
+        Err(io::Error::other("producer cancelled"))
+    });
+    assert!(result.is_err());
+    assert_eq!(fs::read(&destination)?, b"previous");
+    assert_eq!(fs::read_dir(&root)?.count(), 1);
+    write_under_with(&root, "movie.webm", |file| {
+        for _ in 0..17 {
+            file.write_all(&[31; 8192])?;
+        }
+        Ok(())
+    })?;
+    assert_eq!(fs::read(destination)?, vec![31; 8192 * 17]);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

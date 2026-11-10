@@ -6,6 +6,7 @@
 #![deny(unsafe_code)]
 
 mod binary;
+mod files;
 mod source;
 mod view;
 
@@ -13,6 +14,9 @@ pub mod filesystem;
 pub mod log;
 pub mod pe;
 
-pub use binary::{BinaryIo, BinaryReader, BinaryWriter, BitOrder, BitReader, BitWriter, Endian};
+pub use binary::{
+    BinaryIo, BinaryReader, BinaryWriter, BitOrder, BitReader, BitWriter, Endian, InterleavedBits,
+};
+pub use files::{DirectoryEntry, FileMetadata, FileSystem};
 pub use source::{BinarySourceReader, RangeSource, ReadAt, ReadFactory, ReadSeek, ReplayReader};
 pub use view::ArcView;

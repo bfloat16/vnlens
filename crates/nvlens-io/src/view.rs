@@ -11,11 +11,14 @@ use std::path::{Path, PathBuf};
 use memmap2::Mmap;
 
 use crate::binary::{BinaryIo, BinaryReader};
+use std::sync::Arc;
 
 /// Read-only, randomly-accessible memory view of an archive file.
 pub struct ArcView {
     path: PathBuf,
     map: Option<Mmap>,
+    bytes: Option<Arc<[u8]>>,
+    files: Option<Arc<crate::FileSystem>>,
 }
 
 impl std::fmt::Debug for ArcView {
@@ -40,19 +43,59 @@ impl ArcView {
             // external writers from truncating or changing it during use.
             Some(unsafe { Mmap::map(&file)? })
         };
-        Ok(Self { path, map })
+        Ok(Self {
+            path,
+            map,
+            bytes: None,
+            files: None,
+        })
+    }
+
+    /// Creates a named immutable view for an embedded file; no disk output.
+    #[must_use]
+    pub fn from_bytes(path: PathBuf, bytes: Arc<[u8]>) -> Self {
+        Self {
+            path,
+            map: None,
+            bytes: Some(bytes),
+            files: None,
+        }
+    }
+
+    pub(crate) fn with_files(mut self, files: Arc<crate::FileSystem>) -> Self {
+        self.files = Some(files);
+        self
+    }
+
+    /// Opens a companion through the same game directory overlay as this view.
+    pub fn open_related(&self, path: impl AsRef<Path>) -> Result<Self> {
+        match &self.files {
+            Some(files) => files.open(path.as_ref()),
+            None => Self::open(path),
+        }
+    }
+
+    /// Checks companion metadata without reading its contents.
+    pub fn related_len(&self, path: &Path) -> Result<u64> {
+        match &self.files {
+            Some(files) => files.metadata(path).map(|m| m.len),
+            None => std::fs::metadata(path).map(|m| m.len()),
+        }
     }
 
     /// Total size of the file in bytes.
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.map.as_ref().map_or(0, |map| map.len() as u64)
+        self.bytes.as_ref().map_or_else(
+            || self.map.as_ref().map_or(0, |map| map.len() as u64),
+            |bytes| bytes.len() as u64,
+        )
     }
 
     /// Whether the file is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.map.is_none()
+        self.len() == 0
     }
 
     /// Source file name without directory; empty if it cannot be determined.
@@ -82,7 +125,7 @@ impl ArcView {
             .map_err(|_| BinaryIo::unexpected_eof("slice offset does not fit usize"))?;
         let stop = usize::try_from(end)
             .map_err(|_| BinaryIo::unexpected_eof("slice end does not fit usize"))?;
-        let bytes = self.map.as_deref().unwrap_or(&[]);
+        let bytes = self.bytes.as_deref().or(self.map.as_deref()).unwrap_or(&[]);
         Ok(&bytes[start..stop])
     }
 
