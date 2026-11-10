@@ -36,6 +36,7 @@ struct Volume {
     opened: OnceLock<std::io::Result<Arc<ArcView>>>,
 }
 struct Group {
+    view: Arc<ArcView>,
     entries: Vec<Entry>,
     sources: Vec<usize>,
     volumes: Vec<Volume>,
@@ -60,9 +61,7 @@ impl ArchiveFormat for Grp {
         let index = if selected == 0 {
             view.clone()
         } else {
-            Arc::new(ArcView::open(
-                view.path().with_file_name(format!("res{base:04x}.grp")),
-            )?)
+            Arc::new(view.open_related(view.path().with_file_name(format!("res{base:04x}.grp")))?)
         };
         let mut r = BinaryReader::new(index.slice(0, index.len())?);
         if r.read_u32_le()? != 0x5346_6941 {
@@ -75,6 +74,7 @@ impl ArchiveFormat for Grp {
         }
         let tables = r.read_u32_le()?;
         let mut result = Group {
+            view: view.clone(),
             entries: Vec::new(),
             sources: Vec::new(),
             volumes: Vec::new(),
@@ -157,7 +157,7 @@ impl Group {
         let volume = &self.volumes[self.sources[i]];
         let mapped = volume
             .opened
-            .get_or_init(|| ArcView::open(&volume.path).map(Arc::new));
+            .get_or_init(|| self.view.open_related(&volume.path).map(Arc::new));
         Ok(mapped.as_ref().map_err(|e| {
             std::io::Error::new(
                 e.kind(),

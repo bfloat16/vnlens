@@ -24,7 +24,7 @@ impl Format for Vpk {
 }
 impl ArchiveFormat for Vpk {
     fn open(&self, view: &Arc<ArcView>, _: &ArchiveOptions) -> Result<Box<dyn Archive>> {
-        let index = ArcView::open(view.path().with_extension("vtb"))?;
+        let index = view.open_related(view.path().with_extension("vtb"))?;
         let mut r = BinaryReader::new(index.slice(0, index.len())?);
         if !r.remaining().is_multiple_of(12) {
             return Err(corrupt(0, "VTB contains an incomplete record"));

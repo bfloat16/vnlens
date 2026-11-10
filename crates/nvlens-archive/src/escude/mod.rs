@@ -139,7 +139,7 @@ impl Archive for Package {
         };
         let mut cached = self.companion_archive.borrow_mut();
         if cached.is_none() {
-            let view = match ArcView::open(path) {
+            let view = match self.view.open_related(path) {
                 Ok(view) => Arc::new(view),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(e) => return Err(e.into()),

@@ -3,6 +3,7 @@
 
 mod ages_mk2;
 mod bgi;
+mod csystem;
 mod emote;
 mod escude;
 mod exhibit;
@@ -10,6 +11,7 @@ pub mod krkr;
 mod propeller;
 mod rugp;
 mod siglus;
+mod softpal;
 mod systemnnn;
 mod will;
 mod yuris;

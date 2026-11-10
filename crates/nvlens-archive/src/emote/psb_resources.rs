@@ -17,7 +17,7 @@ use nvlens_core::{
 use nvlens_io::ReadAt;
 use nvlens_script::psb::{self, ParseOptions, Psb};
 
-const SIGNATURES: &[u32] = &[0x0042_5350, 0x0066_646D];
+const SIGNATURES: &[u32] = &[0x0042_5350, 0x0066_646d, 0x0073_7a6d];
 
 /// Standalone PSB resource-chunk archive view.
 #[derive(Debug, Default)]
@@ -82,20 +82,55 @@ impl ArchiveFormat for EmotePsbResources {
                 }),
             },
         )?;
-        let parsed = psb::parse_source(&*source, psb_key)?;
-        match psb::archive_info_entries(&parsed) {
-            Ok(_) => return Err(Error::InvalidFormat),
-            Err(Error::InvalidFormat) => {}
-            Err(error) => return Err(error),
-        }
-        let entries = build_entries(&parsed)?;
-        Ok(Box::new(PsbResourceArchive { source, entries }))
+        from_source(source, psb_key)
     }
+}
+
+pub(super) fn from_source(
+    source: Arc<dyn ReadAt>,
+    psb_key: Option<u32>,
+) -> Result<Box<dyn Archive>> {
+    let parsed = psb::parse_source(&*source, psb_key)?;
+    match psb::archive_info_entries(&parsed) {
+        Ok(_) => return Err(Error::InvalidFormat),
+        Err(Error::InvalidFormat) => {}
+        Err(error) => return Err(error),
+    }
+    let media = super::media::encodings(&parsed)?;
+    let mut entries = build_entries(&parsed)?;
+    let mut encodings = Vec::new();
+    for (entry, resource) in entries
+        .iter_mut()
+        .zip(parsed.resources.iter().chain(&parsed.extra_resources))
+    {
+        let encoding = media.get(&(resource.index, resource.is_extra)).cloned();
+        if let Some(encoding) = &encoding {
+            entry.name =
+                entry.name.trim_end_matches(".bin").to_owned() + "." + encoding.extension();
+            entry.kind = match encoding {
+                super::media::Encoding::Bc7 { .. } | super::media::Encoding::Canvas(_) => {
+                    ResourceKind::Image
+                }
+                super::media::Encoding::Xwma { .. } => ResourceKind::Audio,
+            };
+        }
+        encodings.push(encoding);
+    }
+    for (entry, canvas) in super::media::canvases(&parsed)? {
+        entries.push(entry);
+        encodings.push(Some(super::media::Encoding::Canvas(canvas)));
+    }
+    Ok(Box::new(PsbResourceArchive {
+        source,
+        entries,
+        encodings,
+    }))
 }
 
 struct PsbResourceArchive {
     source: Arc<dyn ReadAt>,
     entries: Vec<Entry>,
+    encodings: Vec<Option<super::media::Encoding>>,
 }
 
 impl std::fmt::Debug for PsbResourceArchive {
@@ -114,6 +149,23 @@ impl Archive for PsbResourceArchive {
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         let size = usize::try_from(entry.size)
             .map_err(|_| Error::Unsupported("resource size does not fit address space".into()))?;
+        let index = self
+            .entries
+            .iter()
+            .position(|stored| stored.name == entry.name)
+            .ok_or(Error::InvalidFormat)?;
+        if let Some(encoding @ super::media::Encoding::Canvas(_)) = &self.encodings[index] {
+            return encoding.wrap(&*self.source, &[]).map(Cow::Owned);
+        }
+        let raw = self.source.read_at(entry.offset, size)?;
+        if let Some(encoding) = &self.encodings[index] {
+            return encoding.wrap(&*self.source, &raw).map(Cow::Owned);
+        }
+        Ok(raw)
+    }
+    fn open_entry_raw(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
+        let size = usize::try_from(entry.size)
+            .map_err(|_| Error::Unsupported("PSB chunk exceeds address space".into()))?;
         Ok(self.source.read_at(entry.offset, size)?)
     }
 }

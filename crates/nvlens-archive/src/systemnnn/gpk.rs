@@ -26,7 +26,7 @@ impl Format for Gpk {
 }
 impl ArchiveFormat for Gpk {
     fn open(&self, view: &Arc<ArcView>, _: &ArchiveOptions) -> Result<Box<dyn Archive>> {
-        let index = ArcView::open(view.path().with_extension("gtb"))?;
+        let index = view.open_related(view.path().with_extension("gtb"))?;
         let data = index.slice(0, index.len())?;
         let mut r = BinaryReader::new(data);
         let count = r.read_u32_le()? as usize;

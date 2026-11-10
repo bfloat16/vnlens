@@ -79,7 +79,7 @@ impl Sources {
         }
         let slot = &self.opened[index];
         if slot.get().is_none() {
-            let view = Arc::new(ArcView::open(&self.paths[index])?);
+            let view = Arc::new(self.primary.open_related(&self.paths[index])?);
             let _ = slot.set(view);
         }
         let view = slot
@@ -163,7 +163,7 @@ impl ArchiveFormat for Rio {
     fn open(&self, view: &Arc<ArcView>, options: &ArchiveOptions) -> Result<Box<dyn Archive>> {
         let path = view.path();
         let ici_path = PathBuf::from(format!("{}.ici", path.display()));
-        let ici_view = ArcView::open(&ici_path)?;
+        let ici_view = view.open_related(&ici_path)?;
         let mut index = ici::parse(ici_view.slice(0, ici_view.len())?)?;
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         let first = index
@@ -194,7 +194,7 @@ impl ArchiveFormat for Rio {
             paths.push(parent.join(relative));
         }
         let patch_path = PathBuf::from(format!("{}.ruo", path.display()));
-        let patch = match ArcView::open(&patch_path) {
+        let patch = match view.open_related(&patch_path) {
             Ok(view) => Some(Arc::new(view)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),

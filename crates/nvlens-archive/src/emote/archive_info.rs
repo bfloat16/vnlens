@@ -5,7 +5,7 @@
 //! `<package>_body.bin`, `<package>body.bin`, or `<package>.bin`.
 
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use nvlens_core::{
@@ -14,8 +14,7 @@ use nvlens_core::{
 use nvlens_script::mdf;
 use nvlens_script::psb::{self, ArchiveInfoEntry, ParseOptions};
 
-const SIGNATURES: &[u32] = &[0x0042_5350, 0x0066_646D];
-const DEFAULT_MDF_KEY_LEN: usize = 0x83;
+const SIGNATURES: &[u32] = &[0x0042_5350, 0x0066_646d, 0x0073_7a6d];
 
 /// Emote archive-info PSB format.
 #[derive(Debug, Default)]
@@ -51,13 +50,14 @@ impl ArchiveFormat for EmoteArchiveInfo {
             .map(|key| std::str::from_utf8(key.bytes()).map(str::to_owned))
             .transpose()
             .map_err(|_| Error::UnknownScheme(Some("Invalid MDF base key encoding".into())))?;
-        let mdf_key_len = usize::try_from(
-            *options
-                .numbers
-                .get("mdf_length")
-                .unwrap_or(&(DEFAULT_MDF_KEY_LEN as u64)),
-        )
-        .map_err(|_| Error::Unsupported("MDF key length exceeds address space".into()))?;
+        let mdf_key_len = options
+            .numbers
+            .get("mdf_length")
+            .map(|&n| {
+                usize::try_from(n)
+                    .map_err(|_| Error::Unsupported("MDF key length exceeds address space".into()))
+            })
+            .transpose()?;
         let psb_key = options
             .keys
             .get("psb")
@@ -70,30 +70,49 @@ impl ArchiveFormat for EmoteArchiveInfo {
             .transpose()?;
         let parsed = parse_info_psb(view, mdf_base_key.as_deref(), mdf_key_len, psb_key)?;
         let (_, info_entries) = psb::archive_info_entries(&parsed)?;
-        let body_path = find_body_path(view.path()).ok_or_else(|| {
+        let body_path = find_body_path(view).ok_or_else(|| {
             Error::Unsupported("missing sibling body.bin for Emote archive-info PSB".to_string())
         })?;
-        let entries = build_entries(&info_entries, std::fs::metadata(&body_path)?.len())?;
+        let mut entries = build_entries(&info_entries, view.related_len(&body_path)?)?;
         let suffix = psb::archive_info_suffix(&parsed).map(str::to_string);
+        let kaleido = options.numbers.get("kaleido") == Some(&1);
+        if kaleido {
+            for entry in &mut entries {
+                let name = logical_name(&entry.name, suffix.as_deref().unwrap_or(""));
+                entry.kind = if name.ends_with(".nut") || name.ends_with(".scn") {
+                    ResourceKind::Script
+                } else if name.ends_with(".psb") {
+                    ResourceKind::Data
+                } else if name.ends_with(".otf") || name.ends_with(".ttf") {
+                    ResourceKind::Font
+                } else {
+                    ResourceKind::Unknown
+                };
+            }
+        }
 
         Ok(Box::new(EmoteArchive {
+            index: view.clone(),
             body_path,
             body: OnceLock::new(),
             entries,
             mdf_base_key,
             mdf_key_len,
             suffix,
+            kaleido,
         }))
     }
 }
 
 struct EmoteArchive {
+    index: Arc<ArcView>,
     body_path: PathBuf,
     body: OnceLock<ArcView>,
     entries: Vec<Entry>,
     mdf_base_key: Option<String>,
-    mdf_key_len: usize,
+    mdf_key_len: Option<usize>,
     suffix: Option<String>,
+    kaleido: bool,
 }
 
 impl std::fmt::Debug for EmoteArchive {
@@ -123,6 +142,33 @@ impl Archive for EmoteArchive {
         Ok(Cow::Borrowed(raw))
     }
 
+    fn virtual_paths(&self) -> Result<Vec<(usize, String)>> {
+        if !self.kaleido {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                (
+                    i,
+                    logical_name(&entry.name, self.suffix.as_deref().unwrap_or("")),
+                )
+            })
+            .collect())
+    }
+    fn has_references(&self, entry: &Entry) -> bool {
+        self.kaleido && entry.kind == ResourceKind::Data
+    }
+    fn open_references(&self, entry: &Entry) -> Result<Option<Box<dyn Archive>>> {
+        if !self.has_references(entry) {
+            return Ok(None);
+        }
+        let bytes: Arc<[u8]> = self.open_entry(entry)?.into_owned().into();
+        super::psb_resources::from_source(Arc::new(bytes), None).map(Some)
+    }
+
     fn open_entry_raw(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         Ok(Cow::Borrowed(
             self.body_view()?.slice(entry.offset, entry.size)?,
@@ -135,7 +181,7 @@ impl EmoteArchive {
         if let Some(view) = self.body.get() {
             return Ok(view);
         }
-        let view = ArcView::open(&self.body_path)?;
+        let view = self.index.open_related(&self.body_path)?;
         let _ = self.body.set(view);
         self.body
             .get()
@@ -146,7 +192,7 @@ impl EmoteArchive {
 fn parse_info_psb(
     view: &Arc<ArcView>,
     base_key: Option<&str>,
-    key_len: usize,
+    key_len: Option<usize>,
     psb_key: Option<u32>,
 ) -> Result<psb::Psb> {
     let key = base_key.map(|base| format!("{base}{}", view.file_name()));
@@ -154,10 +200,7 @@ fn parse_info_psb(
         Arc::clone(view),
         ParseOptions {
             psb_key,
-            mdf_key: key.as_deref().map(|key| mdf::MdfKey {
-                key,
-                key_len: Some(key_len),
-            }),
+            mdf_key: key.as_deref().map(|key| mdf::MdfKey { key, key_len }),
         },
     )?;
     psb::parse_source(&*source, psb_key)
@@ -168,18 +211,12 @@ fn decode_entry_mdf(
     entry_name: &str,
     suffix: &str,
     mdf_base_key: Option<&str>,
-    key_len: usize,
+    key_len: Option<usize>,
 ) -> Result<Vec<u8>> {
     if let Some(base_key) = mdf_base_key {
         for file_name in psb::archive_info_possible_file_names(entry_name, suffix) {
             let key = format!("{base_key}{file_name}");
-            match mdf::decode(
-                raw,
-                Some(mdf::MdfKey {
-                    key: &key,
-                    key_len: Some(key_len),
-                }),
-            ) {
+            match mdf::decode(raw, Some(mdf::MdfKey { key: &key, key_len })) {
                 Ok(data) => return Ok(data),
                 Err(Error::Corrupt { .. }) => continue,
                 Err(e) => return Err(e),
@@ -210,7 +247,8 @@ fn build_entries(info_entries: &[ArchiveInfoEntry], body_len: u64) -> Result<Vec
     Ok(entries)
 }
 
-fn find_body_path(info_path: &Path) -> Option<PathBuf> {
+fn find_body_path(view: &ArcView) -> Option<PathBuf> {
+    let info_path = view.path();
     let dir = info_path.parent()?;
     let name = package_name_from_info(info_path.file_name()?.to_str()?);
     let candidates = [
@@ -221,7 +259,7 @@ fn find_body_path(info_path: &Path) -> Option<PathBuf> {
     candidates
         .iter()
         .map(|candidate| dir.join(candidate))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| view.related_len(candidate).is_ok())
 }
 
 fn package_name_from_info(file_name: &str) -> String {
@@ -239,3 +277,15 @@ register_archive!(EmoteArchiveInfo);
 #[cfg(test)]
 #[path = "../../tests/emote/archive_info.rs"]
 mod tests;
+
+fn logical_name(name: &str, suffix: &str) -> String {
+    if let Some(name) = name.strip_suffix(".m") {
+        return name.to_owned();
+    }
+    let suffix = suffix.strip_suffix(".m").unwrap_or(suffix);
+    if !name.contains('.') || (name.ends_with(".ks") && suffix == ".scn") {
+        format!("{name}{suffix}")
+    } else {
+        name.to_owned()
+    }
+}

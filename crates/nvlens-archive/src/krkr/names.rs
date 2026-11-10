@@ -63,6 +63,15 @@ impl NameRecovery {
     /// Mounts only the indices of explicitly routed sibling XP3 files.
     /// Unreadable siblings are reported individually and other sources continue.
     pub fn open(inputs: &[(PathBuf, ArchiveOptions)], cancel: &AtomicBool) -> Result<Self> {
+        Self::open_in(inputs, &Arc::new(nvlens_io::FileSystem::default()), cancel)
+    }
+
+    /// Opens name-recovery sources through their identified game's overlay.
+    pub fn open_in(
+        inputs: &[(PathBuf, ArchiveOptions)],
+        files: &Arc<nvlens_io::FileSystem>,
+        cancel: &AtomicBool,
+    ) -> Result<Self> {
         check(cancel)?;
         let mut this = Self {
             sources: Vec::new(),
@@ -76,7 +85,8 @@ impl NameRecovery {
         };
         for (path, options) in inputs {
             check(cancel)?;
-            match ArcView::open(path)
+            match files
+                .open(path)
                 .map_err(Error::from)
                 .and_then(|v| Xp3Archive::open(&Arc::new(v), options))
             {
