@@ -307,9 +307,7 @@ fn xor_byte_range(data: &mut [u8], base: u64, start: u64, end: u64, key: u8) {
     }
     let from = (start - base) as usize;
     let to = (end - base) as usize;
-    for byte in &mut data[from..to] {
-        *byte ^= key;
-    }
+    crate::cipher::xor::apply_u32_key(&mut data[from..to], &[key; 4]);
 }
 
 fn apply_boundary_corrections(

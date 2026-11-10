@@ -110,9 +110,7 @@ pub fn dsc(data: &[u8]) -> Result<Vec<u8>> {
             if distance > out.len() || count > output_size - out.len() {
                 return Err(invalid("Invalid DSC back reference"));
             }
-            for _ in 0..count {
-                out.push(out[out.len() - distance]);
-            }
+            super::copy::append(&mut out, distance, count);
         }
     }
     if out.len() != output_size {

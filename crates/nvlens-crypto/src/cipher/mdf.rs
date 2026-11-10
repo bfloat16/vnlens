@@ -41,20 +41,35 @@ impl MdfStream {
     }
 
     /// Applies the next bytes of the stream, including partial repeated words.
-    pub fn apply(&mut self, data: &mut [u8]) {
+    pub fn apply(&mut self, mut data: &mut [u8]) {
         if self.key_len == Some(0) {
             return;
         }
-        for byte in data {
+        while !data.is_empty() {
             if self.key_len == Some(self.position) {
                 self.current = self.initial.clone();
                 self.position = 0;
             }
-            if self.position.is_multiple_of(4) {
-                BinaryWriter::u32_le(self.current.next_u32(), &mut self.word);
+            let count = self
+                .key_len
+                .map_or(data.len(), |length| data.len().min(length - self.position));
+            let (mut block, rest) = data.split_at_mut(count);
+            let used = self.position % 4;
+            if used != 0 {
+                let take = block.len().min(4 - used);
+                super::xor::apply_stream(&mut block[..take], &self.word[used..used + take]);
+                block = &mut block[take..];
             }
-            *byte ^= self.word[self.position % 4];
-            self.position = self.position.wrapping_add(1);
+            let (words, tail) = block.as_chunks_mut::<4>();
+            for word in words {
+                BinaryWriter::u32_le(BinaryReader::u32_le(word) ^ self.current.next_u32(), word);
+            }
+            if !tail.is_empty() {
+                BinaryWriter::u32_le(self.current.next_u32(), &mut self.word);
+                super::xor::apply_stream(tail, &self.word);
+            }
+            self.position = self.position.wrapping_add(count);
+            data = rest;
         }
     }
 }

@@ -43,9 +43,7 @@ fn decode(input: &[u8], size: usize, end: usize) -> std::io::Result<Vec<u8>> {
                     "LZF reference precedes output",
                 ));
             }
-            for _ in 0..take {
-                out.push(out[out.len() - distance]);
-            }
+            super::copy::append(&mut out, distance, take);
         } else {
             out.extend_from_slice(reader.read_bytes(take)?);
         }

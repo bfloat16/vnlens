@@ -12,13 +12,14 @@ pub fn xor31(hash: u32, offset: u64, bytes: &mut [u8]) {
         *byte = state as u8;
         state = ((state & 0xffff_fffe) << 23) | (state >> 8);
     }
-    let mut index = (offset % 31) as usize;
-    for byte in bytes {
-        *byte ^= key[index];
-        index += 1;
-        if index == key.len() {
-            index = 0;
-        }
+    key.rotate_left((offset % 31) as usize);
+    // A whole 16-vector period avoids rebuilding a wrapped mask per vector.
+    let mut expanded = [0; 31 * 16];
+    for period in expanded.as_chunks_mut::<31>().0 {
+        period.copy_from_slice(&key);
+    }
+    for block in bytes.chunks_mut(expanded.len()) {
+        super::xor::apply_stream(block, &expanded);
     }
 }
 

@@ -53,9 +53,8 @@ pub fn unpack(data: &[u8]) -> io::Result<Vec<u8>> {
                             "ACP match exceeds history or output size",
                         ));
                     }
-                    for at in start..start + count {
-                        out.push(out[at]);
-                    }
+                    let distance = out.len() - start;
+                    super::copy::append(&mut out, distance, count);
                 }
             }
         }

@@ -26,7 +26,7 @@ fn dsc_canonical_literals_and_truncated_payloads() -> Result<()> {
     let mut bad = bytes.clone();
     BinaryWriter::u32_le(1, &mut bad[20..]);
     assert!(dsc(&bad).is_err());
-    assert_eq!(dsc(&literal_dsc(&[]))?, []);
+    assert!(dsc(&literal_dsc(&[]))?.is_empty());
     Ok(())
 }
 #[test]

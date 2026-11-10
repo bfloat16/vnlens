@@ -52,9 +52,7 @@ fn decode_units(data: &[u8], minimum: usize, unit: usize, literal: usize) -> io:
                 if distance == 0 || distance > output.len() || count > size - output.len() {
                     return Err(BinaryIo::invalid_input("Invalid Siglus backward reference"));
                 }
-                for _ in 0..count {
-                    output.push(output[output.len() - distance]);
-                }
+                super::copy::append(&mut output, distance, count);
             }
         }
     }

@@ -27,12 +27,7 @@ pub fn lzss(input: &[u8], size: usize) -> io::Result<Vec<u8>> {
                 if count > size - out.len() {
                     return Err(BinaryIo::invalid_input("GYU LZSS match exceeds image"));
                 }
-                for i in 0..count {
-                    let byte = ring[(source + i) & 4095];
-                    ring[position] = byte;
-                    position = (position + 1) & 4095;
-                    out.push(byte);
-                }
+                super::copy::ring(&mut ring, &mut position, source, count, &mut out);
             }
         }
     }
@@ -73,9 +68,7 @@ pub fn gyu(input: &[u8], size: usize) -> io::Result<Vec<u8>> {
                 "GYU match exceeds image history or dimensions",
             ));
         }
-        for _ in 0..count {
-            out.push(out[out.len() - distance]);
-        }
+        super::copy::append(&mut out, distance, count);
     }
     Ok(out)
 }

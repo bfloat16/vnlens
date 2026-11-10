@@ -41,15 +41,17 @@ impl Keystream {
                 got: base.len(),
             })?;
         let mut ks = Box::new(*base);
-        for i in 0..(KEYSTREAM_LEN / 16) as u32 {
-            let mut counter = [0u8; 4];
-            BinaryWriter::u32_be(i, &mut counter);
-            let mut checksum = [0u8; 4];
-            BinaryWriter::u32_be(crc32::ieee(SEED, &counter), &mut checksum);
-            let digest = md5::digest_parts(&[key, &checksum]);
-            let base = i as usize * 16;
-            for (dst, d) in ks[base..base + 16].iter_mut().zip(digest) {
-                *dst ^= d;
+        for (group, block) in ks.as_chunks_mut::<64>().0.iter_mut().enumerate() {
+            let salts = std::array::from_fn(|lane| {
+                let mut counter = [0; 4];
+                BinaryWriter::u32_be((group * 4 + lane) as u32, &mut counter);
+                let mut salt = [0; 4];
+                BinaryWriter::u32_be(crc32::ieee(SEED, &counter), &mut salt);
+                salt
+            });
+            let digests = md5::digest_four_suffix(key, &salts);
+            for (chunk, digest) in block.as_chunks_mut::<16>().0.iter_mut().zip(digests) {
+                super::xor::apply_stream(chunk, &digest);
             }
         }
         Ok(Keystream(ks))
@@ -57,8 +59,13 @@ impl Keystream {
 
     /// XOR-decrypts `buf` in place, treating `buf[0]` as logical position `start_pos`.
     pub fn descramble(&self, buf: &mut [u8], start_pos: usize) {
-        for (k, b) in buf.iter_mut().enumerate() {
-            *b ^= self.0[start_pos.wrapping_add(k) & (KEYSTREAM_LEN - 1)];
+        let mut remaining = buf;
+        let mut position = start_pos & (KEYSTREAM_LEN - 1);
+        while !remaining.is_empty() {
+            let count = remaining.len().min(KEYSTREAM_LEN - position);
+            super::xor::apply_stream(&mut remaining[..count], &self.0[position..position + count]);
+            remaining = &mut remaining[count..];
+            position = 0;
         }
     }
 }

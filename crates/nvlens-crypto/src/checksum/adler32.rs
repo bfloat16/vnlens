@@ -1,5 +1,9 @@
 //! Adler-32 checksum (RFC 1950).
 
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+mod simd;
+
 const MOD_ADLER: u32 = 65_521;
 
 /// Computes Adler-32 with the standard initial value.
@@ -24,7 +28,11 @@ impl Default for Adler32 {
 impl Adler32 {
     pub fn update(&mut self, data: &[u8]) {
         for chunk in data.chunks(5_552) {
-            for &byte in chunk {
+            #[cfg(target_arch = "x86_64")]
+            let processed = simd::update(&mut self.a, &mut self.b, chunk);
+            #[cfg(not(target_arch = "x86_64"))]
+            let processed = 0;
+            for &byte in &chunk[processed..] {
                 self.a += u32::from(byte);
                 self.b += self.a;
             }

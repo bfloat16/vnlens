@@ -1,19 +1,27 @@
 //! Decompression routines.
 
+mod copy;
+
 pub mod acp;
 pub mod bgi;
+pub mod csystem;
+pub mod enigma;
 pub mod exhibit;
 pub mod lzf;
 pub mod lzss;
 pub mod rugp;
 pub mod siglus;
+pub mod softpal;
 pub mod tlg;
 pub mod tlg6;
 pub mod zlib;
+pub mod zstd;
 
 /// Decompression error.
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
+    #[error("invalid compressed data at {pos}: {reason}")]
+    InvalidData { pos: usize, reason: &'static str },
     /// Input was exhausted before decompression completed.
     #[error("truncated input at {pos} (expected more bytes)")]
     Truncated { pos: usize },

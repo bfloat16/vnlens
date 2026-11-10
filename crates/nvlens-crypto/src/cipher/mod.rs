@@ -2,12 +2,17 @@
 
 pub mod aes;
 pub mod blowfish;
+pub mod csystem;
+pub mod enigma;
 pub mod escude;
+pub mod exhibit;
 pub mod hxv4;
 pub mod mdf;
+mod mt19937;
 pub mod psb_stream;
 pub mod rugp;
 pub mod scramble;
+pub mod softpal;
 pub mod xor;
 pub mod xp3;
 
@@ -22,6 +27,3 @@ pub enum CipherError {
     #[error("scramble base table must be exactly {expected} bytes, got {got}")]
     BadScrambleBase { expected: usize, got: usize },
 }
-
-pub mod exhibit;
-mod mt19937;

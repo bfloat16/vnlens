@@ -59,15 +59,8 @@ pub fn decompress(input: &[u8], unpacked: usize) -> Result<Vec<u8>, CompressErro
                 let lo = pair[1] as usize;
                 let match_pos = hi << 4 | lo >> 4;
                 let count = 2 + (lo & 0x0F);
-                for i in 0..count {
-                    if out.len() >= unpacked {
-                        break;
-                    }
-                    let v = frame[(match_pos + i) & FRAME_MASK];
-                    frame[frame_pos & FRAME_MASK] = v;
-                    frame_pos += 1;
-                    out.push(v);
-                }
+                let count = count.min(unpacked - out.len());
+                super::copy::ring(&mut frame, &mut frame_pos, match_pos, count, &mut out);
             }
             bit <<= 1;
         }

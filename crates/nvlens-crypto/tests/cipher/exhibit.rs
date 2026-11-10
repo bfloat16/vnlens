@@ -1,4 +1,5 @@
 use super::*;
+use nvlens_io::BinaryReader;
 
 #[test]
 fn legacy_mt_permutation_vector() {

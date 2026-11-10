@@ -44,7 +44,7 @@ impl Slide {
                 self.position = (self.position + 1) & 4095;
             } else {
                 let pair = r.read_u16_le()?;
-                let mut offset = usize::from(pair & 4095);
+                let offset = usize::from(pair & 4095);
                 let mut length = usize::from(pair >> 12) + 3;
                 if length == 18 {
                     length += usize::from(r.read_u8()?);
@@ -52,13 +52,13 @@ impl Slide {
                 if length > size - out.len() {
                     return Err(BinaryIo::invalid_input("TLG match exceeds plane"));
                 }
-                for _ in 0..length {
-                    let value = self.dictionary[offset];
-                    offset = (offset + 1) & 4095;
-                    out.push(value);
-                    self.dictionary[self.position] = value;
-                    self.position = (self.position + 1) & 4095;
-                }
+                super::copy::ring(
+                    &mut self.dictionary,
+                    &mut self.position,
+                    offset,
+                    length,
+                    &mut out,
+                );
             }
             mask = mask.wrapping_shl(1);
         }

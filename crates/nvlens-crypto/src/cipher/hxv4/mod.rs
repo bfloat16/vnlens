@@ -4,6 +4,9 @@
 //! SHAKE256. BasicCryptoFilter uses SHA3-384 and ChaCha8 with an XOR counter.
 //! No native code is executed. See xp3-brute krkr_exe.rs and THIRD_PARTY_NOTICES.md.
 mod filter;
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+mod simd;
 pub use filter::Filter;
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -145,28 +148,10 @@ pub fn resource(input: &[u8], path: &[u8], salt: &[u8]) -> Vec<u8> {
     for (i, chunk) in output.chunks_mut(64).enumerate() {
         let mut state = initial;
         state[12] ^= i as u32;
-        let mut x = state;
-        for _ in 0..4 {
-            for [a, b, c, d] in [
-                [0, 4, 8, 12],
-                [1, 5, 9, 13],
-                [2, 6, 10, 14],
-                [3, 7, 11, 15],
-                [0, 5, 10, 15],
-                [1, 6, 11, 12],
-                [2, 7, 8, 13],
-                [3, 4, 9, 14],
-            ] {
-                x[a] = x[a].wrapping_add(x[b]);
-                x[d] = (x[d] ^ x[a]).rotate_left(16);
-                x[c] = x[c].wrapping_add(x[d]);
-                x[b] = (x[b] ^ x[c]).rotate_left(12);
-                x[a] = x[a].wrapping_add(x[b]);
-                x[d] = (x[d] ^ x[a]).rotate_left(8);
-                x[c] = x[c].wrapping_add(x[d]);
-                x[b] = (x[b] ^ x[c]).rotate_left(7);
-            }
-        }
+        #[cfg(target_arch = "x86_64")]
+        let x = simd::chacha8(&state);
+        #[cfg(not(target_arch = "x86_64"))]
+        let x = chacha8_scalar(&state);
         let mut stream = [0; 64];
         for ((a, b), bytes) in x
             .iter()
@@ -175,9 +160,7 @@ pub fn resource(input: &[u8], path: &[u8], salt: &[u8]) -> Vec<u8> {
         {
             BinaryWriter::u32_le(a.wrapping_add(b), bytes);
         }
-        for (byte, mask) in chunk.iter_mut().zip(stream) {
-            *byte ^= mask;
-        }
+        super::xor::apply_stream(chunk, &stream);
     }
     output
 }
@@ -185,3 +168,30 @@ pub fn resource(input: &[u8], path: &[u8], salt: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 #[path = "../../../tests/cipher/hxv4/mod.rs"]
 mod tests;
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+fn chacha8_scalar(state: &[u32; 16]) -> [u32; 16] {
+    let mut x = *state;
+    for _ in 0..4 {
+        for [a, b, c, d] in [
+            [0, 4, 8, 12],
+            [1, 5, 9, 13],
+            [2, 6, 10, 14],
+            [3, 7, 11, 15],
+            [0, 5, 10, 15],
+            [1, 6, 11, 12],
+            [2, 7, 8, 13],
+            [3, 4, 9, 14],
+        ] {
+            x[a] = x[a].wrapping_add(x[b]);
+            x[d] = (x[d] ^ x[a]).rotate_left(16);
+            x[c] = x[c].wrapping_add(x[d]);
+            x[b] = (x[b] ^ x[c]).rotate_left(12);
+            x[a] = x[a].wrapping_add(x[b]);
+            x[d] = (x[d] ^ x[a]).rotate_left(8);
+            x[c] = x[c].wrapping_add(x[d]);
+            x[b] = (x[b] ^ x[c]).rotate_left(7);
+        }
+    }
+    x
+}

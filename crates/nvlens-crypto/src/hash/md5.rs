@@ -2,6 +2,10 @@
 
 use nvlens_io::{BinaryReader, BinaryWriter};
 
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+mod simd;
+
 const S: [u32; 64] = [
     7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9,
     14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15,
@@ -95,3 +99,29 @@ fn compress(state: &mut [u32; 4], chunk: &[u8]) {
 #[cfg(test)]
 #[path = "../../tests/hash/md5.rs"]
 mod tests;
+
+/// Four independent scramble digests share a prefix and have distinct salts.
+/// Complete prefix blocks are hashed once; SSE2 handles the final blocks in
+/// parallel without changing the serial dependency between blocks of a hash.
+pub(crate) fn digest_four_suffix(prefix: &[u8], suffixes: &[[u8; 4]; 4]) -> [[u8; 16]; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut state = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+        let (blocks, tail) = prefix.as_chunks::<64>();
+        for block in blocks {
+            compress(&mut state, block);
+        }
+        let mut last = [[0; 128]; 4];
+        for (bytes, suffix) in last.iter_mut().zip(suffixes) {
+            bytes[..tail.len()].copy_from_slice(tail);
+            bytes[tail.len()..tail.len() + 4].copy_from_slice(suffix);
+            bytes[tail.len() + 4] = 0x80;
+            let end = if tail.len() + 4 < 56 { 64 } else { 128 };
+            let length = (prefix.len() as u64).wrapping_add(4).wrapping_mul(8);
+            BinaryWriter::u64_le(length, &mut bytes[end - 8..end]);
+        }
+        simd::finish(state, &last, tail.len() + 4 >= 56)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    std::array::from_fn(|i| digest_parts(&[prefix, &suffixes[i]]))
+}

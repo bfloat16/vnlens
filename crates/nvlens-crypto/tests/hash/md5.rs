@@ -29,3 +29,15 @@ fn block_boundaries_and_fragmented_input() {
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+
+#[test]
+fn four_lanes_match_serial_digest_across_padding_and_prefix_blocks() {
+    for length in 0..260 {
+        let prefix: Vec<_> = (0..length).map(|i| (i * 37 + 9) as u8).collect();
+        let suffixes = [[0; 4], [255; 4], [1, 127, 128, 254], [89, 21, 3, 44]];
+        let actual = digest_four_suffix(&prefix, &suffixes);
+        for (digest, suffix) in actual.into_iter().zip(suffixes) {
+            assert_eq!(digest, digest_parts(&[&prefix, &suffix]));
+        }
+    }
+}

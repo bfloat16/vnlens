@@ -2,7 +2,7 @@
 //! RLD encrypts at most 0x3ff0 whole words; its remaining bytes are untouched.
 
 use super::mt19937::Mt19937;
-use nvlens_io::{BinaryReader, BinaryWriter};
+use nvlens_io::BinaryWriter;
 
 pub fn unscramble(data: &mut [u8], seed: u32) {
     if data.is_empty() || seed == u32::MAX {
@@ -21,15 +21,13 @@ pub fn apply_rld(data: &mut [u8], seed: u32) {
         return;
     }
     let mut mt = Mt19937::legacy(seed);
-    let words: [u32; 256] = std::array::from_fn(|_| mt.next_u32() ^ seed);
-    for (i, word) in data
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .take(0x3ff0)
-        .enumerate()
-    {
-        BinaryWriter::u32_le(BinaryReader::u32_le(word) ^ words[i % words.len()], word);
+    let mut key = [0; 1024];
+    for word in key.as_chunks_mut::<4>().0 {
+        BinaryWriter::u32_le(mt.next_u32() ^ seed, word);
+    }
+    let length = (data.len() / 4).min(0x3ff0) * 4;
+    for block in data[..length].chunks_mut(key.len()) {
+        super::xor::apply_stream(block, &key);
     }
 }
 

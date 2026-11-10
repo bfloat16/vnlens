@@ -54,3 +54,15 @@ fn tag_is_verified_before_plaintext_is_released() {
     blob[0] ^= 1;
     assert!(authenticate(&blob, &key, &nonce).is_err());
 }
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn vector_chacha8_matches_scalar_rounds() {
+    for seed in [0u32, 1, 0x8000_0000, u32::MAX] {
+        let mut state = [seed; 16];
+        for i in 0..512u32 {
+            state[(i as usize) % 16] = i.wrapping_mul(0x9e37_79b9) ^ seed;
+            assert_eq!(simd::chacha8(&state), chacha8_scalar(&state));
+        }
+    }
+}

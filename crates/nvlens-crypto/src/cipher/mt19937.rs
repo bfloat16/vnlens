@@ -1,4 +1,8 @@
 //! Shared MT19937 state with standard and legacy initialization.
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+mod simd;
+
 const N: usize = 624;
 const M: usize = 397;
 const MATRIX_A: u32 = 0x9908_B0DF;
@@ -90,14 +94,26 @@ impl Mt19937 {
     }
 
     fn twist(&mut self) {
-        for i in 0..N {
-            let y = (self.mt[i] & UPPER_MASK) | (self.mt[(i + 1) % N] & LOWER_MASK);
-            let mut next = self.mt[(i + M) % N] ^ (y >> 1);
-            if y & 1 != 0 {
-                next ^= MATRIX_A;
-            }
-            self.mt[i] = next;
-        }
+        #[cfg(target_arch = "x86_64")]
+        simd::twist(&mut self.mt);
+        #[cfg(not(target_arch = "x86_64"))]
+        twist_scalar(&mut self.mt);
         self.index = 0;
     }
 }
+
+#[cfg(any(test, not(target_arch = "x86_64")))]
+fn twist_scalar(mt: &mut [u32; N]) {
+    for i in 0..N {
+        let y = (mt[i] & UPPER_MASK) | (mt[(i + 1) % N] & LOWER_MASK);
+        let mut next = mt[(i + M) % N] ^ (y >> 1);
+        if y & 1 != 0 {
+            next ^= MATRIX_A;
+        }
+        mt[i] = next;
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/cipher/mt19937.rs"]
+mod tests;
