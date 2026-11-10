@@ -30,6 +30,12 @@ This project adapts code from [deoptimizeobs](https://github.com/tsdko/deoptimiz
 
 Released into the public domain under the Unlicense by tsdko.
 
+## Squirrel
+
+This project adapts code from [Squirrel](https://github.com/albertodemichelis/squirrel).
+
+Copyright (c) 2003-2011 Alberto Demichelis
+
 ## FFmpeg
 
-Video preview dynamically links the [FFmpeg](https://ffmpeg.org) libraries (`avcodec`, `avformat`, `avutil`, `swresample`, `swscale` and their dependencies), distributed as the LGPL shared build from [FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds). FFmpeg is licensed under the GNU Lesser General Public License version 2.1 or later; its source code is available from <https://ffmpeg.org/download.html>, and the build's own `LICENSE.txt` lists the licenses of the bundled libraries. The DLLs may be replaced with any compatible FFmpeg 9 shared build.
+Video and xWMA audio decoding dynamically link the [FFmpeg](https://ffmpeg.org) libraries (`avcodec`, `avformat`, `avutil`, `swresample`, `swscale` and their dependencies), distributed as the LGPL shared build from [FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds). FFmpeg is licensed under the GNU Lesser General Public License version 2.1 or later; its source code is available from <https://ffmpeg.org/download.html>, and the build's own `LICENSE.txt` lists the licenses of the bundled libraries. The DLLs may be replaced with any compatible FFmpeg 9 shared build.
