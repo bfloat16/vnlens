@@ -1,13 +1,15 @@
 use super::*;
+use crate::Engine;
 use nvlens_core::ArchiveOptions;
 
 fn game(engine: Engine) -> Identification {
     Identification {
+        files: Default::default(),
         engine,
         root: PathBuf::from("game"),
         evidence: "synthetic".into(),
         options: ArchiveOptions::default(),
-        emote: None,
+        emote: false,
     }
 }
 fn files(names: &[&str]) -> Vec<PathBuf> {
@@ -18,7 +20,7 @@ fn files(names: &[&str]) -> Vec<PathBuf> {
 }
 
 #[test]
-fn split_indices_and_volumes_keep_one_reader_and_all_original_members() {
+fn systemnnn_pairs_gpk_gtb_and_vpk_vtb() {
     let paths = files(&[
         "BG.GPK",
         "BG.GTB",
@@ -32,6 +34,10 @@ fn split_indices_and_volumes_keep_one_reader_and_all_original_members() {
     assert_eq!(sets[0].primary, paths[0]);
     assert_eq!(sets[0].members, paths[..2]);
     assert_eq!(sets[1].members, paths[2..4]);
+}
+
+#[test]
+fn rugp_collects_rio_index_and_volumes() {
     let paths = files(&[
         "game.RIO",
         "game.RIO.ici",
@@ -74,8 +80,54 @@ fn emote_uses_the_same_body_priority_as_the_reader() {
         "sample.bin",
     ]);
     assert!(game.archive_sets(&paths).is_empty());
-    game.emote = Some(ArchiveOptions::default());
+    game.emote = true;
     let sets = game.archive_sets(&paths);
     assert_eq!(sets.len(), 1);
     assert_eq!(sets[0].members, paths[..2]);
+    assert_eq!(self::game(Engine::Kaleido).archive_sets(&paths).len(), 1);
+}
+#[test]
+fn csystem_pairs_indexes_and_payloads_without_probing() {
+    let paths = files(&[
+        "Arc00.dat",
+        "Arc01.dat",
+        "Arc04.dat",
+        "Arc02.dat",
+        "Arc05.dat",
+        "Resources/Data00.dat",
+        "Resources/Data000.dat",
+        "Resources/Data071.dat",
+        "Resources/Data001.dat.bak",
+    ]);
+    let sets = game(Engine::Csystem).archive_sets(&paths);
+    assert_eq!(sets.len(), 3);
+    assert!(
+        sets.iter()
+            .any(|set| set.primary == paths[2] && set.members == paths[1..3])
+    );
+    assert!(
+        sets.iter()
+            .any(|set| set.primary == paths[4] && set.members == paths[3..5])
+    );
+    assert!(
+        sets.iter()
+            .any(|set| set.primary == paths[5] && set.members == paths[5..8])
+    );
+}
+
+#[test]
+fn csystem_includes_picture_and_movie_parts() {
+    let paths = files(&[
+        "Arc02.dat",
+        "Arc05.dat",
+        "Arc05a.dat",
+        "Arc05b.dat",
+        "Arc07.dat",
+        "Arc08.dat",
+        "Arc08a.dat",
+    ]);
+    let sets = game(Engine::Csystem).archive_sets(&paths);
+    assert_eq!(sets.len(), 2);
+    assert_eq!(sets[0].members, paths[..4]);
+    assert_eq!(sets[1].members, paths[4..]);
 }

@@ -2,6 +2,14 @@
 
 use super::*;
 
+fn from_pe(bytes: &[u8], cancel: &AtomicBool) -> Result<Option<Secret>> {
+    let Some(mut pe) = PeImage::parse(bytes)? else {
+        return Ok(None);
+    };
+    nvlens_unpack::steamstub::unpack(&mut pe, cancel)?;
+    from_image(&pe, cancel)
+}
+
 fn executable(base: u32) -> Vec<u8> {
     let mut b = vec![0; 0x600];
     b[..2].copy_from_slice(b"MZ");

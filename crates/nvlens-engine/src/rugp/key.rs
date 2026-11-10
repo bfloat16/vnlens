@@ -6,12 +6,12 @@
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register};
 use nvlens_core::{ArchiveOptions, Error, Result, Secret};
 use nvlens_io::{
-    ArcView, BinaryReader,
+    BinaryReader,
     pe::{ImportSymbol, PeImage},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -177,16 +177,19 @@ fn absolute(instruction: &Instruction) -> bool {
     instruction.memory_base() == Register::None && instruction.memory_index() == Register::None
 }
 
-pub(super) fn resolve(root: &Path, _: &[PathBuf], cancel: &AtomicBool) -> Result<ArchiveOptions> {
+pub(super) fn resolve(
+    context: &crate::context::Context,
+    _: &[PathBuf],
+    cancel: &AtomicBool,
+) -> Result<ArchiveOptions> {
     let mut paths = Vec::new();
-    for dir in [root.to_path_buf(), root.join("Plugins")] {
-        if !dir.is_dir() {
+    for dir in [context.root.clone(), context.root.join("Plugins")] {
+        if !context.files.is_dir(&dir) {
             continue;
         }
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_type()?.is_file()
+        for entry in context.files.read_dir(&dir)? {
+            let path = entry.path;
+            if !entry.metadata.directory
                 && path
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("dll") || e.eq_ignore_ascii_case("rpo"))
@@ -202,8 +205,8 @@ pub(super) fn resolve(root: &Path, _: &[PathBuf], cancel: &AtomicBool) -> Result
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
-        let view = ArcView::open(path)?;
-        if PeImage::parse(view.slice(0, view.len())?)?.is_some() {
+        let view = context.files.open(path)?;
+        if context.image(&view, cancel)?.is_some() {
             views.push(view);
             names.push(
                 path.file_name()
@@ -215,11 +218,8 @@ pub(super) fn resolve(root: &Path, _: &[PathBuf], cancel: &AtomicBool) -> Result
     }
     let images = views
         .iter()
-        .map(|v| {
-            PeImage::parse(v.slice(0, v.len())?)?
-                .ok_or_else(|| nvlens_io::BinaryIo::invalid_input("Missing rUGP PE image"))
-        })
-        .collect::<std::io::Result<Vec<_>>>()?;
+        .map(|v| context.image(v, cancel)?.ok_or(Error::InvalidFormat))
+        .collect::<nvlens_core::Result<Vec<_>>>()?;
     let mut tables = Tables {
         images: &images,
         stores: BTreeMap::new(),
@@ -317,5 +317,5 @@ pub(super) fn resolve(root: &Path, _: &[PathBuf], cancel: &AtomicBool) -> Result
 }
 
 #[cfg(test)]
-#[path = "../../tests/rugp/schema.rs"]
+#[path = "../../tests/rugp/key.rs"]
 mod tests;

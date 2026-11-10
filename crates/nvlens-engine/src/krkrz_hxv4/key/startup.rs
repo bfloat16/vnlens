@@ -316,5 +316,5 @@ fn decode(code: &[i16]) -> Result<BTreeMap<usize, &[i16]>> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/krkrz_hxv4/startup.rs"]
+#[path = "../../../tests/krkrz_hxv4/key/startup.rs"]
 mod tests;

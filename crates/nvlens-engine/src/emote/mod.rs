@@ -1,38 +1,19 @@
 //! PSBFile plugin identity, distinct from games merely embedding EmotePlayer.
+pub(crate) mod route;
+
 use crate::detect::has;
-use nvlens_core::{ArchiveOptions, Error, Result, Secret};
-use nvlens_io::{BinaryWriter, pe::PeImage};
+use nvlens_core::Result;
+use nvlens_io::pe::PeImage;
+
+pub(crate) const SUBDIRS: &[&str] = &["data", "media", "plugin", "plugins"];
+
 pub(crate) fn pe(pe: &PeImage<'_>) -> Result<bool> {
     Ok(has(pe, b"PSBFile")? && has(pe, b"psbfile.dll")?)
 }
-pub(crate) fn layout(root: &std::path::Path) -> bool {
-    root.join("plugin/psbfile.dll").is_file() && root.join("data").is_dir()
-}
-pub(crate) fn options() -> Result<ArchiveOptions> {
-    let mut options = ArchiveOptions::default();
-    if let Ok(key) = std::env::var("NVLENS_MDF_KEY")
-        && !key.is_empty()
-    {
-        options
-            .keys
-            .insert("mdf_base", Secret::new(key.into_bytes()));
-    }
-    let length = match std::env::var("NVLENS_MDF_KEY_LEN") {
-        Ok(value) => value
-            .parse::<u64>()
-            .ok()
-            .filter(|&value| value > 0)
-            .ok_or_else(|| Error::UnknownScheme(Some("Invalid MDF key length".into())))?,
-        Err(_) => 0x83,
-    };
-    options.numbers.insert("mdf_length", length);
-    if let Ok(key) = std::env::var("NVLENS_PSB_KEY") {
-        let key = key
-            .parse::<u32>()
-            .map_err(|_| Error::UnknownScheme(Some("Invalid PSB key".into())))?;
-        let mut bytes = vec![0; 4];
-        BinaryWriter::u32_le(key, &mut bytes);
-        options.keys.insert("psb", Secret::new(bytes));
-    }
-    Ok(options)
+
+pub(crate) fn layout(context: &crate::context::Context) -> bool {
+    context
+        .files
+        .is_file(&context.root.join("plugin/psbfile.dll"))
+        && context.files.is_dir(&context.root.join("data"))
 }

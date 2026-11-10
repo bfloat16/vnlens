@@ -5,13 +5,48 @@
 //! its optional key and compression; Gameexe's +4 guard identifies its key.
 //! Instruction operands, loop targets and field offsets determine the role,
 //! independently of register allocation, stack displacement or image base.
-use super::missing;
+use crate::context::Context;
 use iced_x86::{Decoder, DecoderOptions, Instruction, MemorySize, Mnemonic, OpKind, Register};
 use nvlens_core::{ArchiveOptions, Error, Result, Secret};
 use nvlens_io::pe::PeImage;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
-pub(super) fn parameters(image: &PeImage<'_>, cancel: &AtomicBool) -> Result<ArchiveOptions> {
+fn missing() -> Error {
+    Error::UnknownScheme(Some(
+        "Siglus resource-key code features were not resolved".into(),
+    ))
+}
+
+pub(super) fn resolve(
+    context: &Context,
+    executables: &[PathBuf],
+    cancelled: &AtomicBool,
+) -> Result<ArchiveOptions> {
+    let mut result = None;
+    for executable in executables {
+        check(cancelled)?;
+        let view = context.files.open(executable)?;
+        let Some(image) = context.image(&view, cancelled)? else {
+            continue;
+        };
+        if !super::pe(&image)? {
+            continue;
+        }
+        let options = parameters(&image, cancelled)?;
+        if result.as_ref().is_some_and(|previous| previous != &options) {
+            return Err(Error::UnknownScheme(Some(
+                "Conflicting Siglus executable parameters".into(),
+            )));
+        }
+        result = Some(options);
+    }
+    result.ok_or_else(missing)
+}
+
+fn parameters(image: &PeImage<'_>, cancel: &AtomicBool) -> Result<ArchiveOptions> {
     if image.machine != 0x14c {
         return Err(missing());
     }

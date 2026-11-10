@@ -1,13 +1,55 @@
 use super::*;
+use crate::Engine;
 use nvlens_core::ArchiveOptions;
 
 fn identified(engine: Engine) -> Identification {
     Identification {
+        files: Default::default(),
         root: Default::default(),
         engine,
         evidence: "Fixture".into(),
         options: ArchiveOptions::default(),
-        emote: None,
+        emote: false,
+    }
+}
+
+#[test]
+fn csystem_structured_types_keep_archive_case_and_headerless_priority() {
+    let game = identified(Engine::Csystem);
+    for (ext, tag) in [
+        ("f0", "f0/csystem"),
+        ("l0", "l0/csystem"),
+        ("m0", "m0/csystem"),
+        ("e0", "e0/csystem"),
+        ("r0", "r0/csystem"),
+        ("s0", "s0/csystem"),
+        ("B0", "properties/csystem"),
+        ("C0", "references/csystem"),
+        ("c0", "animation/csystem"),
+        ("x0", "x0/csystem"),
+        ("q0", "q0/csystem"),
+        ("t0", "t0/csystem"),
+        ("v0", "v0/csystem"),
+        ("i0", "movie-path/csystem"),
+    ] {
+        let name = format!("00000001.{ext}");
+        for origin in [
+            ResourceOrigin::File,
+            ResourceOrigin::Entry(ResourceKind::Script),
+        ] {
+            assert_eq!(
+                game.resource_route(&name, origin, &[]),
+                ResourceRoute::Script(tag)
+            );
+            assert_eq!(
+                game.resource_route(&name, origin, b"OggS"),
+                ResourceRoute::Script(tag)
+            );
+        }
+        assert_eq!(
+            identified(Engine::Softpal).resource_route(&name, ResourceOrigin::File, &[]),
+            ResourceRoute::Other(ResourceKind::Unknown)
+        );
     }
 }
 
@@ -203,5 +245,80 @@ fn headerless_native_names_precede_accidental_standard_magic() {
     assert_eq!(
         identified(Engine::Escude).resource_route("scene.bin", ResourceOrigin::File, b"acp\0"),
         ResourceRoute::Script("script/escude")
+    );
+}
+
+#[test]
+fn kaleido_routes_indices_bytecode_and_standard_psb_children() {
+    let game = identified(Engine::Kaleido);
+    assert!(
+        matches!(game.resource_route("scenario_info.psb.m",ResourceOrigin::File,b"mzs\0"),ResourceRoute::Archive(route) if route.tag=="psb/emote-archive-info")
+    );
+    for header in [&b"PSB\0"[..], &[0xfa, 0xfa, b'R', b'I']] {
+        assert_eq!(
+            game.resource_route(
+                "entry",
+                ResourceOrigin::Entry(ResourceKind::Unknown),
+                header
+            ),
+            ResourceRoute::Script("script/kaleido")
+        );
+    }
+    assert_eq!(
+        game.resource_route("script", ResourceOrigin::Entry(ResourceKind::Script), &[]),
+        ResourceRoute::Script("script/kaleido")
+    );
+    assert_eq!(
+        game.resource_route(
+            "pixel.dds",
+            ResourceOrigin::Entry(ResourceKind::Image),
+            b"DDS "
+        ),
+        ResourceRoute::Image("dds")
+    );
+    assert_eq!(
+        game.resource_route(
+            "voice.xwma",
+            ResourceOrigin::Entry(ResourceKind::Audio),
+            b"RIFF\0\0\0\0XWMA"
+        ),
+        ResourceRoute::Audio("xwma")
+    );
+    assert_eq!(
+        identified(Engine::Bgi).resource_route(
+            "entry",
+            ResourceOrigin::Entry(ResourceKind::Unknown),
+            &[0xfa, 0xfa, b'R', b'I']
+        ),
+        ResourceRoute::Other(ResourceKind::Unknown)
+    );
+}
+
+#[test]
+fn kaleido_encrypted_movies_and_plain_containers_use_distinct_routes() {
+    let game = identified(Engine::Kaleido);
+    assert_eq!(
+        game.resource_route("movie/OP.WEBM", ResourceOrigin::File, &[]),
+        ResourceRoute::Video("webm/kaleido")
+    );
+    assert_eq!(
+        game.resource_route("movie/op.webm", ResourceOrigin::File, &[42; 64]),
+        ResourceRoute::Video("webm/kaleido")
+    );
+    assert_eq!(
+        game.resource_route(
+            "movie/op.webm",
+            ResourceOrigin::File,
+            &[0x1a, 0x45, 0xdf, 0xa3]
+        ),
+        ResourceRoute::Video("ffmpeg")
+    );
+    assert_eq!(
+        game.resource_route("steinsgate_live_en.mp4", ResourceOrigin::File, &[]),
+        ResourceRoute::Video("ffmpeg")
+    );
+    assert_eq!(
+        identified(Engine::Bgi).resource_route("movie/op.webm", ResourceOrigin::File, &[]),
+        ResourceRoute::Video("ffmpeg")
     );
 }

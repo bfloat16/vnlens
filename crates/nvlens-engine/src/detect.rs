@@ -1,132 +1,148 @@
 //! PE evidence precedes directory-layout evidence; no archive is opened here.
 
+use crate::context::Context;
+use crate::routing::Router;
 use crate::{Engine, Identification, emote};
 use nvlens_core::{ArchiveOptions, Error, Result};
-use nvlens_io::{ArcView, BinaryReader, pe::PeImage};
+use nvlens_io::{BinaryReader, pe::PeImage};
 use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
 
 pub(crate) struct Detector {
-    pub pe: fn(&PeImage<'_>) -> Result<bool>,
-    pub layout: fn(&Path) -> bool,
     pub engine: Engine,
-    pub resolve: fn(&Path, &[PathBuf], &AtomicBool) -> Result<ArchiveOptions>,
+    pub supersedes: Option<Engine>,
+    pub subdirs: &'static [&'static str],
+    pub pe: fn(&PeImage<'_>) -> Result<bool>,
+    pub layout: fn(&Context) -> bool,
+    pub resolve: fn(&Context, &[PathBuf], &AtomicBool) -> Result<ArchiveOptions>,
+    pub route: Router,
 }
 nvlens_core::inventory::collect!(Detector);
+
+pub(crate) fn detector(engine: Engine) -> Option<&'static Detector> {
+    nvlens_core::inventory::iter::<Detector>().find(|d| d.engine == engine)
+}
 
 /// Identifies a selected game directory or file. Only the selected directory,
 /// its engine plugin directory and the parent of conventional asset directories
 /// are considered; recognition never walks arbitrary ancestors or archives.
 pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identification>> {
+    identify_with_progress(path, cancelled, &|_, _| {})
+}
+
+/// Identifies a game while reporting executable-recovery work to its host.
+pub fn identify_with_progress(
+    path: &Path,
+    cancelled: &AtomicBool,
+    progress: &(dyn Fn(u64, u64) + Sync),
+) -> Result<Option<Identification>> {
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
-    let mut root = if path.is_dir() {
+    let root = normalize_root(if path.is_dir() {
         path
     } else {
         path.parent().unwrap_or(path)
+    })
+    .canonicalize()?;
+    let mut context = Context {
+        root: root.clone(),
+        files: Default::default(),
+        sections: Default::default(),
     };
-    if root.file_name().is_some_and(|name| {
-        [
-            "pac", "data", "archive", "plugin", "plugins", "g00", "gan", "bgm", "wav", "koe",
-            "mov", "dat", "res", "rld", "dwq", "cdvaw", "vaw", "wgq", "spt", "init2", "nya",
-        ]
-        .iter()
-        .any(|candidate| name.eq_ignore_ascii_case(candidate))
-    }) {
-        root = root.parent().unwrap_or(root);
-    }
-    let root = root.canonicalize()?;
-    let mut executables = Vec::new();
-    for directory in [root.clone(), root.join("plugin"), root.join("plugins")] {
-        if !directory.is_dir() {
+    let mut executables = executable_paths(&context)?;
+    let mut visited = std::collections::HashSet::new();
+    let mut position = 0;
+    while position < executables.len() {
+        let executable = executables[position].clone();
+        position += 1;
+        if !visited.insert(executable.to_string_lossy().to_lowercase()) {
             continue;
         }
-        for entry in std::fs::read_dir(directory)? {
-            if cancelled.load(Ordering::Relaxed) {
-                return Err(Error::Cancelled);
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let view = std::sync::Arc::new(context.files.open(&executable)?);
+        let data = view.slice(0, view.len())?;
+        let Some(pe) = PeImage::parse(data).ok().flatten() else {
+            continue;
+        };
+        if nvlens_unpack::enigma::recognizes(&pe, cancelled)? {
+            let recovered = nvlens_unpack::enigma::recover(
+                view.clone(),
+                nvlens_unpack::enigma::Mode::Auto,
+                cancelled,
+                progress,
+            )?;
+            context
+                .sections
+                .insert(view.path().to_path_buf(), recovered.sections);
+            let parent = executable.parent().unwrap_or(&root);
+            for (name, source) in recovered.files {
+                let path = parent.join(name);
+                // A virtual DLL can replace an already visited physical copy.
+                // Recover that effective source before any engine evidence is used.
+                if visited.remove(&path.to_string_lossy().to_lowercase()) {
+                    executables.push(path.clone());
+                }
+                context.sections.retain(|stored, _| {
+                    !stored
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(&path.to_string_lossy())
+                });
+                std::sync::Arc::make_mut(&mut context.files).insert(path, source)?;
             }
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_type()?.is_file()
-                && path.extension().is_some_and(|ext| {
-                    ext.eq_ignore_ascii_case("exe")
-                        || ext.eq_ignore_ascii_case("dll")
-                        || ext.eq_ignore_ascii_case("tpm")
-                })
-            {
-                executables.push(path);
+            for path in executable_paths(&context)? {
+                if !executables.contains(&path) {
+                    executables.push(path);
+                }
             }
         }
     }
-    executables.sort();
+    // Resolve evidence only after all embedded siblings are visible. Otherwise
+    // a physical DLL encountered before its host could supply stale evidence.
+    executables = executable_paths(&context)?;
     let mut matches = Vec::new();
     let mut has_emote = false;
     for executable in &executables {
         if cancelled.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
-        let view = ArcView::open(executable)?;
-        let data = view.slice(0, view.len())?;
-        let Some(mut pe) = PeImage::parse(data).ok().flatten() else {
+        let view = context.files.open(executable)?;
+        let Some(pe) = context.image(&view, cancelled)? else {
             continue;
         };
-        nvlens_unpack::steamstub::unpack(&mut pe, cancelled)?;
         has_emote |= emote::pe(&pe)?;
         for detector in nvlens_core::inventory::iter::<Detector>() {
             if (detector.pe)(&pe)? {
-                matches.push((
-                    detector,
-                    format!("PE features in {}", executable.display()),
-                    Some(executable.clone()),
-                ));
+                matches.push((detector, format!("PE features in {}", executable.display())));
             }
         }
     }
     if matches.is_empty() {
         for detector in nvlens_core::inventory::iter::<Detector>() {
-            if (detector.layout)(&root) {
-                matches.push((detector, "Game directory layout".into(), None));
+            if (detector.layout)(&context) {
+                matches.push((detector, "Game directory layout".into()));
             }
         }
     }
-    // Hxv4 is a protected KiriKiri host, so its generic host strings are not
-    // conflicting evidence. Resolution must still succeed without fallback.
-    if matches
-        .iter()
-        .any(|(d, _, _)| d.engine == Engine::KrkrzHxv4)
-    {
-        matches.retain(|(d, _, _)| d.engine != Engine::Krkr);
-    }
-    let Some((detector, evidence, _)) = matches.first() else {
+    let superseded: Vec<Engine> = matches.iter().filter_map(|(d, _)| d.supersedes).collect();
+    matches.retain(|(d, _)| !superseded.contains(&d.engine));
+    let Some((detector, evidence)) = matches.first() else {
         return Ok(None);
     };
     if matches
         .iter()
-        .any(|(other, _, _)| other.engine != detector.engine)
+        .any(|(other, _)| other.engine != detector.engine)
     {
         return Err(Error::Unsupported(
             "Conflicting engine evidence in the selected game directory".into(),
         ));
     }
-    let matched: Vec<_> = matches
-        .iter()
-        .filter_map(|(_, _, path)| path.clone())
-        .collect();
-    let options = (detector.resolve)(
-        &root,
-        if matched.is_empty() || detector.engine == Engine::Krkr {
-            &executables
-        } else {
-            &matched
-        },
-        cancelled,
-    )?;
-    let emote = (has_emote || emote::layout(&root))
-        .then(emote::options)
-        .transpose()?;
+    let options = (detector.resolve)(&context, &executables, cancelled)?;
+    let emote = has_emote || emote::layout(&context);
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
@@ -134,9 +150,56 @@ pub fn identify(path: &Path, cancelled: &AtomicBool) -> Result<Option<Identifica
         root,
         engine: detector.engine,
         evidence: evidence.clone(),
+        files: context.files,
         options,
         emote,
     }))
+}
+
+fn normalize_root(mut root: &Path) -> &Path {
+    const GENERIC: &[&str] = &[
+        "data",
+        "archive",
+        "plugin",
+        "plugins",
+        "dll",
+        "mov",
+        "movie",
+        "bgm",
+        "wav",
+        "dat",
+        "res",
+        "media",
+        "resources",
+    ];
+    for detector in nvlens_core::inventory::iter::<Detector>() {
+        for subdir in detector.subdirs {
+            if let Some((parent, leaf)) = subdir.split_once('/')
+                && root
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(leaf))
+                && root
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name.eq_ignore_ascii_case(parent))
+            {
+                root = root.parent().unwrap_or(root);
+            }
+        }
+    }
+    if root.file_name().is_some_and(|name| {
+        GENERIC
+            .iter()
+            .chain(emote::SUBDIRS)
+            .chain(
+                nvlens_core::inventory::iter::<Detector>()
+                    .flat_map(|d| d.subdirs.iter().filter(|s| !s.contains('/'))),
+            )
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    }) {
+        root = root.parent().unwrap_or(root);
+    }
+    root
 }
 
 /// Searches file-backed PE sections for ASCII or UTF-16LE strings. The marker
@@ -166,8 +229,34 @@ pub(crate) fn has(pe: &PeImage<'_>, marker: &[u8]) -> Result<bool> {
     Ok(false)
 }
 
-pub(crate) fn plain(_: &Path, _: &[PathBuf], _: &AtomicBool) -> Result<ArchiveOptions> {
+pub(crate) fn plain(_: &Context, _: &[PathBuf], _: &AtomicBool) -> Result<ArchiveOptions> {
     Ok(ArchiveOptions::default())
+}
+
+fn executable_paths(context: &Context) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for directory in [
+        context.root.clone(),
+        context.root.join("plugin"),
+        context.root.join("plugins"),
+    ] {
+        if !context.files.is_dir(&directory) {
+            continue;
+        }
+        for entry in context.files.read_dir(&directory)? {
+            if !entry.metadata.directory
+                && entry.path.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("exe")
+                        || ext.eq_ignore_ascii_case("dll")
+                        || ext.eq_ignore_ascii_case("tpm")
+                })
+            {
+                paths.push(entry.path);
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 #[cfg(test)]

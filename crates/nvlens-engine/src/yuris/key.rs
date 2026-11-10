@@ -1,20 +1,53 @@
 //! Relocated x86 YU-RIS product string, CRC32 call and big-endian key stores.
 //! Decode instructions and verify the string-length loop and output dataflow;
 //! no executable opcode bytes or fixed image addresses are matched.
+use crate::context::Context;
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
-use nvlens_core::{Error, Result, Secret};
+use nvlens_core::{ArchiveOptions, Error, Result, Secret};
 use nvlens_crypto::checksum::crc32;
 use nvlens_io::{BinaryReader, BinaryWriter, pe::PeImage};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
-pub(super) fn from_pe(bytes: &[u8], cancel: &AtomicBool) -> Result<Option<Secret>> {
-    let Some(mut pe) = PeImage::parse(bytes)? else {
-        return Ok(None);
-    };
+pub(super) fn resolve(
+    context: &Context,
+    executables: &[PathBuf],
+    cancelled: &AtomicBool,
+) -> Result<ArchiveOptions> {
+    let mut found = None;
+    for path in executables {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let view = context.files.open(path)?;
+        if let Some(image) = context.image(&view, cancelled)?
+            && let Some(key) = from_image(&image, cancelled)?
+        {
+            if found.as_ref().is_some_and(|previous| previous != &key) {
+                return Err(Error::UnknownScheme(Some("Conflicting YU-RIS keys".into())));
+            }
+            found = Some(key);
+        }
+    }
+    let key = found.ok_or_else(|| {
+        Error::UnknownScheme(Some(
+            "YU-RIS executable key initialization was not identified".into(),
+        ))
+    })?;
+    let mut options = ArchiveOptions::default();
+    options.keys.insert("ystb", key);
+    // 0x45EC64 complements filename bytes; this is the verified 0x1EE profile.
+    options.keys.insert("ypf_name", Secret::new(vec![0xff]));
+    options.numbers.insert("version", 0x1ee);
+    Ok(options)
+}
+
+fn from_image(pe: &PeImage<'_>, cancel: &AtomicBool) -> Result<Option<Secret>> {
     if pe.machine != 0x14c {
         return Ok(None);
     }
-    nvlens_unpack::steamstub::unpack(&mut pe, cancel)?;
     let mut found = None;
     for section in pe.sections.iter().filter(|s| s.executable) {
         let code = pe.section_data(section)?;

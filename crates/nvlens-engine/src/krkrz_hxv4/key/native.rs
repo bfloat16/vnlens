@@ -177,5 +177,5 @@ fn immediate(i: &Instruction) -> Option<u32> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/krkrz_hxv4/native.rs"]
+#[path = "../../../tests/krkrz_hxv4/key/native.rs"]
 mod tests;

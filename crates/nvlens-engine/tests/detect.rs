@@ -91,6 +91,47 @@ fn propeller_requires_pe_evidence_and_routes_only_its_formats() {
 }
 
 #[test]
+fn propeller_versions_select_parameters_without_guessing_or_conflicts() {
+    let dir = temp();
+    let cancel = AtomicBool::new(false);
+    let markers = b"system_edit.msc\0Scenario\\system.msc\0Scenario.mpk\0";
+    let host = dir.0.join("host.exe");
+    for (class, version, key) in [("Stuff v1.0a", 10, 0x88), ("Stuff v1.4", 14, 0x77)] {
+        let mut text = markers.to_vec();
+        text.extend(class.bytes().chain([0]));
+        fs::write(&host, pe_bytes(&text)).unwrap();
+        let game = identify(&dir.0, &cancel).unwrap().unwrap();
+        assert_eq!(game.engine, Engine::Propeller);
+        assert_eq!(
+            game.options.numbers.get("propeller_msc_version"),
+            Some(&version)
+        );
+        assert!(game.options.keys["propeller_msc"].bytes() == [key]);
+        assert!(game.options.keys["propeller_mpk"].bytes() == [0x58]);
+    }
+    for class in ["Stuff v1.40", "Stuff v1.0a\0Stuff v1.4"] {
+        let mut text = markers.to_vec();
+        text.extend(class.bytes().chain([0]));
+        fs::write(&host, pe_bytes(&text)).unwrap();
+        assert!(matches!(
+            identify(&dir.0, &cancel),
+            Err(Error::UnknownScheme(_))
+        ));
+    }
+    fs::write(&host, pe_bytes(b"Stuff v1.4\0")).unwrap();
+    assert!(identify(&dir.0, &cancel).unwrap().is_none());
+    for (name, class) in [("host.exe", "Stuff v1.0a"), ("other.exe", "Stuff v1.4")] {
+        let mut text = markers.to_vec();
+        text.extend(class.bytes().chain([0]));
+        fs::write(dir.0.join(name), pe_bytes(&text)).unwrap();
+    }
+    assert!(matches!(
+        identify(&dir.0, &cancel),
+        Err(Error::UnknownScheme(_))
+    ));
+}
+
+#[test]
 fn pe_strings_precede_layout_and_archive_bytes_are_not_evidence() {
     let dir = temp();
     let cancel = AtomicBool::new(false);
@@ -260,4 +301,82 @@ fn archive_tag(game: &Identification, name: &str) -> &'static str {
         ResourceRoute::Archive(route) => route.tag,
         _ => "missing archive route",
     }
+}
+#[test]
+fn softpal_pe_evidence_and_routing() {
+    let cancel = AtomicBool::new(false);
+    let soft = temp();
+    fs::write(
+        soft.0.join("host.exe"),
+        pe_bytes(b"PalFileCreate\0Script.src\0Point.dat\0"),
+    )
+    .unwrap();
+    let game = identify(&soft.0, &cancel).unwrap().unwrap();
+    assert_eq!(game.engine, Engine::Softpal);
+    assert_eq!(archive_tag(&game, "data.pac"), "pac/softpal");
+    assert_eq!(
+        game.resource_route("FACE.PGD", ResourceOrigin::File, &[]),
+        ResourceRoute::Image("pgd/softpal")
+    );
+    assert!(!matches!(
+        game.resource_route("Arc04.dat", ResourceOrigin::File, &[]),
+        ResourceRoute::Archive(_)
+    ));
+}
+
+#[test]
+fn csystem_pe_evidence_legacy_routing_and_missing_key() {
+    let cancel = AtomicBool::new(false);
+    let cs = temp();
+    fs::write(
+        cs.0.join("host.exe"),
+        pe_bytes(b".?AVArchiveMap@@\0Arc00.dat\0Arc01.dat\0Arc04.dat\0Arc03.dat\0Arc06.dat\0"),
+    )
+    .unwrap();
+    assert!(matches!(
+        identify(&cs.0, &cancel),
+        Err(Error::UnknownScheme(_))
+    ));
+    let markers = b".?AVArchiveMap@@\0Arc00.dat\0Data%03d.dat\0";
+    fs::write(cs.0.join("host.exe"), pe_bytes(markers)).unwrap();
+    assert!(matches!(
+        identify(&cs.0, &cancel),
+        Err(Error::UnknownScheme(_))
+    ));
+    let mut text = markers.to_vec();
+    text.extend_from_slice(b"00000000-0000-0000-0000-000000000000 Copyright 2004 Cyberworks \"TinkerBell\"., all rights reserved.\0");
+    fs::write(cs.0.join("host.exe"), pe_bytes(&text)).unwrap();
+    let game = identify(&cs.0, &cancel).unwrap().unwrap();
+    assert_eq!(game.engine, Engine::Csystem);
+    assert_eq!(archive_tag(&game, "Arc04.dat"), "dat/csystem");
+    assert_eq!(
+        game.resource_route(
+            "00000001.a0",
+            ResourceOrigin::Entry(nvlens_core::ResourceKind::Script),
+            &[]
+        ),
+        ResourceRoute::Script("script/csystem")
+    );
+    assert!(!matches!(
+        game.resource_route("bg.pac", ResourceOrigin::File, &[]),
+        ResourceRoute::Archive(_)
+    ));
+    assert!(!format!("{game:?}").contains("00000000-0000"));
+    assert_eq!(game.options.numbers.get("csystem_legacy"), Some(&0));
+    let mut old =
+        b".?AVArchiveMap@@\0Arc00.dat\0Arc01.dat\0Arc04.dat\0Arc03.dat\0Arc06.dat\0".to_vec();
+    old.extend_from_slice(b"00000000-0000-0000-0000-000000000000 Copyright 2004 Cyberworks \"TinkerBell\"., all rights reserved.\0");
+    fs::write(cs.0.join("host.exe"), pe_bytes(&old)).unwrap();
+    let old = identify(&cs.0, &cancel).unwrap().unwrap();
+    assert_eq!(old.options.numbers.get("csystem_legacy"), Some(&1));
+    for ext in ["b0", "n0", "o0"] {
+        assert_eq!(
+            old.resource_route(&format!("00000001.{ext}"), ResourceOrigin::File, b"a\xef"),
+            ResourceRoute::Image("image-legacy/csystem")
+        );
+    }
+    assert_eq!(
+        old.resource_route("00000001.c0", ResourceOrigin::File, &[]),
+        ResourceRoute::Script("animation-legacy/csystem")
+    );
 }

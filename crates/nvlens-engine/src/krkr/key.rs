@@ -3,16 +3,41 @@
 //! The verified x86 compiler form is checked by decoded operands and branch
 //! targets, including the successful CRT remainder/cookie paths. Unknown
 //! registration or callback code fails closed. No plugin code is executed.
-use crate::detect::has;
+use crate::{context::Context, detect::has};
 use Mnemonic::*;
 use Register::*;
 use iced_x86::{Decoder, DecoderOptions, Instruction, MemorySize, Mnemonic, OpKind, Register};
-use nvlens_core::{Error, Result};
+use nvlens_core::{ArchiveOptions, Error, Result};
 use nvlens_io::pe::PeImage;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 const API: &str = "void ::TVPSetXP3ArchiveExtractionFilter(tTVPXP3ArchiveExtractionFilter)";
 
-pub(super) fn xor31(image: &PeImage<'_>) -> Result<bool> {
+pub(super) fn resolve(
+    context: &Context,
+    paths: &[PathBuf],
+    cancel: &AtomicBool,
+) -> Result<ArchiveOptions> {
+    let mut options = ArchiveOptions::default();
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let view = context.files.open(path)?;
+        let Some(image) = context.image(&view, cancel)? else {
+            continue;
+        };
+        if xor31(&image)? {
+            options.numbers.insert("xp3_xor31", 1);
+        }
+    }
+    Ok(options)
+}
+
+fn xor31(image: &PeImage<'_>) -> Result<bool> {
     if !has(image, API.as_bytes())? {
         return Ok(false);
     }
@@ -294,5 +319,5 @@ fn remainder(image: &PeImage<'_>, entry: u64) -> Option<()> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/krkr/tpm.rs"]
+#[path = "../../tests/krkr/key.rs"]
 mod tests;

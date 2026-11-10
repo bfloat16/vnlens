@@ -4,15 +4,55 @@
 //! Each byte opcode indexes one native-width pointer to signed type tags,
 //! terminated by a negative byte; null pointers denote undefined opcodes.
 
+use crate::context::Context;
 use iced_x86::{
     Decoder, DecoderOptions, FlowControl, Instruction, InstructionInfoFactory, MemorySize,
     Mnemonic, OpAccess, OpKind, Register,
 };
-use nvlens_core::{Error, Result};
+use nvlens_core::{ArchiveOptions, Error, Result, Secret};
 use nvlens_io::{BinaryReader, pe::PeImage};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
-pub(super) fn table(pe: &PeImage<'_>, cancel: &AtomicBool) -> Result<Option<Vec<u8>>> {
+pub(super) fn resolve(
+    context: &Context,
+    paths: &[PathBuf],
+    cancel: &AtomicBool,
+) -> Result<ArchiveOptions> {
+    let mut options = ArchiveOptions::default();
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let view = context.files.open(path)?;
+        let Some(image) = context.image(&view, cancel)? else {
+            continue;
+        };
+        if let Some(table) = table(&image, cancel)? {
+            // sub_4E4E40/sub_4CC610 use CP932 and one-byte terminators in the
+            // x86 reader; the x64 reader stores UTF-16LE code units directly.
+            let codepage = if image.machine == 0x14c { 932 } else { 1200 };
+            let key = Secret::new(table);
+            if options.keys.get("will_ws2").is_some_and(|old| old != &key)
+                || options
+                    .numbers
+                    .get("will_ws2_codepage")
+                    .is_some_and(|old| *old != codepage)
+            {
+                return Err(Error::UnknownScheme(Some(
+                    "Conflicting AdvHD WS2 layouts".into(),
+                )));
+            }
+            options.keys.insert("will_ws2", key);
+            options.numbers.insert("will_ws2_codepage", codepage);
+        }
+    }
+    Ok(options)
+}
+
+fn table(pe: &PeImage<'_>, cancel: &AtomicBool) -> Result<Option<Vec<u8>>> {
     let bitness = match pe.machine {
         0x14c => 32,
         0x8664 => 64,
@@ -213,5 +253,5 @@ fn wide(register: Register) -> Register {
 }
 
 #[cfg(test)]
-#[path = "../../tests/will/ws2.rs"]
+#[path = "../../tests/will/key.rs"]
 mod tests;

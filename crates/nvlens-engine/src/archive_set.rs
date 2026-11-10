@@ -1,7 +1,7 @@
-//! File relationships used by archive routing and disk browsers. These rules
-//! mirror the readers' companion conventions; no archive payload is read and
+//! File relationships used by archive routing and disk browsers. Companion
+//! rules live in each engine's `route` module; no archive payload is read and
 //! similar prefixes alone never establish a relationship.
-use crate::{Engine, Identification};
+use crate::Identification;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -31,6 +31,7 @@ impl Identification {
                     .insert(name.to_ascii_lowercase(), path);
             }
         }
+        let router = crate::detect::detector(self.engine).map(|d| &d.route);
         let mut result = Vec::new();
         for names in directories.values() {
             let mut assigned = BTreeSet::new();
@@ -38,88 +39,16 @@ impl Identification {
                 if assigned.contains(name) {
                     continue;
                 }
-                let mut members = vec![name.clone()];
-                let mut primary_path = (*primary).clone();
-                match self.engine {
-                    Engine::SystemNnn => {
-                        if let Some(stem) = name.strip_suffix(".gpk") {
-                            members.push(format!("{stem}.gtb"));
-                        } else if let Some(stem) = name.strip_suffix(".vpk") {
-                            members.push(format!("{stem}.vtb"));
-                        } else if let Some(stem) = name.strip_suffix(".gtb") {
-                            let archive = format!("{stem}.gpk");
-                            if names.contains_key(&archive) {
-                                members.push(archive.clone());
-                                primary_path = (*names[&archive]).clone();
-                            }
-                        } else if let Some(stem) = name.strip_suffix(".vtb") {
-                            let archive = format!("{stem}.vpk");
-                            if names.contains_key(&archive) {
-                                members.push(archive.clone());
-                                primary_path = (*names[&archive]).clone();
-                            }
-                        }
-                    }
-                    Engine::Rugp if name.ends_with(".rio") || name.contains(".rio.") => {
-                        let base = name
-                            .split_once(".rio.")
-                            .map_or_else(|| name.clone(), |(stem, _)| format!("{stem}.rio"));
-                        let Some(base_path) = names.get(&base) else {
-                            continue;
-                        };
-                        primary_path = (*base_path).clone();
-                        members = names
-                            .keys()
-                            .filter(|candidate| {
-                                *candidate == &base
-                                    || candidate.strip_prefix(&format!("{base}.")).is_some_and(
-                                        |suffix| {
-                                            matches!(suffix, "ici" | "ruo")
-                                                || (!suffix.is_empty()
-                                                    && suffix.bytes().all(|b| b.is_ascii_digit()))
-                                        },
-                                    )
-                            })
-                            .cloned()
-                            .collect();
-                    }
-                    Engine::Exhibit => {
-                        if let Some(number) = exhibit_volume(name) {
-                            let base = number & !255;
-                            let index = format!("res{base:04x}.grp");
-                            let Some(index_path) = names.get(&index) else {
-                                continue;
-                            };
-                            primary_path = (*index_path).clone();
-                            members = names
-                                .keys()
-                                .filter(|candidate| {
-                                    exhibit_volume(candidate)
-                                        .is_some_and(|volume| volume & !255 == base)
-                                })
-                                .cloned()
-                                .collect();
-                        }
-                    }
-                    _ => {}
-                }
-                if self.emote.is_some()
-                    && (name.ends_with("info.psb") || name.ends_with("info.psb.m"))
-                {
-                    // Same priority as EmoteArchiveInfo::find_body_path.
-                    let end = name.find("_info.").or_else(|| name.find('.')).unwrap_or(0);
-                    let package = &name[..end];
-                    if let Some(body) = [
-                        format!("{package}_body.bin"),
-                        format!("{package}body.bin"),
-                        format!("{package}.bin"),
-                    ]
-                    .into_iter()
-                    .find(|candidate| names.contains_key(candidate))
-                    {
-                        members.push(body);
-                    }
-                }
+                let group = router
+                    .and_then(|r| (r.archive_set)(name, primary, names))
+                    .or_else(|| {
+                        self.emote
+                            .then(|| crate::emote::route::archive_set(name, primary, names))
+                            .flatten()
+                    });
+                let Some((primary_path, mut members)) = group else {
+                    continue;
+                };
                 members.retain(|member| names.contains_key(member) && !assigned.contains(member));
                 if members.len() < 2 {
                     continue;
@@ -137,10 +66,6 @@ impl Identification {
         }
         result
     }
-}
-
-fn exhibit_volume(name: &str) -> Option<u32> {
-    u32::from_str_radix(name.strip_prefix("res")?.strip_suffix(".grp")?, 16).ok()
 }
 
 #[cfg(test)]
