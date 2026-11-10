@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use nvlens_core::{Error, Result};
 use nvlens_crypto::cipher::mdf::MdfStream;
-use nvlens_crypto::compress::zlib;
+use nvlens_crypto::compress::{zlib, zstd};
 use nvlens_io::{ArcView, BinaryIo, BinaryReader, ReadAt};
 
 use super::mdf::{self, MdfKey};
@@ -17,6 +17,7 @@ use super::mdf::{self, MdfKey};
 pub(crate) struct MdfSource {
     view: Arc<ArcView>,
     len: u64,
+    zstd: bool,
     cipher: Option<MdfStream>,
     state: Mutex<DecodeState>,
 }
@@ -42,25 +43,35 @@ impl MdfSource {
         let head = view.slice(0, 8)?;
         let len = u64::from(BinaryReader::u32_le(&head[4..]));
         let cipher = key.map(|key| MdfStream::new(key.key, key.key_len));
-        let state = Mutex::new(Self::decoder(Arc::clone(&view), cipher.clone()));
+        let zstd = head.starts_with(b"mzs\0");
+        let state = Mutex::new(Self::decoder(Arc::clone(&view), cipher.clone(), zstd)?);
         Ok(Self {
             view,
             len,
+            zstd,
             cipher,
             state,
         })
     }
 
-    fn decoder(view: Arc<ArcView>, cipher: Option<MdfStream>) -> DecodeState {
+    fn decoder(
+        view: Arc<ArcView>,
+        cipher: Option<MdfStream>,
+        zstd: bool,
+    ) -> io::Result<DecodeState> {
         let input = MdfInput {
             view,
             position: 8,
             cipher,
         };
-        DecodeState {
-            decoder: Box::new(zlib::decoder(input)),
+        Ok(DecodeState {
+            decoder: if zstd {
+                Box::new(zstd::decoder(input)?)
+            } else {
+                Box::new(zlib::decoder(input))
+            },
             position: 0,
-        }
+        })
     }
 }
 
@@ -84,7 +95,7 @@ impl ReadAt for MdfSource {
             .lock()
             .map_err(|_| io::Error::other("MDF decoder lock poisoned"))?;
         if offset < state.position {
-            *state = Self::decoder(Arc::clone(&self.view), self.cipher.clone());
+            *state = Self::decoder(Arc::clone(&self.view), self.cipher.clone(), self.zstd)?;
         }
         let mut discard = [0u8; 8192];
         while state.position < offset {

@@ -33,6 +33,9 @@ pub fn archive_info_entries(psb: &Psb) -> Result<(ArchiveInfoKind, Vec<ArchiveIn
         return Err(Error::InvalidFormat);
     };
 
+    if matches!(root.get(key), Some(PsbValue::Null)) {
+        return Ok((kind, Vec::new()));
+    }
     let table = root
         .get(key)
         .and_then(PsbValue::as_object)

@@ -4,6 +4,8 @@
 //! label:i16, code-relative offset:u32. Commands are group:u8, opcode:u8.
 //! sub_412B20 values are a type byte and a signed i16; strings are i16-length
 //! CP932. Source bytes, duplicate labels and value types remain in the IR.
+//! v1.4 sub_45BA40 uses nine-byte rows; sub_45B970/sub_45BA10 and
+//! sub_4495C0 widen label IDs, values and string lengths to signed i32.
 mod opcode;
 use crate::{ScriptFormat, ScriptRegistration, ir::*};
 use nvlens_core::{ArchiveOptions, Error, Format, ResourceResolver, Result};
@@ -37,12 +39,45 @@ impl ScriptFormat for Msc {
         Ok(Cow::Owned(out))
     }
     fn disassemble(&self, data: &[u8], _: Option<&dyn ResourceResolver>) -> Result<Option<Script>> {
-        parse(data).map(Some)
+        parse(data, Layout::V10).map(Some)
+    }
+    fn disassemble_with_options(
+        &self,
+        data: &[u8],
+        _: Option<&dyn ResourceResolver>,
+        options: &ArchiveOptions,
+    ) -> Result<Option<Script>> {
+        let layout = match options.numbers.get("propeller_msc_version") {
+            None | Some(10) => Layout::V10,
+            Some(14) => Layout::V14,
+            _ => return Err(Error::Unsupported("Unknown MSC bytecode version".into())),
+        };
+        parse(data, layout).map(Some)
     }
 }
 nvlens_core::inventory::submit! { ScriptRegistration(|| Box::new(Msc)) }
 
-fn parse(data: &[u8]) -> Result<Script> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    V10,
+    V14,
+}
+impl Layout {
+    fn width(self) -> usize {
+        match self {
+            Self::V10 => 2,
+            Self::V14 => 4,
+        }
+    }
+    fn integer(self, reader: &mut BinaryReader<'_>) -> Result<i64> {
+        Ok(match self {
+            Self::V10 => i64::from(reader.read_u16_le()? as i16),
+            Self::V14 => i64::from(reader.read_u32_le()? as i32),
+        })
+    }
+}
+
+fn parse(data: &[u8], layout: Layout) -> Result<Script> {
     let mut r = BinaryReader::new(data);
     let reserved = r.read_u16_le()?;
     let base = usize::try_from(r.read_u32_le()?)
@@ -62,7 +97,8 @@ fn parse(data: &[u8]) -> Result<Script> {
         let start = r.position();
         let size = usize::try_from(r.read_u32_le()?)
             .map_err(|_| corrupt(start, "MSC table size exceeds address space"))?;
-        if !size.is_multiple_of(7) {
+        let row_size = 5 + layout.width();
+        if !size.is_multiple_of(row_size) {
             return Err(corrupt(start, "MSC label table has an incomplete row"));
         }
         let bytes = r.read_bytes(size)?;
@@ -71,27 +107,35 @@ fn parse(data: &[u8]) -> Result<Script> {
         while rows.remaining() != 0 {
             let at = start + 4 + rows.position();
             let tag = rows.read_u8()?;
-            let label = rows.read_u16_le()? as i16;
+            let label = layout.integer(&mut rows)?;
             let target = u64::from(rows.read_u32_le()?) + base as u64;
             if target > data.len() as u64 {
-                return Err(corrupt(at + 3, "MSC label target exceeds code storage"));
+                return Err(corrupt(
+                    at + 1 + layout.width(),
+                    "MSC label target exceeds code storage",
+                ));
             }
             if table == 0 {
-                labels.insert(i64::from(label), target);
+                labels.insert(label, target);
             }
             items.push(arg(
                 ArgName::Row(items.len() as u64),
                 at,
-                7,
+                row_size,
                 Value::Group(vec![
                     arg(ArgName::Unknown(0), at, 1, Value::Unsigned(u64::from(tag))),
                     arg(
                         ArgName::LabelId,
                         at + 1,
-                        2,
-                        Value::Integer(i64::from(label)),
+                        layout.width(),
+                        Value::Integer(label),
                     ),
-                    arg(ArgName::Target, at + 3, 4, Value::CodeAddress(target)),
+                    arg(
+                        ArgName::Target,
+                        at + 1 + layout.width(),
+                        4,
+                        Value::CodeAddress(target),
+                    ),
                 ]),
             ));
         }
@@ -138,7 +182,7 @@ fn parse(data: &[u8]) -> Result<Script> {
         let start = r.position();
         let group = r.read_u8()?;
         let code = r.read_u8()?;
-        let schema = opcode::schema(group, code).ok_or_else(|| corrupt(start,
+        let schema = opcode::schema(group, code, layout).ok_or_else(|| corrupt(start,
             &format!("Unknown MSC instruction {group:02x}:{code:02x}; its argument boundary is unavailable")))?;
         let mut args = Vec::new();
         for (i, &kind) in schema.iter().enumerate() {
@@ -147,8 +191,16 @@ fn parse(data: &[u8]) -> Result<Script> {
             if (group, code, i) == (4, 0, 2)
                 && matches!(
                     args.get(1).map(|a: &Arg| &a.value),
-                    Some(Value::Unsigned(4..))
+                    Some(Value::Unsigned(mode)) if *mode >= if layout == Layout::V14 { 5 } else { 4 }
                 )
+            {
+                break;
+            }
+            // sub_452A20's setting selector consumes a second byte only
+            // for its two implemented settings, and ignores other selectors.
+            if layout == Layout::V14
+                && (group, code, i) == (1, 0x1a, 1)
+                && matches!(args.first().map(|a| &a.value), Some(Value::Unsigned(2..)))
             {
                 break;
             }
@@ -163,23 +215,23 @@ fn parse(data: &[u8]) -> Result<Script> {
                 b'w' => arg(
                     ArgName::Unknown(i as u64),
                     at,
-                    2,
-                    Value::Integer(i64::from(r.read_u16_le()? as i16)),
+                    layout.width(),
+                    Value::Integer(layout.integer(&mut r)?),
                 ),
-                b'v' => value(data, &mut r, i)?,
+                b'v' => value(data, &mut r, i, layout)?,
                 b's' => {
-                    let length = r.read_u16_le()? as i16;
+                    let length = layout.integer(&mut r)?;
                     let length = usize::try_from(length)
                         .map_err(|_| corrupt(at, "Negative MSC string length"))?;
                     let bytes = r.read_bytes(length)?;
                     let (text, _, invalid) = encoding_rs::SHIFT_JIS.decode(bytes);
                     if invalid {
-                        return Err(corrupt(at + 2, "Invalid MSC CP932 string"));
+                        return Err(corrupt(at + layout.width(), "Invalid MSC CP932 string"));
                     }
                     arg(
                         ArgName::Unknown(i as u64),
                         at,
-                        length + 2,
+                        length + layout.width(),
                         Value::Text(text.into_owned()),
                     )
                 }
@@ -188,7 +240,7 @@ fn parse(data: &[u8]) -> Result<Script> {
             item.name = opcode::name(group, code, i);
             args.push(item);
         }
-        let (operation, variant) = opcode::semantic(group, code, &args);
+        let (operation, variant) = opcode::semantic(group, code, &args, layout);
         // Labels are one-based IDs, not byte offsets. Only literal local
         // targets can be resolved statically; variable operands remain intact.
         let encoded_count = args.len();
@@ -227,7 +279,7 @@ fn parse(data: &[u8]) -> Result<Script> {
     Ok(Script {
         ir_version: VERSION,
         format: "msc/propeller".into(),
-        format_version: 0,
+        format_version: if layout == Layout::V14 { 14 } else { 0 },
         sections: vec![Section {
             name: "msc".into(),
             span: span(0, data.len()),
@@ -236,11 +288,13 @@ fn parse(data: &[u8]) -> Result<Script> {
         instructions,
     })
 }
-fn value(data: &[u8], r: &mut BinaryReader<'_>, index: usize) -> Result<Arg> {
+fn value(data: &[u8], r: &mut BinaryReader<'_>, index: usize, layout: Layout) -> Result<Arg> {
     let at = r.position();
     let kind = r.read_u8()?;
-    let word = if kind <= 4 {
-        Some(i64::from(r.read_u16_le()? as i16))
+    let word = if kind <= 4
+        || (layout == Layout::V14 && matches!(kind, 7..=10 | 0x64..=0x66 | 0x68..=0x80))
+    {
+        Some(layout.integer(r)?)
     } else {
         None
     };
@@ -255,6 +309,9 @@ fn value(data: &[u8], r: &mut BinaryReader<'_>, index: usize) -> Result<Arg> {
         1 | 2 => Operation::Storage(StorageOperation::Load),
         3 => Operation::Basic(BasicOperation::Random),
         4 => Operation::Runtime(RuntimeOperation::EngineCall),
+        _ if word.is_some() && layout == Layout::V14 => {
+            Operation::Runtime(RuntimeOperation::EngineCall)
+        }
         _ => Operation::Unknown,
     };
     if let Some(word) = word {
@@ -266,7 +323,7 @@ fn value(data: &[u8], r: &mut BinaryReader<'_>, index: usize) -> Result<Arg> {
                 _ => ArgName::Unknown(0),
             },
             at + 1,
-            2,
+            layout.width(),
             Value::Integer(word),
         ));
     }

@@ -5,16 +5,19 @@
 
 mod ages_mk2;
 mod bgi;
+mod csystem;
 mod emote;
 pub mod escude;
 mod exhibit;
 mod format;
 pub mod ir;
+mod kaleido;
 pub mod krkr;
 mod lua;
 mod propeller;
 pub mod rugp;
 mod siglus;
+pub mod softpal;
 mod systemnnn;
 mod will;
 pub mod yuris;

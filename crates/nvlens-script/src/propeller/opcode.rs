@@ -1,9 +1,41 @@
 //! Argument consumption verified against sub_40E6A0, sub_40F5E0,
 //! sub_4104B0, sub_4119F0, sub_411D10, sub_4120D0 and sub_4125A0.
-//! b = byte, w = signed word, v = tagged value, s = length-prefixed CP932.
+//! v1.4 changes verified against sub_454110, sub_452A20, sub_449CF0,
+//! sub_44B270, sub_449960, sub_450370 and sub_44B700 respectively.
+//! b = byte, w = version-sized integer, v = tagged value, s = CP932 string.
+use super::Layout;
 use crate::ir::*;
 
-pub(super) fn schema(group: u8, code: u8) -> Option<&'static [u8]> {
+pub(super) fn schema(group: u8, code: u8, layout: Layout) -> Option<&'static [u8]> {
+    // Version-specific argument consumption precedes the shared commands.
+    if layout == Layout::V14 {
+        match (group, code) {
+            (0, 0xa) => return Some(b"bv"),
+            (0, 0x35) => return Some(b""),
+            (0, 0x36) => return Some(b"b"),
+            (0, 0x37) => return Some(b"bvv"),
+            (1, 0xc | 0x1c | 0x1d) => return Some(b"bvv"),
+            (1, 0x18) => return Some(b"s"),
+            (1, 0x19) => return Some(b"sv"),
+            (1, 0x1a) => return Some(b"bb"),
+            (1, 0x1b) => return Some(b"bv"),
+            (1, 0x1e) => return Some(b"ss"),
+            (1, 0x1f) => return Some(b"sss"),
+            (2, 0x17) => return Some(b"vb"),
+            (5, 5) => return Some(b"b"),
+            (5, 6) => return Some(b""),
+            (5, 7) => return Some(b"bb"),
+            (6, 0) => return Some(b"sbvv"),
+            (6, 0xa) => return Some(b"s"),
+            (6, 0xb) => return Some(b"bvv"),
+            (6, 0xc) => return Some(b"vvvv"),
+            (6, 0xd | 0xf) => return Some(b""),
+            (6, 0xe | 0x10 | 0x12 | 0x13 | 0x16) => return Some(b"vv"),
+            (6, 0x11 | 0x15) => return Some(b"v"),
+            (6, 0x14) => return Some(b"vvv"),
+            _ => {}
+        }
+    }
     Some(match (group, code) {
         (0, 0) => b"bwbv",
         (0, 1) => b"vbvbv",
@@ -59,7 +91,12 @@ pub(super) fn schema(group: u8, code: u8) -> Option<&'static [u8]> {
     })
 }
 
-pub(super) fn semantic(group: u8, code: u8, args: &[Arg]) -> (Operation, Option<Qualifier>) {
+pub(super) fn semantic(
+    group: u8,
+    code: u8,
+    args: &[Arg],
+    layout: Layout,
+) -> (Operation, Option<Qualifier>) {
     let mut variant = None;
     let operation = match (group, code) {
         (0, 0) => {
@@ -67,6 +104,10 @@ pub(super) fn semantic(group: u8, code: u8, args: &[Arg]) -> (Operation, Option<
                 Some(Value::Unsigned(0)) => Some(Qualifier::Assign),
                 Some(Value::Unsigned(1)) => Some(Qualifier::AddAssign),
                 Some(Value::Unsigned(2)) => Some(Qualifier::SubtractAssign),
+                Some(Value::Unsigned(3)) if layout == Layout::V14 => {
+                    Some(Qualifier::MultiplyAssign)
+                }
+                Some(Value::Unsigned(4)) if layout == Layout::V14 => Some(Qualifier::DivideAssign),
                 _ => Some(Qualifier::UnknownUpdate),
             };
             Operation::Storage(StorageOperation::Store)
