@@ -1,7 +1,7 @@
 //! Playback dispatch for registered proprietary video formats and FFmpeg containers.
 
 use crate::{Picture, VideoMeta, decoder::FfmpegVideo};
-use nvlens_core::{Error, Format, Result};
+use nvlens_core::{ArchiveOptions, Error, Format, Result};
 use nvlens_io::{BinaryIo, ReadAt};
 use std::{
     fmt,
@@ -21,6 +21,16 @@ pub trait VideoDecoder: fmt::Debug {
 
 /// Domain registration trait for proprietary video formats.
 pub trait VideoFormat: Format + Send + Sync {
+    /// Opens logical movie bytes for independent picture/audio cursors and export.
+    /// Parameters come from engine identification; ordinary formats borrow the source.
+    fn decode_source(
+        &self,
+        source: Arc<dyn ReadAt>,
+        _name: &str,
+        _options: &ArchiveOptions,
+    ) -> Result<Arc<dyn ReadAt>> {
+        Ok(source)
+    }
     fn open(
         &self,
         source: Arc<dyn ReadAt>,
@@ -31,6 +41,28 @@ pub trait VideoFormat: Format + Send + Sync {
 #[derive(Debug)]
 pub struct VideoRegistration(pub fn() -> Box<dyn VideoFormat>);
 nvlens_core::inventory::collect!(VideoRegistration);
+
+/// Removes only the selected format's envelope without reading the full movie.
+/// Call once before handing the logical source to video and audio decoders.
+pub fn decode_source_as(
+    tag: &str,
+    source: Arc<dyn ReadAt>,
+    name: &str,
+    options: &ArchiveOptions,
+) -> Result<Arc<dyn ReadAt>> {
+    if tag == "ffmpeg" {
+        return Ok(source);
+    }
+    for registration in nvlens_core::inventory::iter::<VideoRegistration> {
+        let format = registration.0();
+        if format.tag() == tag {
+            return format.decode_source(source, name, options);
+        }
+    }
+    Err(Error::Unsupported(format!(
+        "Video route is not registered: {tag}"
+    )))
+}
 
 /// One movie decoder, kept on the thread that owns its FFmpeg scaler.
 #[derive(Debug)]
@@ -44,6 +76,7 @@ impl Video {
     /// Proprietary formats parse only their index here; payloads decode on access.
     /// Returns `Ok(None)` for containers without a video stream, and errors for
     /// damaged or unsupported movies. The optional name is a container hint.
+    /// Encrypted formats require the logical source from decode_source_as.
     pub fn open_source_as(
         tag: &str,
         source: Arc<dyn ReadAt>,
