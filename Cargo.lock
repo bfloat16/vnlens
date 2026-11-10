@@ -4420,174 +4420,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nvlens-archive"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "encoding_rs",
- "flate2",
- "nvlens-audio",
- "nvlens-bin",
- "nvlens-core",
- "nvlens-crypto",
- "nvlens-image",
- "nvlens-io",
- "nvlens-script",
-]
-
-[[package]]
-name = "nvlens-audio"
-version = "0.1.0"
-dependencies = [
- "ffmpeg-next",
- "lewton",
- "nvlens-bin",
- "nvlens-core",
- "nvlens-crypto",
- "nvlens-io",
- "ogg",
- "opus1",
- "rustfft",
-]
-
-[[package]]
-name = "nvlens-bin"
-version = "0.1.0"
-dependencies = [
- "tracing",
-]
-
-[[package]]
-name = "nvlens-core"
-version = "0.1.0"
-dependencies = [
- "inventory",
- "nvlens-io",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "nvlens-crypto"
-version = "0.1.0"
-dependencies = [
- "aes",
- "anyhow",
- "argon2",
- "blake2",
- "chacha20poly1305",
- "cubecl-core",
- "cubecl-wgpu",
- "flate2",
- "nvlens-io",
- "ruzstd",
- "sha2 0.11.1",
- "sha3",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "nvlens-engine"
-version = "0.1.0"
-dependencies = [
- "encoding_rs",
- "iced-x86",
- "nvlens-bin",
- "nvlens-core",
- "nvlens-crypto",
- "nvlens-io",
- "nvlens-unpack",
- "serde_json",
-]
-
-[[package]]
-name = "nvlens-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "gpui",
- "image",
- "nvlens-archive",
- "nvlens-audio",
- "nvlens-core",
- "nvlens-engine",
- "nvlens-image",
- "nvlens-io",
- "nvlens-script",
- "nvlens-video",
- "raw-window-handle",
- "rodio",
- "tracing",
- "unicode-segmentation",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "nvlens-image"
-version = "0.1.0"
-dependencies = [
- "encoding_rs",
- "image",
- "nvlens-core",
- "nvlens-crypto",
- "nvlens-io",
- "texture2ddecoder",
-]
-
-[[package]]
-name = "nvlens-io"
-version = "0.1.0"
-dependencies = [
- "memmap2",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "nvlens-script"
-version = "0.1.0"
-dependencies = [
- "encoding_rs",
- "flate2",
- "nvlens-core",
- "nvlens-crypto",
- "nvlens-io",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "nvlens-unpack"
-version = "0.1.0"
-dependencies = [
- "aes",
- "anyhow",
- "iced-x86",
- "nvlens-core",
- "nvlens-crypto",
- "nvlens-io",
- "tracing",
-]
-
-[[package]]
-name = "nvlens-video"
-version = "0.1.0"
-dependencies = [
- "ffmpeg-next",
- "image",
- "nvlens-core",
- "nvlens-crypto",
- "nvlens-io",
- "tracing",
-]
-
-[[package]]
-name = "nvlens-xtask"
-version = "0.1.0"
-dependencies = [
- "sha2 0.11.1",
- "zip",
-]
-
-[[package]]
 name = "objc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7499,6 +7331,174 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vnlens-archive"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "encoding_rs",
+ "flate2",
+ "vnlens-audio",
+ "vnlens-bin",
+ "vnlens-core",
+ "vnlens-crypto",
+ "vnlens-image",
+ "vnlens-io",
+ "vnlens-script",
+]
+
+[[package]]
+name = "vnlens-audio"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "lewton",
+ "ogg",
+ "opus1",
+ "rustfft",
+ "vnlens-bin",
+ "vnlens-core",
+ "vnlens-crypto",
+ "vnlens-io",
+]
+
+[[package]]
+name = "vnlens-bin"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
+name = "vnlens-core"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "thiserror 2.0.18",
+ "vnlens-io",
+]
+
+[[package]]
+name = "vnlens-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "argon2",
+ "blake2",
+ "chacha20poly1305",
+ "cubecl-core",
+ "cubecl-wgpu",
+ "flate2",
+ "ruzstd",
+ "sha2 0.11.1",
+ "sha3",
+ "thiserror 2.0.18",
+ "vnlens-io",
+]
+
+[[package]]
+name = "vnlens-engine"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "iced-x86",
+ "serde_json",
+ "vnlens-bin",
+ "vnlens-core",
+ "vnlens-crypto",
+ "vnlens-io",
+ "vnlens-unpack",
+]
+
+[[package]]
+name = "vnlens-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "image",
+ "raw-window-handle",
+ "rodio",
+ "tracing",
+ "unicode-segmentation",
+ "vnlens-archive",
+ "vnlens-audio",
+ "vnlens-core",
+ "vnlens-engine",
+ "vnlens-image",
+ "vnlens-io",
+ "vnlens-script",
+ "vnlens-video",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "vnlens-image"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "image",
+ "texture2ddecoder",
+ "vnlens-core",
+ "vnlens-crypto",
+ "vnlens-io",
+]
+
+[[package]]
+name = "vnlens-io"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "vnlens-script"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "flate2",
+ "serde",
+ "serde_json",
+ "vnlens-core",
+ "vnlens-crypto",
+ "vnlens-io",
+]
+
+[[package]]
+name = "vnlens-unpack"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "iced-x86",
+ "tracing",
+ "vnlens-core",
+ "vnlens-crypto",
+ "vnlens-io",
+]
+
+[[package]]
+name = "vnlens-video"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "image",
+ "tracing",
+ "vnlens-core",
+ "vnlens-crypto",
+ "vnlens-io",
+]
+
+[[package]]
+name = "vnlens-xtask"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.11.1",
+ "zip",
+]
 
 [[package]]
 name = "void"

@@ -1,0 +1,25 @@
+[package]
+name = "vnlens-unpack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+autotests = false
+
+[features]
+default = ["wgpu"]
+wgpu = ["vnlens-crypto/wgpu"]
+
+[dependencies]
+vnlens-core.workspace = true
+vnlens-io.workspace = true
+vnlens-crypto.workspace = true
+iced-x86.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+aes.workspace = true
+
+[lints]
+workspace = true

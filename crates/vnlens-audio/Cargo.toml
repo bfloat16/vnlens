@@ -1,0 +1,23 @@
+[package]
+name = "vnlens-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+autotests = false
+# Share FFmpeg runtime staging with the video domain.
+build = "../vnlens-video/build.rs"
+
+[dependencies]
+vnlens-core.workspace = true
+vnlens-crypto.workspace = true
+vnlens-io.workspace = true
+vnlens-bin.workspace = true
+lewton.workspace = true
+ogg.workspace = true
+opus1.workspace = true
+rustfft.workspace = true
+ffmpeg-next.workspace = true
+
+[lints]
+workspace = true

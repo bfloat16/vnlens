@@ -1,0 +1,34 @@
+[package]
+name = "vnlens-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+autotests = false
+
+[[bin]]
+name = "vnlens"
+path = "src/main.rs"
+
+[dependencies]
+vnlens-engine.workspace = true
+vnlens-core.workspace = true
+vnlens-io.workspace = true
+vnlens-archive.workspace = true
+vnlens-image.workspace = true
+vnlens-audio.workspace = true
+vnlens-script.workspace = true
+vnlens-video.workspace = true
+gpui.workspace = true
+image.workspace = true
+unicode-segmentation.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+rodio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle.workspace = true
+windows-sys.workspace = true
+
+[lints]
+workspace = true

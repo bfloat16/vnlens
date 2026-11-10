@@ -1,6 +1,6 @@
 # 后续开发规范
 
-本文件是仓库的根规范，适用于所有目录。nvlens 是 Rust 编写的视觉小说资源提取器；根 `Cargo.toml` 统一管理构建、依赖和 lint，排版遵循 `cargo fmt` 及仓库内的 `rustfmt.toml`（如存在）。本文件只记录通用开发规范，不记录具体功能实现、界面尺寸、控件布局、按钮文案或当前开发进度。
+本文件是仓库的根规范，适用于所有目录。vnlens 是 Rust 编写的视觉小说资源提取器；根 `Cargo.toml` 统一管理构建、依赖和 lint，排版遵循 `cargo fmt` 及仓库内的 `rustfmt.toml`（如存在）。本文件只记录通用开发规范，不记录具体功能实现、界面尺寸、控件布局、按钮文案或当前开发进度。
 
 格式实现以格式规范和已验证的实际行为为准，不设置人为的文件大小、条目数量、字符串长度、解压大小、嵌套深度或密钥长度限制。字段范围、结构关系和处理流程均从格式本身推导；不能为适配工具内部模型而拒绝合法数据、截断内容或改变语义。
 
@@ -16,31 +16,31 @@
 
 | 路径 | 职责 |
 | --- | --- |
-| `crates/nvlens-gui` | GPUI 桌面入口、资源浏览、预览、提取调度与结果展示。 |
-| `crates/nvlens-engine` | 游戏引擎特征识别、封包与引擎内文件定向路由、密钥参数解析。 |
-| `crates/nvlens-unpack` | PE 包装的内存解包，仅恢复静态识别需要的节数据，不执行或保存 PE。 |
-| `crates/nvlens-io` | 二进制读写、mmap 视图、日志初始化。 |
-| `crates/nvlens-core` | 资源模型、错误、路由类型、格式 trait、注册与 Catalog。 |
-| `crates/nvlens-crypto` | 压缩、加解密、哈希与校验和。 |
-| `crates/nvlens-bin` | 外部密钥资产、构建期复制与运行期加载。 |
-| `crates/nvlens-archive` | 按引擎路由读取归档、索引解析与条目读取。 |
-| `crates/nvlens-{image,audio,script,video}` | 按引擎路由定向解码与导出对应资源。 |
+| `crates/vnlens-gui` | GPUI 桌面入口、资源浏览、预览、提取调度与结果展示。 |
+| `crates/vnlens-engine` | 游戏引擎特征识别、封包与引擎内文件定向路由、密钥参数解析。 |
+| `crates/vnlens-unpack` | PE 包装的内存解包，仅恢复静态识别需要的节数据，不执行或保存 PE。 |
+| `crates/vnlens-io` | 二进制读写、mmap 视图、日志初始化。 |
+| `crates/vnlens-core` | 资源模型、错误、路由类型、格式 trait、注册与 Catalog。 |
+| `crates/vnlens-crypto` | 压缩、加解密、哈希与校验和。 |
+| `crates/vnlens-bin` | 外部密钥资产、构建期复制与运行期加载。 |
+| `crates/vnlens-archive` | 按引擎路由读取归档、索引解析与条目读取。 |
+| `crates/vnlens-{image,audio,script,video}` | 按引擎路由定向解码与导出对应资源。 |
 | `crates/*/tests/` | 与各 crate `src/` 平级并镜像其目录结构的测试模块。 |
 
 ## 3. 模块规范
 
 以下小节依次对应第 2 节。依赖方向为界面层 → engine/域格式 → core/crypto/bin/io，engine 可依赖 unpack，但不依赖域格式；unpack → core/crypto/io，core 和 crypto → io；bin 仅依赖 std 与 tracing，io 不依赖内部 crate。域之间仅允许 archive 为内嵌资源调用 audio/script，禁止反向依赖和回环。GUI 遵守同一分层，核心库不依赖 GPUI。封包目录和资源处理必须持有成功识别的引擎上下文。
 
-### 3.1 `crates/nvlens-gui`
+### 3.1 `crates/vnlens-gui`
 
-- 唯一应用入口为 GPUI 桌面程序 `nvlens`，不保留 CLI。GPUI 使用最新稳定发布版本并固定具体版本，依赖统一在 workspace 声明。
+- 唯一应用入口为 GPUI 桌面程序 `vnlens`，不保留 CLI。GPUI 使用最新稳定发布版本并固定具体版本，依赖统一在 workspace 声明。
 - 入口统一初始化域注册与日志；格式解析、算法和路径写入复用库。GUI 只负责交互、展示、任务调度和播放设备，不包含格式解析。
 - 目录与封包导航支持任意嵌套层级，大型列表使用虚拟化；界面展示不改变资源原名和路径语义，文字截断遵循 Unicode 字素边界。
 - 挂载与列表展示只读取索引及必要元信息，分类时向路由传入空文件头，资源内容和关联文件按访问需要读取。解析、读取和提取在后台执行，不阻塞界面线程。
 - 长任务提供进度和取消；单条目失败继续后续条目并汇总错误。提取保留格式名称，落盘路径交给 io 处理，不把宿主文件系统命名限制当成格式损坏。
 - 资源预览与转换按 `ResourceRoute` 选定的域和格式 `tag` 定向调用对应域 crate；字节码通过通用 IR 展示反汇编，纯文本直接展示。界面不宣称尚未实现的解码或导出能力。
 
-### 3.2 `crates/nvlens-engine`
+### 3.2 `crates/vnlens-engine`
 
 - 每个引擎一个模块，通过 inventory 注册识别器；按“PE 特征 → 目录结构 → 目录内文件”顺序识别，只读取证据及必要参数，不通过解析封包内容猜测引擎。
 - PE 中的 x86 代码统一使用 iced-x86 解码，按指令、操作数和控制流识别；不得以原始机器码字节模式匹配替代。字符串、资源记录与格式签名仍按其数据格式解析。
@@ -51,34 +51,34 @@
   3. 音视频复用容器（如 Ogg）返回 `ResourceRoute::Media { audio, video }`，仅在访问时通过流元信息区分音频或视频路由。
 - 识别结果按游戏实例共享，嵌套封包继承同一上下文。PE 地址映射留在 io，纯算法留在 crypto，大型密钥资产由 bin 加载；密钥不得出现在 Debug、日志或错误中。
 
-### 3.3 `crates/nvlens-io`
+### 3.3 `crates/vnlens-io`
 
 - 字节与整数的编码、解码统一在 `binary` 实现，其它模块及测试复用 `BinaryReader`、`BinaryWriter`、`BinaryIo`、`Endian`，不得手写 `from_*_bytes`、`to_*_bytes` 或移位拼装替代。
 - `ArcView` 负责只读 mmap，整数读取委托 `BinaryReader`。读前校验范围；无状态读取需先保证切片长度，越界返回 `UnexpectedEof`，不得 panic。大文件按需切片，不整文件读入内存再解析。
 - 长度、偏移、计数和解压结果按格式字段、索引关系及实际数据边界校验，不使用统一的“合理数量”或固定资源上限。大数据采用分块、流式或按需读取；嵌套和引用按格式遍历，依据实际引用关系处理循环，不靠固定深度拒绝合法结构。
 - 字节序和文本编码由格式决定，大端通过 `_be` 或 `Endian::Big` 明示。CP932/Shift-JIS 使用 `encoding_rs`；UTF-16LE 经 reader 读取码元后调用 `String::from_utf16`，不预设小端或 UTF-8。位流能力集中在 io。
 
-### 3.4 `crates/nvlens-core`
+### 3.4 `crates/vnlens-core`
 
 - 只定义 `Entry`、`Packed`、`ResourceKind`、错误、`ResourceOrigin`、`ResourceRoute`、`ArchiveRoute`、trait 和 `Catalog` 等抽象，不放具体格式或算法。`Catalog` 与各资源域统一按路由给出的明确格式 `tag` 定向调用唯一读取器/解码器，不按扩展名、签名或失败结果轮询其它格式；保持可测试、可注入，格式状态属于打开后的实例。
 - `Format` 按 `tag`、`signatures`、`extensions`、`description` 顺序显式实现。tag 唯一，扩展名小写且不带点；`SIGNATURES` 随识别入口放在引擎 `mod.rs` 或具体格式文件中，使用已核对的小端 `u32` 字面量，无固定签名用 `&[0]`。
 - 归档通过 `inventory` 和 `register_archive!` 注册，不维护手写格式列表。各资源域提供对应的解码 trait 与 inventory 注册，公开入口以 `*_as(tag, ...)` 按 `tag` 定向分派；`ResourceResolver` 只在格式请求时读取关联资源。
 
-### 3.5 `crates/nvlens-crypto`
+### 3.5 `crates/vnlens-crypto`
 
 - 按 `compress/`、`cipher/`、`hash/`、`checksum/` 组织。算法只处理字节和参数，不包含归档概念、不读文件、不依赖 bin；密钥由调用方传入。
 - 优先复用已有算法；zlib/deflate 使用 `flate2`，专有算法集中实现。字节 framing 仍走 io，不在格式模块复制算法。
 - 共享缓存只存不可变数据；并行读取使用独立游标，可变解密状态按实例或线程隔离。
 
-### 3.6 `crates/nvlens-bin`
+### 3.6 `crates/vnlens-bin`
 
-- 大型密钥块放入 `keys/<engine>/*.bin`，禁止 `include_bytes!`。路径常量放在 `nvlens_bin::keys::<engine>`，调用方统一使用 `nvlens_bin::load`，返回并缓存 `Arc<[u8]>`。
+- 大型密钥块放入 `keys/<engine>/*.bin`，禁止 `include_bytes!`。路径常量放在 `vnlens_bin::keys::<engine>`，调用方统一使用 `vnlens_bin::load`，返回并缓存 `Arc<[u8]>`。
 - `build.rs` 递归复制到产物同级 `bin/<engine>/`，保留目录层级，对目录和每个 key 发出 `cargo:rerun-if-changed`。
 - 支持外部密钥目录配置及相对可执行文件的资产加载。发布时携带 bin 目录，不依赖开发期源码路径；此 crate 不放解密或格式逻辑。
 - 短口令可用格式常量，小型 scheme 可用 JSON，字节数组用 hex。游戏参数属于引擎模块；用户选择通过 trait 交给宿主，库不读 stdin、不弹窗。
 - 密钥长度、编码和表结构遵循所属算法或格式，不设置全局大小限制。
 
-### 3.7 `crates/nvlens-archive`
+### 3.7 `crates/vnlens-archive`
 
 - 每个引擎一个 `src/<engine>/`，格式类型实现 `Format`、`ArchiveFormat`；格式声明与 `register_archive!` 可放在引擎 `mod.rs` 或具体格式文件中，每个格式只注册一次。新增格式同时接入模块声明和测试。
 - 挂载封包必须懒加载：只读取、解析索引及其必要元信息，保存条目的位置和读取参数；`ArchiveFormat::open()`、`entries()` 和列表展示不预读条目内容，也不批量解压、解密或解码资源。
@@ -87,7 +87,7 @@
 - Entry 的 offset/size 表示所在文件内的存储范围，压缩信息用 `Option<Packed>`，类型用 `ResourceKind`。索引、密钥和视图保存在 Archive 实例中，不用全局可变状态。
 - 原始切片返回 `Cow::Borrowed`，变换后返回 `Cow::Owned`。有独立原始数据路径时覆盖 `open_entry_raw()`，其默认实现委托 `open_entry()`。容器调用 audio/script 处理内嵌资源，不复制跨域解析。
 
-### 3.8 `crates/nvlens-{image,audio,script,video}`
+### 3.8 `crates/vnlens-{image,audio,script,video}`
 
 - 各资源域统一按 `ResourceRoute` 选定的 `tag` 定向调用对应格式实现（`*_as` / `open_source_as`），不提供无 `tag` 的全局轮询探测入口，也不在解码失败时回退尝试其它格式。
 - image：先读取元信息再解码像素；使用自有 Image/PixelBuffer 模型，通用与专有图像处理均在本域。导出保留图像偏移等格式元信息，不依赖 GUI 类型。
@@ -107,7 +107,7 @@
 ## 4. 取消、进度与错误
 
 - 长任务的取消和进度通过宿主 trait 或回调传入，阶段及循环边界响应取消；跳过项计入进度，取消返回 `Error::Cancelled`，不得按条目损坏继续处理。
-- 域库使用 `nvlens_core::Error` / `Result`；io、crypto、bin 保持依赖方向，不反向引用 core。引擎识别返回 `Ok(Some(_))` 表示识别完成、`Ok(None)` 表示未知引擎；封包与引擎内资源按路由 `tag` 定向打开或解码，失败必须返回错误，不把损坏或未命中作为尝试其它格式的信号。
+- 域库使用 `vnlens_core::Error` / `Result`；io、crypto、bin 保持依赖方向，不反向引用 core。引擎识别返回 `Ok(Some(_))` 表示识别完成、`Ok(None)` 表示未知引擎；封包与引擎内资源按路由 `tag` 定向打开或解码，失败必须返回错误，不把损坏或未命中作为尝试其它格式的信号。
 - 越界经 `Error::Io` 保留 `UnexpectedEof`；损坏用 `Corrupt { offset, reason }`，不支持用 `Unsupported`，未知密钥用 `UnknownScheme`。错误保留原因链及格式、条目、偏移上下文。
 - 日志和错误信息使用英文，库只用 `tracing`，最终错误由宿主展示一次；不输出密钥或大块二进制内容。
 
@@ -162,7 +162,7 @@ cargo test --all
 
 - 格式失败先运行 `cargo fmt --all`；Clippy 零告警、workspace 测试全部通过。新增格式同时确认注册和对应样本测试。
 - GUI 交互由用户自行测试。代理不主动启动或操作 GUI，不进行界面截图、点击、播放等交互验证；继续执行编译、静态检查、库层测试和不启动界面的数据处理测试。
-- 修改 key 复制、外部资产路径或 build script 后，追加 `cargo clean -p nvlens-bin`、`cargo test -p nvlens-bin`，确认产物同级 `bin/<engine>/*.bin` 层级与加载正常，不能只依赖源码 fallback。
+- 修改 key 复制、外部资产路径或 build script 后，追加 `cargo clean -p vnlens-bin`、`cargo test -p vnlens-bin`，确认产物同级 `bin/<engine>/*.bin` 层级与加载正常，不能只依赖源码 fallback。
 - 纯文档修改核对路径、命令和实现，执行 `git diff --check -- <修改的文档>`，无需运行 Rust 测试。未执行或失败的检查如实说明。
 
 ## 8. 文档与交付
@@ -170,6 +170,6 @@ cargo test --all
 - README 只写如何构建和支持的格式，不写使用方法或增加其它章节；构建方式和支持范围变化时同步更新，不把规划写成现有能力。
 - README 支持列表按“引擎”和“中间件”分表，列固定为 `封包`、`音频`、`图片`、`脚本`、`视频`，不支持填 `—`；单元格只列格式标识，不写编码说明、容器说明、转换箭头或括号注释。有扩展名的格式写小写 `.ext`；无扩展名的按文件头魔术字写，可解码为 ASCII 文本的写 `head("...")`（控制字符用转义表示），二进制魔术字写小写 `hex("...")`；由 FFmpeg 通用解码的视频容器写 `<ffmpeg>`，引擎专有视频格式或专有扩展名单独列出。
 - 保留已有未提交改动，不执行丢弃或隐藏它们的 checkout/restore/reset/stash/clean；未经明确要求不提交或推送。
-- 不提交 target、测试输出、提取结果和受限样本。源 key 放 `crates/nvlens-bin/keys/`，发布 bin 为构建产物；外部代码和数据保留必要许可证与署名。
+- 不提交 target、测试输出、提取结果和受限样本。源 key 放 `crates/vnlens-bin/keys/`，发布 bin 为构建产物；外部代码和数据保留必要许可证与署名。
 - 提交使用 `type(scope): summary`，scope 为 crate 或引擎，summary 用英文祈使句；一个提交聚焦单一改动，一个 PR 聚焦一个引擎或一组相关格式。
 - 交付说明变更内容、验证结果和未完成检查；新增依赖、MSRV 或资产布局变化写明理由。

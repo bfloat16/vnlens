@@ -1,8 +1,8 @@
 [alias]
-# Downloads and verifies the pinned FFmpeg build used by nvlens-video.
-ffmpeg = "run --quiet -p nvlens-xtask -- ffmpeg"
+# Downloads and verifies the pinned FFmpeg build used by vnlens-video.
+ffmpeg = "run --quiet -p vnlens-xtask -- ffmpeg"
 
 [env]
 # Read by ffmpeg-sys-next. An FFMPEG_DIR already set in the environment wins.
-# Must match `DIR` in crates/nvlens-xtask/src/ffmpeg.rs.
+# Must match `DIR` in crates/vnlens-xtask/src/ffmpeg.rs.
 FFMPEG_DIR = { value = "target/ffmpeg/9.0", relative = true }

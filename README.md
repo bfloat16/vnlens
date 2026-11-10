@@ -1,4 +1,4 @@
-# nvlens
+# vnlens
 
 ## 构建
 
@@ -9,7 +9,7 @@ cargo ffmpeg
 cargo build --release
 ```
 
-程序位于 `target/release/nvlens.exe`。分发时一并携带 `THIRD_PARTY_NOTICES.md`、`target/release/` 下的 FFmpeg DLL 和 `target/release/bin/`，保留其中引擎目录与密钥文件。
+程序位于 `target/release/vnlens.exe`。分发时一并携带 `THIRD_PARTY_NOTICES.md`、`target/release/` 下的 FFmpeg DLL 和 `target/release/bin/`，保留其中引擎目录与密钥文件。
 
 Enigma section 解密与内嵌 EVB 读取使用 `enigma_rs` 的恢复逻辑，默认构建包含 CPU 和 wgpu salt 搜索后端；wgpu 不可用时使用 CPU。wgpu 后端通过固定版本 CubeCL 0.10.0 构建，无需 CUDA Toolkit。分发时同时携带 `licenses/`。
 

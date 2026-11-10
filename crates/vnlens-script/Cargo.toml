@@ -1,0 +1,21 @@
+[package]
+name = "vnlens-script"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+autotests = false
+
+[dependencies]
+vnlens-core.workspace = true
+vnlens-crypto.workspace = true
+vnlens-io.workspace = true
+encoding_rs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+
+[lints]
+workspace = true

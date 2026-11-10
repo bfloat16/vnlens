@@ -1,22 +1,22 @@
-# nvlens is a virtual workspace; see crates/ for the member crates.
+# vnlens is a virtual workspace; see crates/ for the member crates.
 [workspace]
 resolver = "3"
 members = [
-    "crates/nvlens-io",
-    "crates/nvlens-core",
-    "crates/nvlens-crypto",
-    "crates/nvlens-bin",
-    "crates/nvlens-unpack",
-    "crates/nvlens-engine",
-    "crates/nvlens-archive",
-    "crates/nvlens-image",
-    "crates/nvlens-audio",
-    "crates/nvlens-script",
-    "crates/nvlens-video",
-    "crates/nvlens-gui",
-    "crates/nvlens-xtask",
+    "crates/vnlens-io",
+    "crates/vnlens-core",
+    "crates/vnlens-crypto",
+    "crates/vnlens-bin",
+    "crates/vnlens-unpack",
+    "crates/vnlens-engine",
+    "crates/vnlens-archive",
+    "crates/vnlens-image",
+    "crates/vnlens-audio",
+    "crates/vnlens-script",
+    "crates/vnlens-video",
+    "crates/vnlens-gui",
+    "crates/vnlens-xtask",
 ]
-default-members = ["crates/nvlens-gui"]
+default-members = ["crates/vnlens-gui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -26,17 +26,17 @@ license = "MIT"
 
 # Unified dependency versions; crates reference them with `dep.workspace = true`.
 [workspace.dependencies]
-nvlens-io = { path = "crates/nvlens-io" }
-nvlens-core = { path = "crates/nvlens-core" }
-nvlens-crypto = { path = "crates/nvlens-crypto" }
-nvlens-bin = { path = "crates/nvlens-bin" }
-nvlens-unpack = { path = "crates/nvlens-unpack" }
-nvlens-engine = { path = "crates/nvlens-engine" }
-nvlens-archive = { path = "crates/nvlens-archive" }
-nvlens-image = { path = "crates/nvlens-image" }
-nvlens-audio = { path = "crates/nvlens-audio" }
-nvlens-script = { path = "crates/nvlens-script" }
-nvlens-video = { path = "crates/nvlens-video" }
+vnlens-io = { path = "crates/vnlens-io" }
+vnlens-core = { path = "crates/vnlens-core" }
+vnlens-crypto = { path = "crates/vnlens-crypto" }
+vnlens-bin = { path = "crates/vnlens-bin" }
+vnlens-unpack = { path = "crates/vnlens-unpack" }
+vnlens-engine = { path = "crates/vnlens-engine" }
+vnlens-archive = { path = "crates/vnlens-archive" }
+vnlens-image = { path = "crates/vnlens-image" }
+vnlens-audio = { path = "crates/vnlens-audio" }
+vnlens-script = { path = "crates/vnlens-script" }
+vnlens-video = { path = "crates/vnlens-video" }
 
 
 memmap2 = "0.9"
