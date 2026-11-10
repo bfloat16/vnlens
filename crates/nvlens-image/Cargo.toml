@@ -7,10 +7,12 @@ license.workspace = true
 autotests = false
 
 [dependencies]
+encoding_rs.workspace = true
 nvlens-core.workspace = true
 nvlens-crypto.workspace = true
 nvlens-io.workspace = true
 image.workspace = true
+texture2ddecoder.workspace = true
 
 [lints]
 workspace = true

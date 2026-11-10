@@ -4,6 +4,8 @@
 #![deny(unsafe_code)]
 
 mod bgi;
+mod csystem;
+mod dds;
 mod exhibit;
 mod format;
 mod krkr;
@@ -11,13 +13,16 @@ mod model;
 mod propeller;
 mod rugp;
 mod siglus;
+mod softpal;
 mod standard;
 mod systemnnn;
+mod tga;
 mod will;
 mod yuris;
 
 pub use format::{
-    ImageFormat, ImageRegistration, decode_as, decode_frame_as, frame_count_as, metadata_as,
+    ImageFormat, ImageRegistration, decode_as, decode_frame_as, decode_with_resources_as,
+    frame_count_as, metadata_as,
 };
 pub use model::{Image, ImageMeta, OffsetUnit, PixelBuffer, swap_red_blue};
 

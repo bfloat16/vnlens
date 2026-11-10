@@ -1,10 +1,18 @@
 //! Image registration and two-stage metadata/pixel decoding.
 use crate::{Image, ImageMeta};
-use nvlens_core::{Error, Format, Result};
+use nvlens_core::{Error, Format, ResourceResolver, Result};
 
 pub trait ImageFormat: Format {
     fn metadata(&self, data: &[u8]) -> Result<Option<ImageMeta>>;
     fn decode(&self, data: &[u8]) -> Result<Image>;
+    /// Resolves referenced base images only when the selected image needs them.
+    fn decode_with_resources(
+        &self,
+        data: &[u8],
+        _resources: Option<&dyn ResourceResolver>,
+    ) -> Result<Image> {
+        self.decode_frame(data, 0)
+    }
     /// Counts frames from container metadata without decoding all pixels.
     fn frame_count(&self, _data: &[u8]) -> Result<usize> {
         Ok(1)
@@ -41,6 +49,13 @@ pub fn metadata_as(tag: &str, data: &[u8]) -> Result<Option<ImageMeta>> {
 }
 pub fn decode_as(tag: &str, data: &[u8]) -> Result<Image> {
     decode_frame_as(tag, data, 0)
+}
+pub fn decode_with_resources_as(
+    tag: &str,
+    data: &[u8],
+    resources: Option<&dyn ResourceResolver>,
+) -> Result<Image> {
+    selected(tag)?.decode_with_resources(data, resources)
 }
 pub fn frame_count_as(tag: &str, data: &[u8]) -> Result<usize> {
     selected(tag)?.frame_count(data)
