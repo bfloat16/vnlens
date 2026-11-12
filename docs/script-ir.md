@@ -1,6 +1,8 @@
 # 脚本 IR 规范（v5）
 
-所有视觉小说引擎共用统一的封闭枚举词汇表：`Operation`（操作码）、`Qualifier`（语义限定符）与 `ArgName`（参数名），不接受自定义语义字符串或引擎前缀命名。Lua 字节码作为显式原生方言使用 `Operation::Native` 与封闭枚举 `NativeArg`，复用同一指令与参数结构。
+引擎私有字节码共用统一的封闭枚举词汇表：`Operation`（操作码）、`Qualifier`（语义限定符）与 `ArgName`（参数名），不接受自定义语义字符串或引擎前缀命名。PSB 继续遵循项目既有的结构化模型和解析约束。Lua、Squirrel 等有公开规范的开源 VM 不受通用 IR 封闭词汇限制：保留原生指令集、助记符、参数名及类型，使用 `Operation::Native`、`NativeArg::Named` 等开放入口复用展示与导出容器，不强制进行通用语义映射。
+
+共享模型定义于 `vnlens_core::ir`，`vnlens_script::ir` 继续导出同一组类型。PSB、MDF/MZS、Lua、Squirrel 的模型和解析实现在 `vnlens-middleware`。PSB 经归档域打开，保留完整元数据和全部资源；脚本域只消费已解析的场景元数据，不负责 PSB 的封装或字节解析。Lua、Squirrel 由脚本域适配注册与展示。
 
 ## 0. 数据模型
 
@@ -8,7 +10,7 @@
 | --- | --- | --- |
 | `opcode` | `{category, operation, variant?}` | `Operation`（决定 `category`）与可选 `Qualifier` |
 | `opcode.namespace` / `code` | `String` / `u32` | 原生指令命名空间与数值操作码 |
-| `opcode.native_mnemonic` | `Option<String>` | 原生助记符；`Operation::Native`（Lua）用于展示标准指令名 |
+| `opcode.native_mnemonic` | `Option<String>` | 原生助记符；`Operation::Native`（Lua、Squirrel 等）直接展示原生指令名 |
 | `args` | `Vec<Arg>` | 指令、表达式 `Token` 与内嵌命令共用的有序参数列表 |
 | `Arg.category` / `name` | `Category` / `&'static str` | 由 `ArgName` 唯一推导的分类与标准参数名 |
 | `Arg.index` | `Option<u64>` | 索引化参数的原始序号（序列化为 `name[index]`，如 `value[0]`、`unknown[2]`） |
@@ -35,18 +37,17 @@
 
 1. **分类正交**：`ArgName.category()` 与指令的 `Operation.category()` 相互独立，指令可按语义跨分类复用 `ArgName`（如音频指令使用 `Basic` 类的 `duration`，分支指令使用 `Storage` 类的 `variable_id`）。
 2. **无损保真**：原样保留数值单位（引擎帧/时钟 vs 秒）、数值表示（整数 vs 浮点）、寻址坐标系（字节偏移 vs 指令序号）及隐式栈约定；单条原生指令不拆分为多条假定顺序执行的 IR 指令。隐式栈实参通过零长度（`size = 0`）`Expression`（`get_argument` / `get_argument_count` / `get_arguments`，`variant = stack_argument`）标明运行期取栈位置，原始压栈、类型转换与调用指令仍按原顺序保留；各参数表列出的常量类型均允许替换为运行期取栈或求值 `Expression`。
-3. **封闭完备**：已验证语义映射为具名枚举项；引擎专属机制映射为 `engine_call`；未验证操作码映射为 `unknown`，未验证参数映射为 `unknown[index]`；未知变长结构若无法确定后续指令边界则直接返回解析错误。
-4. **按需伴随解析**：纯文本脚本（如 Escu:de `.c`/`.h`/`.inc` 伪 C 源码）直接走文本解码通道，而二进制场景与结构化资源（`@code:__`、`@mess:__`、`mdb\0`、`LSF\0`、`MOT\0`/`mot\0`、`.sfx`）生成 IR。跨文件过程表与消息表（如 Escu:de `INST_PROC` 按需读取宿主 `adv/adv.c` 注册表并校验实现词法 token 指纹，消息索引按需解析同名 `.001`）仅在词法指纹与 ABI 匹配时附加零长度派生语义字段（`procedure_id`、`arguments`、`message`），动态参数序列保留符号化 `get_arguments` 而不按运行期计数预分配条目。
-5. **序列化指令**：rUGP `CRsa` 的指令由 `CVm*` 类标识。`opcode.code` 保留原始类标签，`native_mnemonic` 保留类名或宿主消息名；类表版本存入 `schema` 属性。宿主 `OM_`／`ONM_` 参数布局由 engine 从当前游戏 PE 的类型描述符及 iced-x86 解码的初始化赋值解析，参数原名放在 `native_name`。原生运行时对象偏移保持整数，不冒充文件字节地址；外部对象地址、长度和资源名使用 `Group`。调用、分支、赋值、文本、图像、音频与过渡指令使用统一操作码；专有消息保留 `engine_call`。解密后的指令流作为独立 section，原始封包字节通过原始提取保留；未知变长对象不能猜测后续指令边界。资源分类中的配置数据、字体与可执行脚本分别保留其类型；是否拥有子资源不改变载荷类型。空引用对象在访问确认后作为叶节点，不能宣称有下一层。序列化配置对象按真实字段生成 `record`，集合、字形及动画帧逐行使用 `Group`；外部引用和内嵌资源按访问需要展开；子索引保留直接父子关系，外部引用定位链中的祖先仅用于恢复对象表，不作为当前对象的同级资源。`CRsi` 帧偏移由完整帧表末尾换算为 `data_address`，压缩载荷保留在 section，不能伪装为指令。类序列化方法明确不读取的存储尾部以 `padding` 保留，未识别的字段或布局仍保持 `unknown` 或原始数据，不能用填充掩盖解析缺口。
+3. **封闭完备**：引擎私有字节码的已验证语义映射为具名枚举项；引擎专属机制映射为 `engine_call`；未验证操作码映射为 `unknown`，未验证参数映射为 `unknown[index]`。有公开规范的开源 VM 可直接保留原生操作与参数词汇；PSB 不适用此例外。未知变长结构若无法确定后续指令边界则直接返回解析错误。
+4. **按需伴随解析**：纯文本脚本（如 Escu:de `.c`/`.h`/`.inc` 伪 C 源码）直接走文本解码通道，二进制场景与结构化资源生成 IR。跨文件过程表、消息表或类描述符仅在签名/词法指纹与 ABI 匹配时按需关联，并附加零长度派生语义字段（如 `procedure_id`、`arguments`、`message`），动态参数序列保留符号化 `get_arguments` 而不按运行期计数预分配条目。
+5. **结构化与对象化指令**：以序列化对象或表记录组织的脚本（如 rUGP `CRsa`、TJS2 代码对象表）保留原始类标签或对象编号于 `opcode.code` / `record.script_metadata`，助记符保留原生类名、消息名或 VM 助记符。运行时对象偏移保持整数，不冒充文件字节地址；代码区相对偏移换算为资源内绝对 `code_address` 或 `data_address` 并校验边界。类序列化明确不读取的尾部字节以 `padding` 保留，未识别字段或变长结构保持 `unknown` 或直接报错，不用填充掩盖解析缺口。
 
 ---
-
-Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目标偏移由代码区起点换算为 `code_address`，原始标签 ID 保持一基编号。数值操作数的类型字节保留于属性，变量读取与随机取值使用 `Expression`，有符号字常量保持 `Integer`。原生指令身份由 `propeller.msc` 和 `group * 256 + opcode` 保存；只有元数据表使用 `record`，专有宿主配置使用 `engine_call`，无法确定参数边界的指令返回错误。
 
 ## 1. 基础运算与通用参数（`basic`）
 
 | `operation` | 语义 | 约束与限定（`variant` / 引擎语义） |
 | --- | --- | --- |
+| `evaluate` | 对表达式求值 | 原表达式可包含读写副作用；不将整个表达式预先归类为赋值 |
 | `add` | 加法 | 操作数类型与溢出语义由源 VM 定义 |
 | `subtract` | 减法 | 保持源指令的左右操作数顺序 |
 | `multiply` | 乘法 | 操作数类型与溢出语义由源 VM 定义 |
@@ -63,6 +64,8 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `convert` | 类型转换 | 目标类型由 `variant`（如 `integer`、`float32`、`float64`、`text`、`number`）标识 |
 | `concatenate` | 序列拼接 | 字符串或值序列拼接，转换规则由源 VM 定义 |
 | `type_of` | 查询值类型 | 保留源 VM 类型编号 |
+| `character_code` / `character_from_code` | 字符与字符编码数值转换 | TJS 按 UTF-16 码元处理，保留空串、零值及截断到码元宽度的原 VM 规则 |
+| `is_valid` | 检查对象有效性 | 结果写回原位；非对象值的判断规则由源 VM 定义 |
 | `absolute` | 绝对值 | 数值类型及溢出语义由源 VM 定义 |
 | `minimum` / `maximum` | 最小／最大值 | 支持隐式栈上的多值参数 |
 | `random` | 生成随机值 | 范围、端点和结果类型由原调用约定决定 |
@@ -87,6 +90,8 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `byte_count` | 字节长度 | `Integer` / `Unsigned` | 后随内联数据的字节数（如 BGI compact `write_bytes`） |
 | `mode` | 原生模式码 | `Integer` / `Unsigned` | 指令子模式（如 BGI 访存位宽选择或压栈模式） |
 | `flags` | 控制标志位 | `Integer` / `Unsigned` | 原生位域（如 BGI compact `branch` 条件与寻址位） |
+| `mask` | 位掩码或由模式限定的掩码索引 | `Unsigned` / `Expression` | 保留原值及所属模式，不预先展开映射 |
+| `precedence` | 表达式规约优先级 | `Unsigned` | 保留源 VM 优先级，与图像显示 `priority` 分开 |
 | `duration` | 持续时长 | `Integer` / `Unsigned` | 保持源引擎计时单位（帧或时钟刻度） |
 
 ---
@@ -99,9 +104,11 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `pop` | 出栈 | 按源 VM 规则弹出对应类型栈顶元素（`variant` 可取 `many`、`return_value` 等） |
 | `duplicate` | 复制栈顶元素 | 复制单值或引用元组 |
 | `declare` | 声明变量或数组 | 维度可由字面参数或求值栈提供 |
-| `load` | 读取存储单元 | 地址可隐式取自栈，或由 `sigil` + `variable_id` 显式指定 |
-| `store` | 写入存储单元 | 复合赋值通过 `variant`（`add_assign`、`bit_or_assign` 等）标识读改写语义 |
-| `reference` | 构造存储引用 | 生成左值/引用句柄，不执行解引用求值 |
+| `load` | 读取存储单元 | 地址可隐式取自栈，或由 `sigil` + `variable_id` 显式指定；`global` 读取全局对象，`flag` 读取条件或脚本标志 |
+| `store` | 写入存储单元 | 复合赋值通过 `variant`（`add_assign`、`bit_or_assign`、`shift_left_assign`、`shift_right_assign`、`return_value` 等）标识读改写或返回值写入语义 |
+| `reference` | 构造存储引用 | 生成左值/引用句柄（如 `flag`、`property`、`variable`），不执行解引用求值 |
+| `invalidate` | 使对象失效 | 可将操作的布尔结果写回原位 |
+| `bind_context` | 绑定闭包上下文对象 | 修改 `destination` 所指闭包的 this 对象，`source` 为新上下文 |
 | `get_stack_pointer` | 读取栈指针并压栈 | 栈指针单位与目标栈由源 VM 定义 |
 | `set_stack_pointer` | 将栈顶值写入栈指针 | 直接覆写栈指针寄存器 |
 | `adjust_stack_pointer` | 相对调整栈指针 | 按有符号偏移增减栈指针 |
@@ -120,6 +127,8 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `source` | 读取来源 | `Value` / `Group` | 读取源位置或源操作数 |
 | `variable` | 声明目标变量 | `Expression` | 变量声明指令的目标表达式 |
 | `variable_id` | 变量表编号 | `Unsigned` / `Integer` | 配合 `sigil` 唯一定位变量槽位 |
+| `flag_id` | 标志位编号 | `Unsigned` / `Integer` / `Expression` | 脚本标志表或状态位索引 |
+| `context_id` | 执行上下文编号 | `Unsigned` / `Integer` / `Expression` | 线程、纤程或子上下文槽位标识 |
 | `initial_value` | 初始值 | `Integer` / `Float64Bits` / `Expression` | 声明或表的静态初始值 |
 | `sigil` | 变量域前缀符 | `Text` | 源格式变量前缀字符（如 `$`、`#`、`@`） |
 | `local_offset` | 局部栈帧字节偏移 | `Integer` / `Unsigned` | 相对当前栈帧基址的偏移量 |
@@ -133,7 +142,13 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `upvalue` | 闭包上值槽号 | `Integer` / `Unsigned` | 函数 upvalue 下标 |
 | `function_index` | 子函数原型下标 | `Integer` / `Unsigned` | 当前函数原型表中的子函数索引 |
 | `constant_index` | 常量池下标 | `Integer` / `Unsigned` | 当前函数常量池索引（附带解析值使用 `size = 0`） |
+| `string_index` | 内嵌字符串表下标 | `Integer` / `Unsigned` / `Expression` | 脚本内嵌字符串表索引（区别于运行期 `text_id`） |
 | `scope` | 作用域编码 | `Integer` / `Unsigned` | 源格式变量作用域枚举值 |
+| `parent_index` | 父对象编号 | `Integer` | TJS 负值表示无父对象 |
+| `reserve_count` | 保留槽位数量 | `Integer` / `Unsigned` | TJS 对象头的变量保留槽数量 |
+| `maximum_register_index` | 临时寄存器索引上界 | `Integer` / `Unsigned` | TJS 的 `MaxFrameCount`；寄存器 0 另占一个槽 |
+| `argument_base` / `collapse_base` | 调用帧展开参数起点 | `Integer` | 分别保存未命名参数展开起点与具名收集参数槽，保留负值哨兵 |
+| `setter_index` / `getter_index` / `super_class_getter_index` | 属性及基类求值对象编号 | `Integer` | TJS 对象表内引用，保留无引用的负值 |
 | `storage` | 存储类别编码 | `Integer` / `Unsigned` | 源格式存储类别枚举值 |
 | `dimensions` | 数组维度数 | `Integer` / `Unsigned` | 后随 `dimension[index]` 的数量 |
 | `initial_length` | 初始值编码长度 | `Integer` / `Unsigned` | 初始化数据在源文件中的编码长度 |
@@ -151,6 +166,7 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `greater` | 大于比较（`>`） | 有符号/无符号语义由源 VM 定义 |
 | `less_equal` | 小于等于（`<=`） | 有符号/无符号语义由源 VM 定义 |
 | `greater_equal` | 大于等于（`>=`） | 有符号/无符号语义由源 VM 定义 |
+| `instance_of` | 检查对象类型或继承关系 | TJS 将 `destination` 原值与 `right` 类名比较，结果写回原位，不写条件旗标 |
 | `logical_and` | 逻辑与 | 布尔求值（不隐含短路控制流） |
 | `logical_or` | 逻辑或 | 布尔求值（不隐含短路控制流） |
 | `logical_xor` | 逻辑异或 | 布尔真值异或（区别于 `bit_xor`） |
@@ -207,6 +223,10 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `clear_text` | 清空消息窗口文本 | 保留原生过渡与等待控制参数 |
 | `wait_text` | 等待消息继续 | 按原格式执行消息完成与翻页等待 |
 | `configure_text` | 配置消息显示状态 | 更新后续文本输出模式或窗口状态，不触发文本输出 |
+| `text_line_break` | 文本换行控制 | 保留为控制 token，不替换原始字节 |
+| `begin_text_span` / `end_text_span` | 开始 / 结束带语义的字形段 | `speaker` 为姓名段，`ruby` 为旁注段；不推断 Unicode 字符 |
+| `end_text` | 消息终止 | 不等同于停止脚本 VM 的 `halt` |
+| `append_text_history` | 追加历史文本记录 | 不隐含显示新消息或等待输入 |
 
 | `ArgName` | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
@@ -214,7 +234,13 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `text_id` | 文本运行期标识 | `Unsigned` / `Integer` | 消息或台词流水号（不等同于字符串池下标） |
 | `message_index` | 消息表下标 | `Unsigned` / `Integer` | 当前场景对应的消息表索引 |
 | `speaker_id` | 发言者编号 | `Unsigned` / `Integer` | 角色表下标，保留无名角色等特殊编码 |
-| `message` | 提示、台词或错误消息 | `Text` / `Bytes` / `Group` | 伴随资源解析结果使用包含 `resource` 与 `text` 的零长度 `Group` |
+| `message` | 提示、台词或错误消息 | `Text` / `Bytes` / `Group` / `Expression` | 伴随资源解析结果使用含 `resource` 与 `text` 的零长度 `Group`；内联控制码与字形序列使用 `Expression` |
+| `voice_id` | 原生语音资源编号或复合编码 | `Unsigned` / `Expression` | 高位携带的数量或标志保留在原值中 |
+| `voice_speaker_id` | 语音角色编号 | `Unsigned` / `Expression` | 与显示用 `speaker_id` 分开，不默认相等 |
+| `glyph_id` | 字体内字形编号 | `Unsigned` | 不冒充 Unicode 码点 |
+| `character_set` | 原生字符集选择 | `Unsigned` | 如数字输出使用的字形集合 |
+| `alignment` | 排版对齐方式 | `Unsigned` | 派生值使用零长度 span；0 左、1 中、2 右 |
+| `style_id` | 文本样式编号 | `Unsigned` / `Expression` | 保留源样式表索引 |
 | `title` | 窗口或章节标题 | `Text` / `Bytes` | 标题文本内容 |
 | `title_length` | 标题编码长度 | `Integer` / `Unsigned` | 源格式记录的标题长度字段 |
 
@@ -331,6 +357,9 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `source_file` | 源文件名 | `Text` / `Bytes` | 调试信息记录的源文件名 |
 | `source_line` | 源码行号 | `Integer` / `Unsigned` | 调试信息记录的源码行号 |
 | `source_path` | 源文件路径 | `Text` / `Bytes` | 调试信息记录的完整源路径 |
+| `source_map` | 代码到源码位置映射 | `Group` | 有序 `row[index]`，保留重复的代码位置 |
+| `source_offset` | 原生源码位置 | `Integer` / `Unsigned` | TJS 的 UTF-16 码元位置，不换算为行号 |
+| `properties` | 对象属性注册表 | `Group` | TJS 表项保存字符串编号、解析名称及待注册到父对象的对象编号 |
 | `path` | 对象或函数层级路径 | `Text` | 如 PSB/Lua 对象路径 |
 | `constants` | 常量表 | `Group` | 聚合 `constant[index]` 子项 |
 | `messages` | 消息表描述符 | `Group` | 消息表元信息与条目集合 |
@@ -351,7 +380,7 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 | `type` | 原生类型标记 | `Integer` / `Unsigned` | 格式定义的数据类型码 |
 | `metadata` | 附加元数据值 | 任意 `Value` | 格式头部或表项附带的未归类元数据 |
 | `procedure_id` | 宿主过程表编号 | `Unsigned` | 独立于原指令 opcode，原生名称保留于 `native_name`，已解析过程名同时作为 `opcode.native_mnemonic` |
-| `code` | 原生记录码或表项码 | `Integer` / `Unsigned` | 数据记录内部的原生编码值 |
+| `code` | 原生记录码或代码区描述 | `Integer` / `Unsigned` / `Group` | 数值记录码，或包含字数 `count` 和代码起点的描述组 |
 | `command` | 内嵌命令表达式 | `Expression` | 嵌套在记录或选项中的命令 `Token` |
 | `command_count` | 命令定义总数 | `Integer` / `Unsigned` | 命令表条目数 |
 | `error_count` | 错误定义总数 | `Integer` / `Unsigned` | 错误表条目数 |
@@ -397,12 +426,14 @@ Propeller Stuff 的 MSC 保留本地及导出标签表中的重复记录；目�
 
 ---
 
-## 12. 原生字节码方言（`native` — Lua）
+## 12. 开源 VM 的原生字节码（`native`）
 
 | `operation` | 语义 | 约束与限定 |
 | --- | --- | --- |
-| `native` | 原生指令集透传模式 | 当前专用于 Lua 5.0–5.5；指令名存于 `opcode.native_mnemonic`（如 `MOVE`、`LOADK`、`IDIV`、`TAILCALL`、`CLOSE`，未知操作码格式为 `OP_<HEX>`） |
+| `native` | 原生指令集透传模式 | Lua 5.0–5.5、Squirrel 2.2.4 等按已实现的 VM 版本解码；指令名存于 `opcode.native_mnemonic`，不受通用 `Operation` 词表限制，未知操作码展示为 `OP_<HEX>` |
 
 | `ArgName`（`NativeArg`） | 语义 | `Value` 类型 | 编码与用法说明 |
 | --- | --- | --- | --- |
 | `A`, `B`, `C`, `k`, `vB`, `vC`, `sJ`, `Ax`, `Bx`, `sBx`, `sB`, `sC` | Lua 5.0–5.5 指令位域操作数 | `Integer` / `Unsigned` / `Group` | 按对应 Lua 版本的指令格式解码；关联常量、寄存器、upvalue、子函数或跳转目标封装于 `Group`；`EXTRAARG`、闭包伪指令与无 opcode 扩展字（`.word`）均按原始顺序保留，函数原型头使用 `record`（`variant = function`） |
+| `arg0`、`arg1`、`arg2`、`arg3` | Squirrel 原生指令字段 | `Integer` / `Unsigned` | 保留原生字段顺序及其字节区间；常量与分支目标可附加解析值 |
+| `NativeArg::Named(name)` | 开放的原生 VM 参数名 | 任意 `Value` | 名称来自原生指令格式，不受上述字段示例或通用 `ArgName` 词表限制；需要时可扩展原生模型，不得改写 VM 语义以适配容器 |

@@ -54,30 +54,40 @@
 
 | 类型 | 格式 |
 | --- | --- |
-| 封包 | `.psb`、`.m`、`.bin` |
+| 封包 | `.psb`、`.m`、`.bin`、`.mdf`、`.mzs`、`.psz` |
 | 音频 | `.xwma` |
 | 图片 | `.dds` |
-| 脚本 | `.nut`、`.scn`、`.ks`、`.psb` |
+| 脚本 | `.nut`、`.scn`、`.ks` |
 | 视频 | `.webm`、`<ffmpeg>` |
 
 ## KiriKiriZ
 
 | 类型 | 格式 |
 | --- | --- |
-| 封包 | `.xp3` |
+| 封包 | `.xp3`、`.psb`、`.m`、`.mdf`、`.mzs`、`.psz`、`.scn` |
 | 音频 | `.ogg`、`.opus` |
-| 图片 | `.png`、`.tlg`、`.tlg5`、`.tlg6` |
-| 脚本 | `.tjs`、`.ks`、`.scn`、`.asd` |
+| 图片 | `.png`、`.tlg`、`.tlg5`、`.tlg6`、`.pimg` |
+| 脚本 | `.tjs`、`.ks`、`.asd` |
 | 视频 | `<ffmpeg>` |
 
 ## KiriKiriZ_hxv4
 
 | 类型 | 格式 |
 | --- | --- |
-| 封包 | `.xp3` |
+| 封包 | `.xp3`、`.psb`、`.m`、`.mdf`、`.mzs`、`.psz`、`.scn` |
 | 音频 | `.ogg`、`.opus` |
-| 图片 | `.png`、`.tlg`、`.tlg5`、`.tlg6` |
-| 脚本 | `.tjs`、`.ks`、`.scn`、`.psb`、`.m` |
+| 图片 | `.png`、`.tlg`、`.tlg5`、`.tlg6`、`.pimg` |
+| 脚本 | `.tjs`、`.ks` |
+| 视频 | `<ffmpeg>` |
+
+## MAGES Engine
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.mpk` |
+| 音频 | `.ogg`、`.wav` |
+| 图片 | `.png`、`.webp`、`.dds` |
+| 脚本 | `.scx`、`.msb` |
 | 视频 | `<ffmpeg>` |
 
 ## Propeller
@@ -89,6 +99,16 @@
 | 图片 | `.mgr` |
 | 脚本 | `.msc` |
 | 视频 | `.mpk` |
+
+## RealLive
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.txt`、`.ovk`、`.nwk` |
+| 音频 | `.nwa`、`.ogg`、`.wav` |
+| 图片 | `.g00`、`.pdt` |
+| 脚本 | `.txt`、`.ini`、`.gan` |
+| 视频 | `<ffmpeg>` |
 
 ## rUGP
 
@@ -146,17 +166,17 @@
 | --- | --- |
 | 封包 | `.ypf` |
 | 音频 | `.ogg`、`.wav` |
-| 图片 | `.ycg`、`.png` |
-| 脚本 | `.ybn` |
+| 图片 | `.ycg`、`.png`、`.jpg`、`.webp` |
+| 脚本 | `.ybn`、`.txt` |
 | 视频 | `.ymv`、`<ffmpeg>` |
 
 # 中间件
 
-## E-mote / M2
+## PSB / E-mote / M2
 
 | 类型 | 格式 |
 | --- | --- |
-| 封包 | `.psb`、`.mdf`、`.m`、`.bin`、`head("mzs\0")` |
+| 封包 | `.psb`、`.mdf`、`.mzs`、`.psz`、`.m`、`.bin`、`.pimg`、`.mmo`、`.emtbytes`、`.mtn`、`.dpak` |
 | 音频 | `.xwma` |
 | 图片 | `.dds` |
 | 脚本 | — |
