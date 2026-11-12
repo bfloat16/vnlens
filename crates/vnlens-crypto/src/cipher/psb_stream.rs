@@ -48,6 +48,20 @@ impl PsbStream {
         }
     }
 
+    /// Advances by decoded bytes without reading or retaining the input.
+    /// A zero high byte ends a native stream word early, just as in `apply`.
+    pub fn skip(&mut self, mut count: u64) {
+        while count != 0 {
+            if self.current == 0 {
+                self.next_word();
+            }
+            let available = (32 - self.current.leading_zeros()).div_ceil(8);
+            let take = count.min(u64::from(available));
+            self.current = self.current.checked_shr(take as u32 * 8).unwrap_or(0);
+            count -= take;
+        }
+    }
+
     fn next_word(&mut self) {
         let a = self.key1 ^ self.key1.wrapping_shl(11);
         let b = self.key4;

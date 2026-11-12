@@ -9,6 +9,7 @@ pub mod enigma;
 pub mod exhibit;
 pub mod lzf;
 pub mod lzss;
+pub mod pdt;
 pub mod rugp;
 pub mod siglus;
 pub mod softpal;
