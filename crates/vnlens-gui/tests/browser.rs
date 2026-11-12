@@ -257,6 +257,317 @@ fn preview_and_export_share_the_selected_image_and_audio_routes() -> Result<()> 
 }
 
 #[test]
+fn psb_navigation_and_pimg_preview_follow_the_host_route() -> Result<()> {
+    vnlens_archive::init();
+    let dir = temp();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let host = Arc::new(
+        vnlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?,
+    );
+    let mut game = (*host).clone();
+    game.engine = vnlens_engine::Engine::Krkr;
+    let game = Arc::new(game);
+    for name in ["map.pimg", "00001"] {
+        let path = dir.0.join("ui.arc");
+        // A prefix is sufficient to route access; preview must not parse the
+        // PSB index or synthesize a root-object view before navigation.
+        fs::write(&path, fixture(name, b"PSB\0"))?;
+        let mut archive = MountedArchive::open(path, false, host.clone())?
+            .ok_or_else(|| anyhow!("Missing fixture archive"))?;
+        archive.game = game.clone();
+        let mut item = Folder::archive(Arc::new(archive), 0).items.remove(0);
+        if name == "map.pimg" {
+            assert!(item.container);
+            assert!(!item.can_preview());
+            item.set_compose_pimg(true);
+            assert!(!item.container);
+            assert!(item.can_preview());
+            assert_eq!(
+                item.target.resource_route(b"PSB\0")?,
+                ResourceRoute::Image("pimg/krkr")
+            );
+            assert!(open(&item.target, &cancel, false)?.is_none());
+            item.set_compose_pimg(false);
+            assert!(!item.can_preview());
+        } else {
+            assert!(!item.container);
+            let resource = crate::resource::read(&item.target, false, &cancel)?;
+            assert!(matches!(resource.route, ResourceRoute::Archive(_)));
+            assert!(resource.psb.is_none());
+            assert!(resource.bytes.is_empty());
+            // Header-based navigation marks this row as a container. The
+            // preview action must remain unavailable on subsequent clicks.
+            item.container = true;
+            assert!(!item.can_preview());
+        }
+    }
+    Ok(())
+}
+
+fn psb_fixture(payload: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![0; 44];
+    bytes[..4].copy_from_slice(b"PSB\0");
+    BinaryWriter::u16_le(3, &mut bytes[4..]);
+    BinaryWriter::u32_le(44, &mut bytes[8..]);
+    let names = bytes.len();
+    bytes.extend([0x0d, 0, 0x0d].repeat(3));
+    let strings = bytes.len();
+    bytes.extend([0x0d, 0, 0x0d]);
+    let root = bytes.len();
+    bytes.push(2);
+    let offsets = bytes.len();
+    bytes.extend([0x0d, 1, 0x0d, 0]);
+    let lengths = bytes.len();
+    bytes.extend([0x0d, 1, 0x10]);
+    let mut length = [0; 4];
+    BinaryWriter::u32_le(u32::try_from(payload.len()).unwrap(), &mut length);
+    bytes.extend(length);
+    let data = bytes.len();
+    bytes.extend(payload);
+    for (at, offset) in [
+        (12, names),
+        (16, strings),
+        (20, data),
+        (24, offsets),
+        (28, lengths),
+        (32, data),
+        (36, root),
+    ] {
+        BinaryWriter::u32_le(u32::try_from(offset).unwrap(), &mut bytes[at..]);
+    }
+    bytes
+}
+
+#[test]
+fn psb_scenario_members_are_containers_before_access() -> Result<()> {
+    vnlens_archive::init();
+    let dir = temp();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let host = Arc::new(
+        vnlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?,
+    );
+    let mut game = (*host).clone();
+    game.engine = vnlens_engine::Engine::Krkr;
+    let game = Arc::new(game);
+    let payload = psb_fixture(b"res");
+    let path = dir.0.join("ks.scn");
+    fs::write(&path, &payload)?;
+    let item = Item::from_target(Target::File(path, game.clone()), None);
+    assert!(item.container);
+    assert_eq!(item.kind, ResourceKind::Archive);
+    assert!(!item.can_preview());
+    assert_eq!(open(&item.target, &cancel, false)?.unwrap().items.len(), 2);
+    // Both stored and recovered SCN names classify the container without
+    // reading its contents or first opening a script preview.
+    for (stored, recovered) in [
+        ("ks.scn", "ks.scn"),
+        ("00001", "scenario/ks.scn"),
+        ("ks.scn", "00001"),
+    ] {
+        let path = dir.0.join("scenario.arc");
+        fs::write(&path, fixture(stored, &payload))?;
+        let mut archive = MountedArchive::open(path, false, host.clone())?.unwrap();
+        archive.game = game.clone();
+        let archive = Arc::new(archive.with_paths(vec![recovered.into()])?);
+        let target = Target::Entry { archive, index: 0 };
+        let item = Item::from_target(target.clone(), None);
+        assert!(item.container);
+        assert_eq!(item.kind, ResourceKind::Archive);
+        assert!(!item.can_preview());
+        let preview = crate::resource::read(&target, false, &cancel)?;
+        assert!(matches!(preview.route, ResourceRoute::Archive(ref route) if route.tag == "psb"));
+        assert!(preview.psb.is_none() && preview.bytes.is_empty());
+
+        let folder = open(&target, &cancel, false)?.unwrap();
+        assert_eq!(folder.items.len(), 2);
+        let value = folder
+            .items
+            .iter()
+            .find(|item| item.name == "root")
+            .unwrap();
+        assert!(!value.container);
+        assert!(open(&value.target, &cancel, false)?.is_none());
+        let preview = crate::resource::read(&value.target, false, &cancel)?;
+        assert_eq!(preview.route, ResourceRoute::Other(ResourceKind::Data));
+        assert_eq!(
+            preview.psb.as_ref().and_then(|value| value.value()),
+            Some(&vnlens_middleware::psb::PsbValue::Bool(true))
+        );
+        assert!(preview.bytes.is_empty());
+        let resource = folder
+            .items
+            .iter()
+            .find(|item| item.name == "resources")
+            .unwrap();
+        let resources = open(&resource.target, &cancel, false)?.unwrap();
+        assert_eq!(resources.items[0].target.read(false, &cancel)?, b"res");
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_psb_scenario_members_return_the_directed_archive_error() -> Result<()> {
+    vnlens_archive::init();
+    let dir = temp();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let host = Arc::new(
+        vnlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?,
+    );
+    let path = dir.0.join("scenario.arc");
+    fs::write(&path, fixture("ks.scn", b"PSB\0"))?;
+    let mut archive = MountedArchive::open(path, false, host.clone())?.unwrap();
+    let mut game = (*host).clone();
+    game.engine = vnlens_engine::Engine::Krkr;
+    archive.game = Arc::new(game);
+    let target = Target::Entry {
+        archive: Arc::new(archive),
+        index: 0,
+    };
+    assert!(target.archive_hint());
+    let error = open(&target, &cancel, false).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<vnlens_core::Error>(),
+        Some(vnlens_core::Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+    ));
+    Ok(())
+}
+
+#[test]
+fn nested_psb_navigation_preserves_context_and_defers_child_errors() -> Result<()> {
+    vnlens_archive::init();
+    let dir = temp();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let host = Arc::new(
+        vnlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?,
+    );
+    let mut game = (*host).clone();
+    game.engine = vnlens_engine::Engine::Krkr;
+    let game = Arc::new(game);
+    for leaf in [b"leaf".as_slice(), b"PSB\0"] {
+        let mut payload = leaf.to_vec();
+        for _ in 0..4 {
+            payload = psb_fixture(&payload);
+        }
+        let path = dir.0.join("nested.arc");
+        fs::write(&path, fixture("chapter.ks.scn", &payload))?;
+        let mut archive = MountedArchive::open(path, false, host.clone())?.unwrap();
+        archive.game = game.clone();
+        let mut target = Target::Entry {
+            archive: Arc::new(archive),
+            index: 0,
+        };
+        for _ in 0..4 {
+            let folder = open(&target, &cancel, false)?.unwrap();
+            let Target::ArchiveDirectory { archive, .. } = &folder.target else {
+                return Err(anyhow!("Missing nested PSB mount"));
+            };
+            assert!(Arc::ptr_eq(&archive.game, &game));
+            let directory = folder
+                .items
+                .iter()
+                .find(|item| item.name == "resources")
+                .unwrap();
+            let resources = open(&directory.target, &cancel, false)?.unwrap();
+            assert_eq!(resources.items.len(), 1);
+            target = resources.items[0].target.clone();
+        }
+        assert_eq!(target.read(false, &cancel)?, leaf);
+        if leaf == b"PSB\0" {
+            assert!(open(&target, &cancel, false).is_err());
+        } else {
+            assert!(open(&target, &cancel, false)?.is_none());
+        }
+    }
+    Ok(())
+}
+
+/// Uses a local game's first PSB scene without copying restricted assets into
+/// the repository. Run with VNLENS_GAME_DIR and `cargo test -p vnlens-gui
+/// local_psb_scenario_mount -- --ignored --nocapture`. VNLENS_SCN_ENTRY can
+/// select an entry by index or by its stored-name suffix.
+#[test]
+#[ignore = "requires a local KiriKiri game; set VNLENS_GAME_DIR"]
+fn local_psb_scenario_mount() -> Result<()> {
+    vnlens_archive::init();
+    let path = std::env::var_os("VNLENS_GAME_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("Set VNLENS_GAME_DIR to the local game directory"))?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let game = Arc::new(
+        vnlens_engine::identify(&path, &cancel)?
+            .ok_or_else(|| anyhow!("Unidentified local game"))?,
+    );
+    let archive = Arc::new(
+        MountedArchive::open(path.join("data.xp3"), false, game.clone())?
+            .ok_or_else(|| anyhow!("Missing local data archive"))?,
+    );
+    let selected = std::env::var("VNLENS_SCN_ENTRY").ok();
+    for (index, entry) in archive.entries.iter().enumerate() {
+        if selected.as_ref().is_some_and(|name| {
+            name.parse::<usize>().map_or_else(
+                |_| !entry.name.ends_with(name),
+                |selected| selected != index,
+            )
+        }) {
+            continue;
+        }
+        let source = {
+            let opened = archive.source.lock().unwrap();
+            opened.archive.open_entry_source(entry)?.unwrap()
+        };
+        let header = source.read_at(0, usize::try_from(source.len().min(4))?)?;
+        if !header.starts_with(b"PSB\0") && !vnlens_middleware::mdf::is_mdf(&header) {
+            continue;
+        }
+        let target = Target::Entry {
+            archive: archive.clone(),
+            index,
+        };
+        eprintln!("Mounting local PSB entry {index}, {} bytes", source.len());
+        let bytes: Arc<[u8]> = target.read(false, &cancel)?.into();
+        let start = std::time::Instant::now();
+        let expected = vnlens_middleware::psb::PsbFile::open_configured(
+            Arc::new(bytes),
+            &target.name(),
+            game.resource_options(),
+            Some(&cancel),
+        )?;
+        eprintln!(
+            "Mapped PSB parsed in {:?}, {} decoded bytes, {} nodes, {} strings",
+            start.elapsed(),
+            expected.document.data_len,
+            expected.document.nodes.len(),
+            expected.document.strings.len(),
+        );
+        if !expected
+            .document
+            .root
+            .as_object()
+            .is_some_and(|root| root.contains_key("scenes"))
+        {
+            continue;
+        }
+        let start = std::time::Instant::now();
+        let folder = open(&target, &cancel, false)?.ok_or_else(|| anyhow!("Missing PSB folder"))?;
+        let Target::ArchiveDirectory { archive, .. } = &folder.target else {
+            return Err(anyhow!("Missing PSB mount"));
+        };
+        assert!(
+            archive
+                .entries
+                .iter()
+                .map(|entry| (&entry.name, entry.kind, entry.offset, entry.size))
+                .eq(vnlens_core::Archive::entries(&expected)
+                    .iter()
+                    .map(|entry| (&entry.name, entry.kind, entry.offset, entry.size)))
+        );
+        eprintln!("Streaming PSB mounted in {:?}", start.elapsed());
+        return Ok(());
+    }
+    Err(anyhow!("No PSB scenario in the local data archive"))
+}
+
+#[test]
 fn foreign_headerless_prefix_is_not_sent_to_global_decoders() -> Result<()> {
     let dir = temp();
     let cancel = Arc::new(AtomicBool::new(false));

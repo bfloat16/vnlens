@@ -111,6 +111,59 @@ impl Workspace {
                                                 .shadow_sm(),
                                         ),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .px_4()
+                                .py_3()
+                                .rounded(px(10.))
+                                .bg(rgb(PANEL))
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .flex()
+                                .items_center()
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child("Compose PIMG images")
+                                        .child(
+                                            div()
+                                                .mt_1()
+                                                .text_size(px(12.))
+                                                .text_color(rgb(SECONDARY))
+                                                .child("Combine visible layers for image preview and PNG export."),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(SECONDARY))
+                                        .child(if self.preferences.compose_pimg() { "Image" } else { "Archive" }),
+                                )
+                                .child(
+                                    div()
+                                        .id("compose-pimg")
+                                        .relative()
+                                        .w(px(44.))
+                                        .h(px(24.))
+                                        .flex_shrink_0()
+                                        .rounded_full()
+                                        .cursor_pointer()
+                                        .bg(rgb(if self.preferences.compose_pimg() { ACCENT } else { CONTROL_HOVER }))
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_compose_pimg(cx)))
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .left(px(if self.preferences.compose_pimg() { 22. } else { 2. }))
+                                                .top(px(2.))
+                                                .size(px(20.))
+                                                .rounded_full()
+                                                .bg(rgb(0xffffff))
+                                                .shadow_sm(),
+                                        ),
+                                ),
                         ),
                 ),
             )

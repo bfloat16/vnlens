@@ -1,9 +1,14 @@
 use super::*;
 use std::collections::BTreeMap;
 use std::prelude::rust_2024::test;
+use vnlens_middleware::psb::Psb;
 
 fn psb(root: PsbValue) -> Psb {
     Psb {
+        shell: None,
+        header: Default::default(),
+        encryption: vnlens_middleware::psb::PsbEncryption::None,
+        nodes: BTreeMap::new(),
         data_len: 0,
         names: Vec::new(),
         strings: Vec::new(),
@@ -29,7 +34,7 @@ fn nested_psb_rows_share_collapse_pinning_selection_and_width_state() -> anyhow:
         ),
     ])));
     let exported = psb.to_json()?;
-    let mut table = Table::from_psb(&psb, &AtomicBool::new(false))?;
+    let mut table = Table::from_psb(&psb.root, &AtomicBool::new(false))?;
     assert_eq!(table.visible, [0, 1, 2]);
     assert_eq!(table.rows[0].cells[2].as_ref(), "2 fields");
     assert_eq!(table.rows[1].cells[2].as_ref(), "0 fields");
@@ -59,8 +64,9 @@ fn nested_psb_rows_share_collapse_pinning_selection_and_width_state() -> anyhow:
 fn psb_scalars_and_arrays_preserve_values_and_original_keys_when_copied() -> anyhow::Result<()> {
     let psb = psb(PsbValue::Object(BTreeMap::from([
         ("".into(), PsbValue::Null),
-        ("array".into(), PsbValue::Array(vec![0, u32::MAX])),
+        ("array".into(), PsbValue::Array(vec![0, u64::MAX])),
         ("false".into(), PsbValue::Bool(false)),
+        ("undefined".into(), PsbValue::Void),
         (
             "float".into(),
             PsbValue::Number(PsbNumber::Float(f32::from_bits(0x7fc01234))),
@@ -90,7 +96,7 @@ fn psb_scalars_and_arrays_preserve_values_and_original_keys_when_copied() -> any
         ),
         ("text\\n\\t".into(), PsbValue::Bool(true)),
     ])));
-    let table = Table::from_psb(&psb, &AtomicBool::new(false))?;
+    let table = Table::from_psb(&psb.root, &AtomicBool::new(false))?;
     let fields = psb
         .root
         .as_object()
@@ -99,10 +105,10 @@ fn psb_scalars_and_arrays_preserve_values_and_original_keys_when_copied() -> any
         let expected = match &table.rows[row].source {
             Source::Root => psb.to_json()?,
             Source::Property(key) => fields[key].to_json()?,
-            Source::Index(index) => format!("{}\n", [0, u32::MAX][*index]),
+            Source::Index(index) => format!("{}\n", [0, u64::MAX][*index]),
             _ => return Err(anyhow::anyhow!("Unexpected instruction")),
         };
-        assert_eq!(table.psb_json(row, &psb).transpose()?, Some(expected));
+        assert_eq!(table.psb_json(row, &psb.root).transpose()?, Some(expected));
         assert!(table.instruction_index(row).is_none());
     }
     assert!(
@@ -128,15 +134,15 @@ fn psb_traversal_is_iterative_and_cancellable() -> anyhow::Result<()> {
         root = PsbValue::List(vec![root]);
     }
     let psb = psb(root);
-    let table = Table::from_psb(&psb, &AtomicBool::new(false))?;
+    let table = Table::from_psb(&psb.root, &AtomicBool::new(false))?;
     assert_eq!(table.rows.len(), 2049);
     assert_eq!(table.visible, [0, 1]);
     assert_eq!(
-        table.psb_json(2048, &psb).transpose()?,
+        table.psb_json(2048, &psb.root).transpose()?,
         Some("null\n".into())
     );
     assert!(matches!(
-        Table::from_psb(&psb, &AtomicBool::new(true)),
+        Table::from_psb(&psb.root, &AtomicBool::new(true)),
         Err(vnlens_core::Error::Cancelled)
     ));
     Ok(())

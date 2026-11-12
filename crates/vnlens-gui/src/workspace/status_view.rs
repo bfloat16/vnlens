@@ -12,14 +12,15 @@ impl Workspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let busy = self.pending > 0
+        let busy = !self.imports.is_empty()
             || self.name_jobs.iter().any(|job| job.running)
             || self.preview_loading
             || self.image_view.frames.pending_count() > 0
             || self.extracting
             || self.converting
             || self.columns.iter().any(|column| column.loading);
-        let failed = self.error.is_some();
+        let failed = !self.errors.is_empty();
+        let progress = self.activity_progress();
         div()
             .absolute()
             .left(px(12.))
@@ -50,7 +51,11 @@ impl Workspace {
                                 cx.notify();
                             }))
                             .child(if busy {
-                                spinner("status-busy", 15., ACCENT).into_any_element()
+                                if let Some(progress) = progress {
+                                    progress_ring(15., progress).into_any_element()
+                                } else {
+                                    spinner("status-busy", 15., ACCENT).into_any_element()
+                                }
                             } else if failed {
                                 glyph("icons/alert.svg", 16., DANGER).into_any_element()
                             } else {
@@ -96,16 +101,13 @@ impl Workspace {
     }
 
     fn status_details(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        glass()
-            .id("status-details")
-            .absolute()
-            .left_0()
-            .bottom(px(38.))
-            .w((window.viewport_size().width - px(24.)).min(px(500.)))
-            .max_h((window.viewport_size().height - px(92.)).max(px(60.)))
+        let content = div()
+            .id("status-content")
+            .max_h((window.viewport_size().height - px(108.)).max(px(44.)))
+            .w_full()
             .overflow_y_scroll()
-            .rounded(px(10.))
-            .p(px(8.))
+            .track_scroll(&self.status_scroll)
+            .pr(px(8.))
             .flex()
             .flex_col()
             .gap(px(6.))
@@ -116,46 +118,73 @@ impl Workspace {
             .when(self.status != "Ready", |view| {
                 view.child(status_line(self.status.clone(), SECONDARY))
             })
-            .when(!self.imports.is_empty(), |view| {
-                view.child(
-                    button("cancel-opening", "Cancel opening", false, true).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            for request in &this.imports {
+            .children(self.imports.iter().enumerate().map(|(index, batch)| {
+                let requests: Vec<_> = batch
+                    .jobs
+                    .iter()
+                    .filter(|job| !job.finished)
+                    .map(|job| job.request.clone())
+                    .collect();
+                let cancelled = requests
+                    .iter()
+                    .all(|request| request.load(Ordering::Relaxed));
+                let completed = batch.jobs.iter().filter(|job| job.finished).count();
+                let total = batch.jobs.len();
+                let progress = fraction(completed as u64, total as u64);
+                progress_line(
+                    ("import-progress", index),
+                    format!(
+                        "{} · {} / {} · {:.1}%",
+                        if cancelled {
+                            "Cancelling opening…"
+                        } else {
+                            "Opening…"
+                        },
+                        completed,
+                        total,
+                        progress * 100.,
+                    ),
+                    Some(progress),
+                )
+                .child(
+                    status_action(("cancel-opening", index), "icons/window-close.svg")
+                        .tooltip(tooltip("Cancel opening"))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            for request in &requests {
                                 request.store(true, Ordering::Relaxed);
                             }
                             cx.notify();
-                        },
-                    )),
+                        })),
                 )
-            })
-            .when(self.pending > 0, |view| {
-                view.child(status_line(
-                    format!("Opening… · {} requests", self.pending),
-                    ACCENT,
-                ))
-            })
+            }))
             .children(
                 self.columns
                     .iter()
                     .filter(|column| column.loading)
                     .map(|column| {
-                        status_line(
+                        progress_line(
+                            ("folder-progress", column.id),
                             format!("Loading… · {}", column.folder.target.export_name()),
-                            ACCENT,
+                            None,
                         )
                     }),
             )
             .when(self.preview_loading, |view| {
                 let name = self.selected_item().map_or("", |item| item.name.as_str());
-                view.child(status_line(format!("Preparing preview… · {name}"), ACCENT))
+                view.child(progress_line(
+                    "preview-progress",
+                    format!("Preparing preview… · {name}"),
+                    None,
+                ))
             })
             .when(self.image_view.frames.pending_count() > 0, |view| {
-                view.child(status_line(
+                view.child(progress_line(
+                    "thumbnails-progress",
                     format!(
                         "Preparing thumbnails… · {} remaining",
                         self.image_view.frames.pending_count()
                     ),
-                    ACCENT,
+                    None,
                 ))
             })
             .when(!self.preview_loading, |view| {
@@ -185,36 +214,74 @@ impl Workspace {
                         format!("{} items", column.folder.items.len()),
                         SECONDARY,
                     ))
-                } else if self.status == "Ready" && self.error.is_none() {
+                } else if self.status == "Ready" && self.errors.is_empty() {
                     view.child(status_line("Ready".into(), SECONDARY))
                 } else {
                     view
                 }
             })
             .when(self.converting, |view| {
-                view.child(status_line("Exporting…".into(), ACCENT))
+                view.child(progress_line(
+                    "conversion-progress",
+                    "Exporting…".into(),
+                    None,
+                ))
             })
-            .children(self.name_jobs.iter().map(|job| {
-                status_line(
-                    format!(
-                        "{} · {} / {} · {} names · {} failed",
-                        job.label(),
-                        job.progress.completed,
-                        job.progress.total,
-                        job.progress.resolved,
-                        job.progress.failed
-                    ),
-                    if job.running { ACCENT } else { SECONDARY },
-                )
-            }))
+            .children(
+                self.name_jobs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, job)| job.running)
+                    .map(|(index, job)| {
+                        progress_line(
+                            ("names-progress", index),
+                            format!(
+                                "{} · {} / {} · {} names · {} failed",
+                                job.label(),
+                                job.progress.completed,
+                                job.progress.total,
+                                job.progress.resolved,
+                                job.progress.failed
+                            ),
+                            Some(fraction(
+                                job.progress.completed as u64,
+                                job.progress.total as u64,
+                            )),
+                        )
+                    }),
+            )
             .when(self.name_jobs.iter().any(|job| job.running), |view| {
                 view.child(
                     button("cancel-names", "Cancel name recovery", false, true)
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_names(cx))),
                 )
             })
-            .when(self.extracting, |view| {
-                view.child(status_line(
+            .when_some(self.dataset_progress, |view, progress| {
+                view.child(progress_line(
+                    "dataset-progress",
+                    format!(
+                        "{} · {} / {} · {} records · {} skipped · {} failed",
+                        if self.cancel.load(Ordering::Relaxed) {
+                            "Cancelling dataset…"
+                        } else {
+                            match progress.stage {
+                                vnlens_dataset::Stage::Indexing => "Indexing dataset resources",
+                                vnlens_dataset::Stage::ReadingScripts => "Reading dataset scripts",
+                                vnlens_dataset::Stage::Writing => "Writing dataset",
+                            }
+                        },
+                        progress.completed,
+                        progress.total,
+                        progress.records,
+                        progress.skipped,
+                        progress.failed
+                    ),
+                    Some(fraction(progress.completed as u64, progress.total as u64)),
+                ))
+            })
+            .when(self.extracting && self.dataset_progress.is_none(), |view| {
+                view.child(progress_line(
+                    "extraction-progress",
                     format!(
                         "{} {} / {} · {} failed",
                         if self.cancel.load(Ordering::Relaxed) {
@@ -226,75 +293,65 @@ impl Workspace {
                         self.progress.total,
                         self.progress.failed
                     ),
-                    ACCENT,
+                    Some(fraction(
+                        self.progress.completed as u64,
+                        self.progress.total as u64,
+                    )),
                 ))
-                .child(
-                    div()
-                        .h(px(4.))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .bg(rgb(BORDER))
-                        .child(div().h_full().rounded_full().bg(rgb(ACCENT)).w(relative(
-                            if self.progress.total == 0 {
-                                0.
-                            } else {
-                                self.progress.completed as f32 / self.progress.total as f32
-                            },
-                        ))),
-                )
             })
-            .when_some(self.error.as_ref(), |view, error| {
+            .children(self.errors.iter().enumerate().map(|(index, error)| {
                 let copied = error.clone();
-                view.child(
+                let dismissed = error.clone();
+                status_row(error.clone(), DANGER).child(
                     div()
-                        .w_full()
-                        .flex_shrink_0()
-                        .pl_2()
-                        .pr_1()
-                        .py_1()
                         .flex()
-                        .items_end()
+                        .flex_shrink_0()
+                        .items_center()
                         .gap(px(4.))
-                        .rounded(px(6.))
-                        .text_color(rgb(DANGER))
-                        .hover(|style| style.bg(rgba(0xffffff0d)))
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .my_auto()
-                                .whitespace_normal()
-                                .child(error.clone()),
+                            status_action(("copy-error", index), "icons/copy.svg")
+                                .tooltip(tooltip("Copy"))
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copied.clone(),
+                                    ));
+                                })),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .flex_shrink_0()
-                                .items_center()
-                                .gap(px(4.))
-                                .child(
-                                    error_action("copy-error", "icons/copy.svg")
-                                        .tooltip(tooltip("Copy"))
-                                        .on_click(cx.listener(move |_, _, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                copied.clone(),
-                                            ));
-                                        })),
-                                )
-                                .child(
-                                    error_action("dismiss-error", "icons/window-close.svg")
-                                        .tooltip(tooltip("Dismiss"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.error = None;
-                                            cx.notify();
-                                        })),
-                                ),
+                            status_action(("dismiss-error", index), "icons/window-close.svg")
+                                .tooltip(tooltip("Dismiss"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(index) =
+                                        this.errors.iter().position(|error| error == &dismissed)
+                                    {
+                                        this.errors.remove(index);
+                                    }
+                                    cx.notify();
+                                })),
                         ),
                 )
-            })
+            }))
             .when(self.extracting || self.output.is_some(), |view| {
                 view.child(self.status_actions(cx))
-            })
+            });
+        glass()
+            .id("status-details")
+            .absolute()
+            .left_0()
+            .bottom(px(38.))
+            .w((window.viewport_size().width - px(24.)).min(px(650.)))
+            .rounded(px(10.))
+            .p(px(8.))
+            .occlude()
+            .child(content)
+            .child(
+                self.status_scrollbar
+                    .render(self.status_scroll.clone(), true, Axis::Vertical)
+                    .right(px(2.))
+                    .top(px(8.))
+                    .bottom(px(8.))
+                    .w(px(8.)),
+            )
     }
 
     fn status_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -323,9 +380,36 @@ impl Workspace {
                 )
             })
     }
+
+    fn activity_progress(&self) -> Option<f32> {
+        let imports = self
+            .imports
+            .iter()
+            .flat_map(|batch| &batch.jobs)
+            .map(|job| if job.finished { 1. } else { 0. });
+        let names = self
+            .name_jobs
+            .iter()
+            .filter(|job| job.running && self.imports.is_empty())
+            .map(|job| fraction(job.progress.completed as u64, job.progress.total as u64));
+        let extraction = (self.extracting && self.imports.is_empty()).then(|| {
+            if let Some(progress) = self.dataset_progress {
+                fraction(progress.completed as u64, progress.total as u64)
+            } else {
+                fraction(self.progress.completed as u64, self.progress.total as u64)
+            }
+        });
+        let (sum, count) = imports
+            .chain(names)
+            .chain(extraction)
+            .fold((0., 0_usize), |(sum, count), progress| {
+                (sum + f64::from(progress), count + 1)
+            });
+        (count > 0).then(|| (sum / count as f64) as f32)
+    }
 }
 
-fn error_action(id: impl Into<ElementId>, icon: &'static str) -> Stateful<Div> {
+fn status_action(id: impl Into<ElementId>, icon: &'static str) -> Stateful<Div> {
     div()
         .id(id)
         .size(px(22.))
@@ -337,6 +421,94 @@ fn error_action(id: impl Into<ElementId>, icon: &'static str) -> Stateful<Div> {
         .cursor_pointer()
         .hover(|style| style.bg(rgba(0xffffff1a)))
         .child(glyph(icon, 12., SECONDARY))
+}
+
+fn status_row(text: String, color: u32) -> Div {
+    div()
+        .w_full()
+        .flex_shrink_0()
+        .pl_2()
+        .pr_1()
+        .py_1()
+        .flex()
+        .items_end()
+        .gap(px(4.))
+        .rounded(px(6.))
+        .text_color(rgb(color))
+        .hover(|style| style.bg(rgba(0xffffff0d)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .my_auto()
+                .whitespace_normal()
+                .child(text),
+        )
+}
+
+fn progress_line(id: impl Into<ElementId>, text: String, progress: Option<f32>) -> Div {
+    status_row(text, ACCENT).child(
+        div()
+            .size(px(22.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(if let Some(progress) = progress {
+                progress_ring(14., progress).into_any_element()
+            } else {
+                spinner(id, 14., ACCENT).into_any_element()
+            }),
+    )
+}
+
+fn fraction(done: u64, total: u64) -> f32 {
+    if total == 0 {
+        0.
+    } else {
+        (done as f64 / total as f64).clamp(0., 1.) as f32
+    }
+}
+
+fn progress_ring(diameter: f32, progress: f32) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let center = bounds.center();
+            let radius = px(diameter / 2. - 1.);
+            for (amount, color) in [(1., BORDER), (progress, ACCENT)] {
+                if amount <= 0. {
+                    continue;
+                }
+                let mut path = PathBuilder::stroke(px(1.6));
+                path.move_to(point(center.x, center.y - radius));
+                // Split at the half circle: SVG arcs with equal start/end
+                // points draw nothing, including a completed progress ring.
+                let first = amount.min(0.5);
+                for end in [first, amount]
+                    .into_iter()
+                    .take(if amount > 0.5 { 2 } else { 1 })
+                {
+                    let angle = end * std::f32::consts::TAU;
+                    path.arc_to(
+                        point(radius, radius),
+                        px(0.),
+                        false,
+                        true,
+                        point(
+                            center.x + radius * angle.sin(),
+                            center.y - radius * angle.cos(),
+                        ),
+                    );
+                }
+                match path.build() {
+                    Ok(path) => window.paint_path(path, rgb(color)),
+                    Err(error) => tracing::error!(%error, "Cannot paint activity progress"),
+                }
+            }
+        },
+    )
+    .size(px(diameter))
 }
 
 fn status_line(text: String, color: u32) -> Div {

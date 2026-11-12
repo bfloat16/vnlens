@@ -91,6 +91,7 @@ fn rugp_navigation_prepares_only_one_layer_and_reuses_children() {
                 .collect(),
             reference_archives: Arc::default(),
             entries: entries.clone().into(),
+            psb_values: Default::default(),
             directories: directories(&paths),
             paths,
             source: Arc::new(Mutex::new(Opened {
@@ -148,6 +149,7 @@ fn rugp_navigation_prepares_only_one_layer_and_reuses_children() {
         &renamed.open_references(2, false).unwrap().unwrap()
     ));
     let item = folder.items.iter().find(|i| i.name == "group").unwrap();
+    assert!(item.can_preview());
     let nested = browser::open(&item.target, &cancel, false)
         .unwrap()
         .unwrap();
@@ -237,6 +239,7 @@ fn reference_exports_visit_shared_cycles_once_and_honor_cancellation() {
         path: dir.0.join("graph"),
         source_path: dir.0.join("graph"),
         entries: entries.clone().into(),
+        psb_values: Default::default(),
         paths: vec!["root".into()],
         references: vec![AtomicBool::new(true)].into(),
         reference_archives: Arc::default(),
@@ -407,7 +410,7 @@ fn browses_deep_directories_without_reading_contents() {
 }
 
 #[test]
-fn opens_nested_archives_on_demand_and_removes_temporary_files() {
+fn opens_nested_archives_on_demand_and_removes_temporary_files() -> Result<()> {
     vnlens_archive::init();
     let mut bytes = fixture(&[("leaf.txt", b"leaf")]);
     for _ in 0..24 {
@@ -415,17 +418,20 @@ fn opens_nested_archives_on_demand_and_removes_temporary_files() {
     }
     let dir = directory();
     let game = game(&dir.0);
-    let mut opened = MountedArchive::open_nested("root.arc", &bytes, false, game.clone())
-        .unwrap()
-        .unwrap();
+    let ResourceRoute::Archive(route) =
+        game.resource_route("root.arc", vnlens_core::ResourceOrigin::File, &bytes)
+    else {
+        return Err(anyhow!("Missing fixture archive route"));
+    };
+    let mut opened =
+        MountedArchive::open_nested("root.arc", &bytes, &route, false, game.clone()).unwrap();
     let cancelled = AtomicBool::new(false);
     let first_cache = opened._backing.as_ref().unwrap().0.clone();
     for _ in 0..24 {
         assert_eq!(opened.entries[0].name, "nested.arc");
         let bytes = read_entry(&opened.source, 0, false, &cancelled).unwrap();
-        opened = MountedArchive::open_nested("nested.arc", &bytes, false, game.clone())
-            .unwrap()
-            .unwrap();
+        opened =
+            MountedArchive::open_nested("nested.arc", &bytes, &route, false, game.clone()).unwrap();
     }
     assert!(!first_cache.exists());
     assert_eq!(
@@ -435,6 +441,7 @@ fn opens_nested_archives_on_demand_and_removes_temporary_files() {
     let last_cache = opened._backing.as_ref().unwrap().0.clone();
     drop(opened);
     assert!(!last_cache.exists());
+    Ok(())
 }
 
 #[test]

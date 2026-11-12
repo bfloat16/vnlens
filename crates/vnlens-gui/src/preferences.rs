@@ -11,6 +11,7 @@ use std::{
 #[derive(Clone, Debug, Default)]
 pub struct Preferences {
     virtual_paths: Arc<AtomicBool>,
+    compose_pimg: Arc<AtomicBool>,
     write_lock: Arc<Mutex<()>>,
 }
 
@@ -27,6 +28,8 @@ impl Preferences {
             for line in text.lines() {
                 if let Some(value) = line.strip_prefix("virtual_script_paths=") {
                     preferences.set_virtual_paths(value.parse()?);
+                } else if let Some(value) = line.strip_prefix("compose_pimg=") {
+                    preferences.set_compose_pimg(value.parse()?);
                 }
             }
             Ok(())
@@ -45,6 +48,14 @@ impl Preferences {
         self.virtual_paths.store(enabled, Ordering::Relaxed);
     }
 
+    pub fn compose_pimg(&self) -> bool {
+        self.compose_pimg.load(Ordering::Relaxed)
+    }
+
+    pub fn set_compose_pimg(&self, enabled: bool) {
+        self.compose_pimg.store(enabled, Ordering::Relaxed);
+    }
+
     pub fn save(&self) -> anyhow::Result<()> {
         let _guard = self
             .write_lock
@@ -52,7 +63,11 @@ impl Preferences {
             .map_err(|_| anyhow::anyhow!("Preference writer is unavailable"))?;
         // Read after acquiring the writer: an older queued task cannot restore
         // an obsolete value after a more recent click.
-        let text = format!("virtual_script_paths={}\n", self.virtual_paths());
+        let text = format!(
+            "virtual_script_paths={}\ncompose_pimg={}\n",
+            self.virtual_paths(),
+            self.compose_pimg()
+        );
         vnlens_io::filesystem::write_under(&directory()?, "preferences", text.as_bytes())?;
         Ok(())
     }

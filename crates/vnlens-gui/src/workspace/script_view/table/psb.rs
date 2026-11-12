@@ -1,10 +1,11 @@
-//! Adapts parsed PSB values to the shared expandable preview table. Parsing and
-//! JSON serialization remain in the script crate; resource bodies stay unread.
+//! Adapts a selected native PSB value file to the shared expandable preview
+//! table. Parsing and JSON clipboard export remain in middleware; resource
+//! bodies stay unread.
 use super::*;
-use vnlens_script::psb::{Psb, PsbNumber, PsbValue};
+use vnlens_middleware::psb::{PsbNumber, PsbValue};
 
 impl Table {
-    pub(crate) fn from_psb(psb: &Psb, cancelled: &AtomicBool) -> vnlens_core::Result<Self> {
+    pub(crate) fn from_psb(value: &PsbValue, cancelled: &AtomicBool) -> vnlens_core::Result<Self> {
         enum Pending<'a> {
             Value(&'a PsbValue, Source, Option<usize>),
             End(usize),
@@ -15,7 +16,7 @@ impl Table {
             visible: vec![0],
             widths: Cell::new([px(0.); 3]),
         };
-        let mut pending = vec![Pending::Value(&psb.root, Source::Root, None)];
+        let mut pending = vec![Pending::Value(value, Source::Root, None)];
         while let Some(item) = pending.pop() {
             if cancelled.load(Ordering::Relaxed) {
                 return Err(vnlens_core::Error::Cancelled);
@@ -33,6 +34,7 @@ impl Table {
                 _ => "PSB".into(),
             };
             let kind = match value {
+                PsbValue::Void => "undefined",
                 PsbValue::Null => "null",
                 PsbValue::Bool(_) => "boolean",
                 PsbValue::Number(PsbNumber::Integer(_)) => "integer",
@@ -86,7 +88,11 @@ impl Table {
 
     /// Resolves the stable row through its original keys/indices. Display text
     /// may escape control characters, so it must not be used as a lookup key.
-    pub(crate) fn psb_json(&self, row: usize, psb: &Psb) -> Option<vnlens_core::Result<String>> {
+    pub(crate) fn psb_json(
+        &self,
+        row: usize,
+        mut value: &PsbValue,
+    ) -> Option<vnlens_core::Result<String>> {
         let mut path = Vec::new();
         let mut ancestor = Some(row);
         while let Some(row) = ancestor {
@@ -94,7 +100,6 @@ impl Table {
             path.push(&row.source);
             ancestor = row.parent;
         }
-        let mut value = &psb.root;
         for source in path.into_iter().rev() {
             value = match (source, value) {
                 (Source::Root, _) => value,

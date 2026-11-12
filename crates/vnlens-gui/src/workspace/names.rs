@@ -173,9 +173,8 @@ impl Workspace {
                     let mut recovery = NameRecovery::open_in(&inputs, &game.files, &request)?;
                     let mut reported_revision = None;
                     let mut last = Instant::now();
-                    loop {
-                        let more = recovery.step(&request)?;
-                        if !more || last.elapsed() >= Duration::from_secs(2) {
+                    recovery.run(&request, |recovery, finished| {
+                        if finished || last.elapsed() >= Duration::from_millis(500) {
                             if reported_revision != Some(recovery.revision()) {
                                 latest = Arc::new(recovery.paths());
                                 reported_revision = Some(recovery.revision());
@@ -187,14 +186,11 @@ impl Workspace {
                                 paths: latest.clone(),
                                 progress,
                                 errors: recovery.take_errors(),
-                                finished: !more,
+                                finished,
                             }));
                             last = Instant::now();
                         }
-                        if !more {
-                            break;
-                        }
-                    }
+                    })?;
                     Ok(())
                 })();
                 if let Err(error) = result {
@@ -226,8 +222,8 @@ impl Workspace {
         job.paths = update.paths;
         job.progress = update.progress;
         job.running = !update.finished;
-        if let Some(error) = update.errors.into_iter().last() {
-            self.error = Some(error);
+        for error in update.errors {
+            self.error(error);
         }
         self.refresh_names(cx);
     }
@@ -299,7 +295,7 @@ fn apply_updates(
     active: &mut usize,
     updates: Vec<Refresh>,
 ) {
-    for update in updates {
+    for mut update in updates {
         let Some(depth) = columns.iter().position(|c| {
             c.id == update.id
                 && !c.loading
@@ -308,6 +304,23 @@ fn apply_updates(
             continue;
         };
         let column = &mut columns[depth];
+        for previous in column
+            .folder
+            .items
+            .iter()
+            .filter(|item| item.container && item.kind == vnlens_core::ResourceKind::Archive)
+        {
+            let target = mapped(&previous.target, &update);
+            if let Some(item) = update
+                .folder
+                .items
+                .iter_mut()
+                .find(|item| item.target.same(&target))
+            {
+                item.container = true;
+                item.kind = vnlens_core::ResourceKind::Archive;
+            }
+        }
         let selected = column
             .selected
             .and_then(|row| column.folder.items.get(row))

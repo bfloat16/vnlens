@@ -31,6 +31,17 @@ pub enum Target {
 }
 
 impl Target {
+    pub fn set_compose_pimg(&self, enabled: bool) {
+        match self {
+            Self::Directory(_, game) | Self::File(_, game) | Self::ArchiveSet(_, game) => {
+                game.set_compose_pimg(enabled);
+            }
+            Self::ArchiveDirectory { archive, .. } | Self::Entry { archive, .. } => {
+                archive.game.set_compose_pimg(enabled);
+            }
+            Self::Opened => {}
+        }
+    }
     pub fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Opened, Self::Opened) => true,
@@ -113,15 +124,20 @@ impl Target {
                 Ok(game.resource_route(&path.to_string_lossy(), ResourceOrigin::File, header))
             }
             Self::Entry { archive, index } => {
+                if archive.psb_values.contains_key(index) {
+                    return Ok(ResourceRoute::Other(ResourceKind::Data));
+                }
                 let entry = &archive.entries[*index];
                 let origin = ResourceOrigin::Entry(entry.kind);
-                let route = archive.game.resource_route(&entry.name, origin, header);
-                if matches!(route, ResourceRoute::Other(_)) && archive.paths[*index] != entry.name {
+                // Choose the original or recovered name from index metadata
+                // first. A PSB header must not erase a selected PIMG image route.
+                let named = archive.game.resource_route(&entry.name, origin, &[]);
+                if matches!(named, ResourceRoute::Other(_)) && archive.paths[*index] != entry.name {
                     Ok(archive
                         .game
                         .resource_route(&archive.paths[*index], origin, header))
                 } else {
-                    Ok(route)
+                    Ok(archive.game.resource_route(&entry.name, origin, header))
                 }
             }
             _ => Err(anyhow!(
@@ -200,6 +216,34 @@ pub struct Item {
     pub container: bool,
 }
 impl Item {
+    /// Reference owners may expose both navigation and a resource preview.
+    /// Containers selected by the engine route only expose their filesystem.
+    pub fn can_preview(&self) -> bool {
+        if !self.container {
+            return true;
+        }
+        let Target::Entry { archive, index } = &self.target else {
+            return false;
+        };
+        archive.has_references(*index)
+            && matches!(self.target.resource_route(&[]), Ok(route) if !matches!(route, ResourceRoute::Archive(_)))
+    }
+
+    pub fn set_compose_pimg(&mut self, enabled: bool) {
+        self.target.set_compose_pimg(enabled);
+        if !self
+            .target
+            .name()
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("pimg"))
+        {
+            return;
+        }
+        let refreshed = Self::from_target(self.target.clone(), self.size);
+        self.kind = refreshed.kind;
+        self.container = refreshed.container;
+        self.count = refreshed.count;
+    }
     #[cfg(test)]
     pub fn from_path(path: PathBuf) -> Result<Self> {
         Self::from_path_cancellable(path, &AtomicBool::new(false), &|_, _| {})
@@ -380,6 +424,9 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
     let mut folder = match target {
         Target::Opened => Some(Folder::empty(Target::Opened)),
         Target::Directory(path, game) => {
+            let game = game
+                .for_directory(path, cancel)
+                .with_context(|| format!("Identifying {}", path.display()))?;
             let mut items = Vec::new();
             for entry in game
                 .files
@@ -398,7 +445,7 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
                 items.push(Item::from_target(target, Some(metadata.len)));
             }
             let mut folder = Folder {
-                target: target.clone(),
+                target: Target::Directory(path.clone(), game.clone()),
                 items,
             };
             let files = folder
@@ -431,22 +478,49 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
                 .map(|archive| Folder::archive(Arc::new(archive), 0))
         }
         Target::Entry { archive, index } => {
-            if !target.archive_hint() {
-                return Ok(None);
-            }
             if archive.has_references(*index) {
                 archive
                     .open_references(*index, virtual_paths)?
                     .map(|archive| Folder::archive(archive, 0))
             } else {
-                let bytes = target.read(false, cancel)?;
-                MountedArchive::open_nested(
+                if archive.psb_values.contains_key(index)
+                    || (!matches!(
+                        target.resource_route(&[])?,
+                        ResourceRoute::Archive(_) | ResourceRoute::Other(_)
+                    ) && !archive.game.supports_psb())
+                {
+                    return Ok(None);
+                }
+                let source = {
+                    let opened = archive
+                        .source
+                        .lock()
+                        .map_err(|_| anyhow!("Archive reader is unavailable"))?;
+                    let entry = opened
+                        .archive
+                        .entries()
+                        .get(*index)
+                        .ok_or_else(|| anyhow!("Selected entry no longer exists"))?;
+                    opened.archive.open_entry_source(entry)?
+                };
+                let source = if let Some(source) = source {
+                    source
+                } else {
+                    let bytes: Arc<[u8]> = target.read(false, cancel)?.into();
+                    Arc::new(bytes) as Arc<dyn vnlens_io::ReadAt>
+                };
+                let header = source.read_at(0, usize::try_from(source.len().min(64))?)?;
+                let ResourceRoute::Archive(route) = target.resource_route(&header)? else {
+                    return Ok(None);
+                };
+                let archive = MountedArchive::open_nested_source(
                     &archive.paths[*index],
-                    &bytes,
+                    source,
+                    &route,
                     virtual_paths,
                     archive.game.clone(),
-                )?
-                .map(|archive| Folder::archive(Arc::new(archive), 0))
+                )?;
+                Some(Folder::archive(Arc::new(archive), 0))
             }
         }
     };

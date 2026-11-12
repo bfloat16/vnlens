@@ -32,7 +32,7 @@ pub struct Resource {
     pub route: ResourceRoute,
     pub bytes: Arc<[u8]>,
     pub script: Option<vnlens_script::ir::Script>,
-    pub psb: Option<vnlens_script::psb::Psb>,
+    pub psb: Option<Arc<vnlens_middleware::psb::PsbValueFile>>,
     pub image: Option<vnlens_image::Image>,
     pub audio: bool,
     /// Name hint for FFmpeg's container probe when the resource is a video.
@@ -119,6 +119,15 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
     if cancel.load(Ordering::Relaxed) {
         return Err(vnlens_core::Error::Cancelled.into());
     }
+    // Native serialized values are files of the mounted PSB. Their parsed
+    // model is independent of JSON presentation and binary resource payloads.
+    if let Target::Entry { archive, index } = target
+        && let Some(value) = archive.psb_values.get(index)
+    {
+        resource.route = ResourceRoute::Other(ResourceKind::Data);
+        resource.psb = Some(value.clone());
+        return Ok(resource);
+    }
     // Only the requested resource is opened. Streaming sources expose logical
     // bytes after archive transforms, and retain the archive's backing storage.
     let source: Option<Arc<dyn vnlens_io::ReadAt>> = match target {
@@ -173,6 +182,11 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
         });
         return Ok(resource);
     }
+    if matches!(resource.route, ResourceRoute::Archive(_)) {
+        // Publish the directed route so the host opens the virtual filesystem.
+        // An archive itself is not a structure-preview file.
+        return Ok(resource);
+    }
     if resource.bytes.is_empty() {
         resource.bytes = target.read(false, cancel)?.into();
     }
@@ -207,18 +221,13 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
                 _ => None,
             };
             if resource.script.is_none()
-                && let Some(content) = vnlens_script::decode_content_as(tag, &resource.bytes)?
+                && let Some(text) = vnlens_script::decode_text_as(tag, &resource.bytes)?
             {
-                match content {
-                    vnlens_script::ScriptContent::Text(text) => {
-                        resource.bytes = text.into_bytes().into()
-                    }
-                    vnlens_script::ScriptContent::Psb(psb) => resource.psb = Some(psb),
-                }
+                resource.bytes = text.into_bytes().into();
             }
         }
         ResourceRoute::Image(tag) => {
-            resource.image = Some(decode_image(target, tag, &resource.bytes)?)
+            resource.image = Some(decode_image(target, tag, &resource.bytes, Some(cancel))?)
         }
         ResourceRoute::Audio(tag) => {
             vnlens_audio::metadata_as(tag, &resource.bytes)?
@@ -230,14 +239,19 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
     Ok(resource)
 }
 
-fn decode_image(target: &Target, tag: &str, bytes: &[u8]) -> Result<vnlens_image::Image> {
+fn decode_image(
+    target: &Target,
+    tag: &str,
+    bytes: &[u8],
+    cancelled: Option<&AtomicBool>,
+) -> Result<vnlens_image::Image> {
     Ok(match target {
         Target::Entry { archive, index } => {
             let opened = archive
                 .source
                 .lock()
                 .map_err(|_| anyhow!("Archive reader is unavailable"))?;
-            vnlens_image::decode_with_resources_as(
+            vnlens_image::decode_with_options_as(
                 tag,
                 bytes,
                 Some(&Resources(
@@ -245,12 +259,16 @@ fn decode_image(target: &Target, tag: &str, bytes: &[u8]) -> Result<vnlens_image
                     &archive.paths,
                     &archive.paths[*index],
                 )),
+                archive.game.resource_options(),
+                cancelled,
             )?
         }
-        Target::File(path, game) => vnlens_image::decode_with_resources_as(
+        Target::File(path, game) => vnlens_image::decode_with_options_as(
             tag,
             bytes,
             Some(&FileResources(path, &game.files)),
+            game.resource_options(),
+            cancelled,
         )?,
         _ => return Err(anyhow!("Image decoding requires engine context")),
     })
@@ -283,7 +301,7 @@ pub fn convert(
     match (kind, route) {
         (ExportKind::Png, ResourceRoute::Image(tag)) => {
             if frame == 0 {
-                Ok(decode_image(target, tag, bytes)?.to_png()?)
+                Ok(decode_image(target, tag, bytes, None)?.to_png()?)
             } else {
                 Ok(vnlens_image::decode_frame_as(tag, bytes, frame)?.to_png()?)
             }

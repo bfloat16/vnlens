@@ -16,8 +16,10 @@ use crate::browser::{self, Folder, Item, Target};
 
 mod audio_view;
 mod browser_view;
+mod dataset;
 mod filename;
 mod image_view;
+mod imports;
 mod layout;
 mod level_meter;
 mod names;
@@ -142,7 +144,7 @@ struct Preview {
     image_frames: usize,
     image_frame: usize,
     script: Option<Arc<vnlens_script::ir::Script>>,
-    psb: Option<Arc<vnlens_script::psb::Psb>>,
+    psb: Option<Arc<vnlens_middleware::psb::PsbValueFile>>,
     ir_table: Option<script_view::Table>,
     audio: Option<audio_view::AudioPreview>,
     video: Option<Box<video_view::VideoPreview>>,
@@ -229,7 +231,10 @@ impl Preview {
         let ir_table = if let Some(script) = &resource.script {
             Some(script_view::Table::new(script, cancelled)?)
         } else if let Some(psb) = &resource.psb {
-            Some(script_view::Table::from_psb(psb, cancelled)?)
+            Some(script_view::Table::from_psb(
+                psb.value().ok_or(vnlens_core::Error::InvalidFormat)?,
+                cancelled,
+            )?)
         } else {
             None
         };
@@ -251,7 +256,7 @@ impl Preview {
             image_frames,
             image_frame: 0,
             script: resource.script.map(Arc::new),
-            psb: resource.psb.map(Arc::new),
+            psb: resource.psb,
             ir_table,
             audio,
             video,
@@ -314,14 +319,15 @@ impl Preview {
 enum Event {
     Names(names::Update),
     NamesRefreshed(anyhow::Result<Vec<names::Refresh>>),
-    Imported(Arc<AtomicBool>, Vec<anyhow::Result<Item>>),
-    ImportProgress(Arc<AtomicBool>, u64, u64),
+    Imported(Arc<AtomicBool>, anyhow::Result<Item>),
     Folder(u64, anyhow::Result<Option<Folder>>),
     Preview(Arc<AtomicBool>, anyhow::Result<Box<Preview>>),
     ImageFrame(Arc<AtomicBool>, usize, anyhow::Result<Arc<RenderImage>>),
     ImageThumbnail(Arc<AtomicBool>, usize, anyhow::Result<Arc<RenderImage>>),
     Progress(Progress, Option<String>),
     Finished(anyhow::Result<archive::Extraction>),
+    DatasetProgress(vnlens_dataset::Progress, Option<String>),
+    DatasetFinished(vnlens_core::Result<vnlens_dataset::Progress>),
     Converted(anyhow::Result<PathBuf>),
     PreferencesSaved(anyhow::Result<()>),
 }
@@ -343,14 +349,15 @@ pub struct Workspace {
     preview_focus: FocusHandle,
     strip_scroll: ScrollHandle,
     path_scroll: ScrollHandle,
+    status_scroll: ScrollHandle,
+    status_scrollbar: scrollbar::Scrollbar,
     preview_scroll: UniformListScrollHandle,
     preview_vertical_bar: scrollbar::Scrollbar,
     preview_horizontal_bar: scrollbar::Scrollbar,
     image_view: image_view::State,
     sender: mpsc::Sender<Event>,
     _events_task: Task<()>,
-    pending: usize,
-    imports: Vec<Arc<AtomicBool>>,
+    imports: Vec<imports::Batch>,
     request: Arc<AtomicBool>,
     preview: Option<Preview>,
     preview_loading: bool,
@@ -370,11 +377,12 @@ pub struct Workspace {
     show_status: bool,
     raw: bool,
     extracting: bool,
+    dataset_progress: Option<vnlens_dataset::Progress>,
     cancel: Arc<AtomicBool>,
     progress: Progress,
     output: Option<PathBuf>,
     status: String,
-    error: Option<String>,
+    errors: Vec<String>,
 }
 
 impl Workspace {
@@ -432,13 +440,14 @@ impl Workspace {
             preview_focus: cx.focus_handle(),
             strip_scroll: ScrollHandle::new(),
             path_scroll: ScrollHandle::new(),
+            status_scroll: ScrollHandle::new(),
+            status_scrollbar: scrollbar::Scrollbar::default(),
             preview_scroll: UniformListScrollHandle::new(),
             preview_vertical_bar: scrollbar::Scrollbar::default(),
             preview_horizontal_bar: scrollbar::Scrollbar::default(),
             image_view: image_view::State::default(),
             sender,
             _events_task: task,
-            pending: 0,
             imports: Vec::new(),
             request: Arc::new(AtomicBool::new(false)),
             preview: None,
@@ -459,11 +468,12 @@ impl Workspace {
             show_status: false,
             raw: false,
             extracting: false,
+            dataset_progress: None,
             cancel: Arc::new(AtomicBool::new(false)),
             progress: Progress::default(),
             output: None,
             status: "Ready".into(),
-            error: None,
+            errors: Vec::new(),
         }
     }
 
@@ -474,28 +484,31 @@ impl Workspace {
             Event::PreferencesSaved(Err(error)) => {
                 self.error(format!("Cannot save preferences: {error:#}"))
             }
-            Event::Imported(request, results) => {
-                self.imports.retain(|old| !Arc::ptr_eq(old, &request));
-                if request.load(Ordering::Relaxed) {
-                    self.pending = self.pending.saturating_sub(1);
-                    self.status = "Opening cancelled".into();
-                } else {
-                    self.receive_imports(results, cx);
-                    self.status = "Ready".into();
-                }
-            }
-            Event::ImportProgress(request, done, total)
-                if self.imports.iter().any(|job| Arc::ptr_eq(job, &request)) =>
-            {
-                self.status = format!(
-                    "Reading game resources: {:.1}%",
-                    done as f64 * 100. / total.max(1) as f64
-                );
-            }
+            Event::Imported(request, result) => self.receive_import(request, result, cx),
             Event::Folder(id, result) => self.receive_folder(id, result, cx),
             Event::Preview(request, result) if Arc::ptr_eq(&request, &self.request) => {
                 self.preview_loading = false;
                 match result {
+                    Ok(preview)
+                        if matches!(preview.route, vnlens_core::ResourceRoute::Archive(_)) =>
+                    {
+                        preview.release(cx);
+                        self.clear_preview(cx);
+                        if let Some((depth, row)) = self.selection.take()
+                            && let Some(item) = self
+                                .columns
+                                .get_mut(depth)
+                                .and_then(|column| column.folder.items.get_mut(row))
+                        {
+                            item.container = true;
+                            item.kind = vnlens_core::ResourceKind::Archive;
+                            let item = item.clone();
+                            if self.columns.len() <= depth + 1 {
+                                self.load_child(depth, &item, cx);
+                            }
+                            self.reveal_column = Some(depth + 1);
+                        }
+                    }
                     Ok(preview) => {
                         self.clear_preview(cx);
                         self.preview = Some(*preview);
@@ -558,6 +571,28 @@ impl Workspace {
                     Err(error) => self.error(format!("{error:#}")),
                 }
             }
+            Event::DatasetProgress(progress, error) => {
+                self.dataset_progress = Some(progress);
+                if let Some(error) = error {
+                    self.error(error);
+                }
+            }
+            Event::DatasetFinished(result) => {
+                self.extracting = false;
+                match result {
+                    Ok(progress) => {
+                        self.status = format!(
+                            "Dataset generated · {} records · {} voices · {} skipped · {} failed",
+                            progress.records, progress.voices, progress.skipped, progress.failed
+                        );
+                    }
+                    Err(vnlens_core::Error::Cancelled) => {
+                        self.status = "Dataset cancelled · index.json was not written".into();
+                    }
+                    Err(error) => self.error(format!("Dataset: {error}")),
+                }
+                self.dataset_progress = None;
+            }
             Event::Converted(result) => {
                 self.converting = false;
                 match result {
@@ -572,42 +607,10 @@ impl Workspace {
         }
     }
 
-    /// Records the latest failure and opens the status panel, the only place errors appear.
+    /// Records failures in the status panel until explicitly dismissed.
     fn error(&mut self, error: String) {
-        self.error = Some(error);
+        self.errors.push(error);
         self.show_status = true;
-    }
-
-    fn receive_imports(&mut self, results: Vec<anyhow::Result<Item>>, cx: &mut Context<Self>) {
-        self.pending = self.pending.saturating_sub(1);
-        let mut last = None;
-        for result in results {
-            match result {
-                Ok(item) => {
-                    if let Target::File(_, game)
-                    | Target::Directory(_, game)
-                    | Target::ArchiveSet(_, game) = &item.target
-                    {
-                        self.start_names(game.clone(), cx);
-                    }
-                    let root = &mut self.columns[0];
-                    let index = root
-                        .folder
-                        .items
-                        .iter()
-                        .position(|old| old.target.same(&item.target))
-                        .unwrap_or_else(|| {
-                            root.folder.items.push(item);
-                            root.folder.items.len() - 1
-                        });
-                    last = Some(index);
-                }
-                Err(error) => self.error(format!("{error:#}")),
-            }
-        }
-        if let Some(row) = last {
-            self.select(0, row, cx);
-        }
     }
 
     fn receive_folder(
@@ -621,12 +624,29 @@ impl Workspace {
         };
         self.columns[depth].loading = false;
         match result {
-            Ok(Some(folder)) => {
+            Ok(Some(mut folder)) => {
+                // A listing may have finished while the host setting changed.
+                folder
+                    .target
+                    .set_compose_pimg(self.preferences.compose_pimg());
+                for item in &mut folder.items {
+                    item.set_compose_pimg(self.preferences.compose_pimg());
+                }
+                let directory = if let Target::Directory(_, game) = &folder.target {
+                    self.start_names(game.clone(), cx);
+                    Some(folder.target.clone())
+                } else {
+                    None
+                };
                 let column = &mut self.columns[depth];
                 column.folder = folder;
                 if depth > 0 {
                     if let Some(row) = self.columns[depth - 1].selected {
-                        self.columns[depth - 1].folder.items[row].container = true;
+                        let item = &mut self.columns[depth - 1].folder.items[row];
+                        item.container = true;
+                        if let Some(directory) = directory {
+                            item.target = directory;
+                        }
                     }
                     self.reveal_column = Some(depth);
                 }
@@ -675,32 +695,6 @@ impl Workspace {
         self.image_view = image_view::State::default();
     }
 
-    fn open_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        self.pending += 1;
-        let request = Arc::new(AtomicBool::new(false));
-        self.imports.push(request.clone());
-        self.status = "Reading game resources…".into();
-        let sender = self.sender.clone();
-        cx.background_executor()
-            .spawn(async move {
-                let last = std::sync::Mutex::new(Instant::now());
-                let progress = |done, total| {
-                    if let Ok(mut last) = last.lock()
-                        && (last.elapsed().as_millis() >= 100 || done == total)
-                    {
-                        *last = Instant::now();
-                        let _ = sender.send(Event::ImportProgress(request.clone(), done, total));
-                    }
-                };
-                let results = paths
-                    .into_iter()
-                    .map(|path| Item::from_path_cancellable(path, &request, &progress))
-                    .collect();
-                let _ = sender.send(Event::Imported(request, results));
-            })
-            .detach();
-        cx.notify();
-    }
     fn open_dialog(&mut self, _: &Open, _: &mut Window, cx: &mut Context<Self>) {
         self.path_dialog(false, cx);
     }
@@ -735,6 +729,17 @@ impl Workspace {
     fn selected_item(&self) -> Option<&Item> {
         let (depth, row) = self.selection?;
         self.columns.get(depth)?.folder.items.get(row)
+    }
+
+    fn preview_selection(&self) -> Option<(usize, usize)> {
+        let column = self.columns.get(self.active)?;
+        let row = column.selected?;
+        column
+            .folder
+            .items
+            .get(row)?
+            .can_preview()
+            .then_some((self.active, row))
     }
     fn select(&mut self, depth: usize, row: usize, cx: &mut Context<Self>) {
         let Some(item) = self
@@ -844,7 +849,7 @@ impl Workspace {
             let row = self.ir_selected?;
             let table = preview.ir_table.as_ref()?;
             if let Some(psb) = &preview.psb {
-                table.psb_json(row, psb)
+                table.psb_json(row, psb.value()?)
             } else {
                 let index = table.instruction_index(row)?;
                 Some(preview.script.as_ref()?.instructions.get(index)?.to_json())
@@ -1040,14 +1045,11 @@ impl Workspace {
     fn toggle_inspector(&mut self, _: &Inspector, window: &mut Window, cx: &mut Context<Self>) {
         // Reference objects can be inspected explicitly without making every
         // navigation click cover the newly opened child column.
-        if self.selection.is_none()
-            && let Some(row) = self.columns[self.active].selected
-            && matches!(
-                &self.columns[self.active].folder.items[row].target,
-                Target::Entry { .. }
-            )
-        {
-            self.selection = Some((self.active, row));
+        let Some(selection) = self.preview_selection() else {
+            return;
+        };
+        if self.selection.is_none() {
+            self.selection = Some(selection);
             self.show_inspector = true;
             self.inspector_width = None;
             self.reveal_column = Some(self.active);
@@ -1116,10 +1118,42 @@ impl Workspace {
         cx.notify();
     }
 
+    fn toggle_compose_pimg(&mut self, cx: &mut Context<Self>) {
+        let enabled = !self.preferences.compose_pimg();
+        self.preferences.set_compose_pimg(enabled);
+        self.reset_preview(cx);
+        self.selection = None;
+        // Close a PIMG child column before its parent becomes an image leaf.
+        let mut truncate = self.columns.len();
+        for (depth, column) in self.columns.iter_mut().enumerate() {
+            column.folder.target.set_compose_pimg(enabled);
+            for (row, item) in column.folder.items.iter_mut().enumerate() {
+                let was_container = item.container;
+                item.set_compose_pimg(enabled);
+                if was_container && !item.container && column.selected == Some(row) {
+                    truncate = truncate.min(depth + 1);
+                }
+            }
+        }
+        self.columns.truncate(truncate);
+        self.active = self.active.min(self.columns.len() - 1);
+        let preferences = self.preferences.clone();
+        let sender = self.sender.clone();
+        cx.background_executor()
+            .spawn(async move {
+                let _ = sender.send(Event::PreferencesSaved(preferences.save()));
+            })
+            .detach();
+        if let Some(row) = self.columns[self.active].selected {
+            self.select(self.active, row, cx);
+        }
+        cx.notify();
+    }
+
     fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         if !self.imports.is_empty() {
-            for request in &self.imports {
-                request.store(true, Ordering::Relaxed);
+            for job in self.imports.iter().flat_map(|batch| &batch.jobs) {
+                job.request.store(true, Ordering::Relaxed);
             }
             cx.notify();
             return;
@@ -1255,8 +1289,8 @@ impl Workspace {
 
 impl Drop for Workspace {
     fn drop(&mut self) {
-        for request in &self.imports {
-            request.store(true, Ordering::Relaxed);
+        for job in self.imports.iter().flat_map(|batch| &batch.jobs) {
+            job.request.store(true, Ordering::Relaxed);
         }
         self.cancel.store(true, Ordering::Relaxed);
         self.request.store(true, Ordering::Relaxed);

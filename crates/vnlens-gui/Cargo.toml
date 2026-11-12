@@ -13,12 +13,14 @@ path = "src/main.rs"
 [dependencies]
 vnlens-engine.workspace = true
 vnlens-core.workspace = true
+vnlens-middleware.workspace = true
 vnlens-io.workspace = true
 vnlens-archive.workspace = true
 vnlens-image.workspace = true
 vnlens-audio.workspace = true
 vnlens-script.workspace = true
 vnlens-video.workspace = true
+vnlens-dataset.workspace = true
 gpui.workspace = true
 image.workspace = true
 unicode-segmentation.workspace = true

@@ -8,9 +8,7 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use vnlens_core::{
-    ArchiveRoute, Catalog, Entry, Opened, ResourceKind, ResourceOrigin, ResourceRoute,
-};
+use vnlens_core::{ArchiveRoute, Catalog, Entry, Opened, ResourceRoute};
 
 // Include the virtual-path setting because it changes the child's listing.
 type ReferenceArchives = HashMap<(usize, bool), Arc<MountedArchive>>;
@@ -21,6 +19,8 @@ pub struct MountedArchive {
     pub source_path: PathBuf,
     pub entries: Arc<[Entry]>,
     pub paths: Vec<String>,
+    /// Parsed native values belonging to virtual files; no payload reads.
+    pub psb_values: std::collections::BTreeMap<usize, Arc<vnlens_middleware::psb::PsbValueFile>>,
     references: Arc<[AtomicBool]>,
     reference_archives: Arc<Mutex<ReferenceArchives>>,
     pub source: Arc<Mutex<Opened>>,
@@ -56,6 +56,17 @@ impl MountedArchive {
         let opened = Catalog::load()
             .open_view(Arc::new(game.files.open(&path)?), route)
             .with_context(|| format!("Opening {} with {:?}", path.display(), game.engine))?;
+        let source_path = game.files.canonicalize(&path)?;
+        Self::from_opened(path, source_path, opened, virtual_paths, game)
+    }
+
+    fn from_opened(
+        path: PathBuf,
+        source_path: PathBuf,
+        opened: Opened,
+        virtual_paths: bool,
+        game: Arc<vnlens_engine::Identification>,
+    ) -> Result<Self> {
         let mut paths: Vec<_> = opened
             .archive
             .entries()
@@ -71,10 +82,11 @@ impl MountedArchive {
             }
         }
         Ok(Self {
-            source_path: game.files.canonicalize(&path)?,
+            source_path,
             path,
             directories: directories(&paths),
             entries: opened.archive.entries().into(),
+            psb_values: psb_values(&*opened.archive)?,
             references: opened
                 .archive
                 .entries()
@@ -89,27 +101,46 @@ impl MountedArchive {
         })
     }
 
+    /// Opens the engine-selected logical container without preloading its
+    /// resources. The caller preserves its original name and index routing.
+    /// Formats requiring mmap retain their mapped temporary path.
+    pub fn open_nested_source(
+        name: &str,
+        source: Arc<dyn vnlens_io::ReadAt>,
+        route: &ArchiveRoute,
+        virtual_paths: bool,
+        game: Arc<vnlens_engine::Identification>,
+    ) -> Result<Self> {
+        if let Some(opened) = Catalog::load().open_source(source.clone(), name, route)? {
+            return Self::from_opened(
+                PathBuf::from(name),
+                PathBuf::from(name),
+                opened,
+                virtual_paths,
+                game,
+            );
+        }
+        let bytes = source.read_at(0, usize::try_from(source.len())?)?;
+        Self::open_nested(name, &bytes, route, virtual_paths, game)
+    }
+
     /// Materializes only the selected nested container, preserving its extension.
     pub fn open_nested(
         name: &str,
         bytes: &[u8],
+        route: &ArchiveRoute,
         virtual_paths: bool,
         game: Arc<vnlens_engine::Identification>,
-    ) -> Result<Option<Self>> {
-        let ResourceRoute::Archive(route) =
-            game.resource_route(name, ResourceOrigin::Entry(ResourceKind::Unknown), bytes)
-        else {
-            return Ok(None);
-        };
+    ) -> Result<Self> {
         let backing = TemporaryArchive::new()?;
         let file_name = name.rsplit(['/', '\\']).next().unwrap_or("archive");
         let path = vnlens_io::filesystem::write_under(&backing.0, file_name, bytes)?;
         // Keep the selected route and its options: the temporary filename does
         // not contain the original parent path used to select engine keys.
-        let mut opened = Self::open_routed(path, &route, virtual_paths, game)?;
+        let mut opened = Self::open_routed(path, route, virtual_paths, game)?;
         opened.path = PathBuf::from(name);
         opened._backing = Some(Arc::new(backing));
-        Ok(Some(opened))
+        Ok(opened)
     }
 
     pub fn descendants(&self, directory: usize) -> Vec<usize> {
@@ -176,6 +207,7 @@ impl MountedArchive {
             path: PathBuf::from(&entry.name),
             source_path: self.source_path.clone(),
             entries: archive.entries().into(),
+            psb_values: psb_values(&*archive)?,
             references: archive
                 .entries()
                 .iter()
@@ -205,6 +237,7 @@ impl MountedArchive {
             path: self.path.clone(),
             source_path: self.source_path.clone(),
             entries: self.entries.clone(),
+            psb_values: self.psb_values.clone(),
             directories: directories(&paths),
             paths,
             references: self.references.clone(),
@@ -255,6 +288,20 @@ impl MountedArchive {
         }
         id
     }
+}
+
+fn psb_values(
+    archive: &dyn vnlens_core::Archive,
+) -> Result<std::collections::BTreeMap<usize, Arc<vnlens_middleware::psb::PsbValueFile>>> {
+    let mut values = std::collections::BTreeMap::new();
+    for (index, entry) in archive.entries().iter().enumerate() {
+        if let Some(metadata) = archive.entry_metadata(entry)?
+            && let Ok(value) = metadata.downcast::<vnlens_middleware::psb::PsbValueFile>()
+        {
+            values.insert(index, value);
+        }
+    }
+    Ok(values)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

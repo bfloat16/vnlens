@@ -52,6 +52,19 @@ impl Workspace {
             .child(crate::titlebar::drag_space())
             .child(
                 tool_button(
+                    "gen-dataset",
+                    "icons/dataset.svg",
+                    false,
+                    !self.extracting && !self.converting && self.dataset_game().is_some(),
+                )
+                .pr(px(10.))
+                .child("Gen Dataset")
+                .occlude()
+                .tooltip(tooltip("Generate a dialogue dataset for the current game"))
+                .on_click(cx.listener(|this, _, _, cx| this.dataset_dialog(cx))),
+            )
+            .child(
+                tool_button(
                     "export",
                     "icons/export.svg",
                     self.show_export_menu,
@@ -81,7 +94,7 @@ impl Workspace {
                     "inspector",
                     "icons/sidebar.svg",
                     self.show_inspector && self.selection.is_some(),
-                    true,
+                    self.preview_selection().is_some(),
                 )
                 .occlude()
                 .tooltip(tooltip(format!("Preview ({})", shortcut("I"))))

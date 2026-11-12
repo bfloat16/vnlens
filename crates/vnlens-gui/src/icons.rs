@@ -51,6 +51,7 @@ const ICONS: &[Icon] = &[
     icon!("folder-open", 0xffffff),
     icon!("file-plus", 0xffffff),
     icon!("export", 0xffffff),
+    icon!("dataset", 0xffffff),
     icon!("import", 0xffffff),
     icon!("sidebar", 0xffffff),
     icon!("settings", 0xffffff),
