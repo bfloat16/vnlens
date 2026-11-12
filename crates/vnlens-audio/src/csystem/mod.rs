@@ -36,6 +36,7 @@ pub fn decode_envelope<'a>(data: &'a [u8], key: &[u8]) -> Result<Cow<'a, [u8]>> 
     }
     Ok(Cow::Owned(out))
 }
+
 #[cfg(test)]
-#[path = "../tests/csystem.rs"]
+#[path = "../../tests/csystem/mod.rs"]
 mod tests;
