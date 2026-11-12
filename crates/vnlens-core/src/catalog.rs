@@ -77,6 +77,23 @@ impl Catalog {
         })
     }
 
+    /// Opens logical bytes with the selected format's streaming source entry.
+    /// None preserves that same format's mapped-view path; no reader is probed.
+    pub fn open_source(
+        &self,
+        source: Arc<dyn vnlens_io::ReadAt>,
+        name: &str,
+        route: &crate::ArchiveRoute,
+    ) -> Result<Option<Opened>> {
+        let format = self.format(route.tag)?;
+        Ok(format
+            .open_source(source, name, &route.options)?
+            .map(|archive| Opened {
+                format_tag: format.tag(),
+                archive,
+            }))
+    }
+
     fn format(&self, tag: &str) -> Result<&dyn ArchiveFormat> {
         self.archives
             .iter()

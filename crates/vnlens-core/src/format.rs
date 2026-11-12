@@ -34,12 +34,38 @@ pub trait ArchiveFormat: Format {
     /// Opens the selected format with resolved engine parameters. Structural
     /// mismatches are errors; they never trigger another format reader.
     fn open(&self, view: &Arc<ArcView>, options: &ArchiveOptions) -> Result<Box<dyn Archive>>;
+
+    /// Opens an already transformed logical source without materializing a
+    /// nested container. None means this format requires a mapped view.
+    fn open_source(
+        &self,
+        _source: Arc<dyn vnlens_io::ReadAt>,
+        _name: &str,
+        _options: &ArchiveOptions,
+    ) -> Result<Option<Box<dyn Archive>>> {
+        Ok(None)
+    }
 }
 
 /// An opened archive instance, owning its state (index, keys, view handle).
 pub trait Archive: Send {
     /// All entries.
     fn entries(&self) -> &[Entry];
+
+    /// Retains the format's complete parsed metadata independently of payload
+    /// reads. Consumers downcast only a metadata type they understand.
+    fn metadata(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+
+    /// Already parsed metadata for one virtual file, without reading payloads.
+    /// The bytes remain accessible through the normal entry read methods.
+    fn entry_metadata(
+        &self,
+        _entry: &Entry,
+    ) -> Result<Option<Arc<dyn std::any::Any + Send + Sync>>> {
+        Ok(None)
+    }
 
     /// Opens logical resource bytes after archive and embedded-resource
     /// transformations. Hosts must not apply the disk resource envelope again.

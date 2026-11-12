@@ -1,5 +1,5 @@
 //! vnlens core abstraction layer: entry model, format traits, registry,
-//! probing, and the shared error type.
+//! probing, shared script documents, and the common error type.
 //!
 //! This crate contains no concrete format implementations; it only defines the
 //! contracts shared across layers.
@@ -9,6 +9,7 @@ mod catalog;
 mod entry;
 mod error;
 mod format;
+pub mod ir;
 mod routing;
 
 pub use catalog::{Catalog, Opened};
