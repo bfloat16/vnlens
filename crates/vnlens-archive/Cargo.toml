@@ -8,6 +8,7 @@ autotests = false
 
 [dependencies]
 vnlens-core.workspace = true
+vnlens-middleware.workspace = true
 vnlens-io.workspace = true
 vnlens-crypto.workspace = true
 vnlens-bin.workspace = true
@@ -16,6 +17,7 @@ vnlens-script.workspace = true
 encoding_rs.workspace = true
 
 [dev-dependencies]
+vnlens-engine.workspace = true
 chacha20poly1305.workspace = true
 flate2.workspace = true
 vnlens-image.workspace = true

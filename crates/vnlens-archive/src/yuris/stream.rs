@@ -1,13 +1,14 @@
-//! YPF payload streams. Stored-byte MurmurHash2 and zlib lengths are verified
+//! YPF payload streams. The index-selected stored-byte checksum and zlib lengths are verified
 //! while reading; rewind replays decompression with constant payload memory.
 
+use super::ypf::ChecksumScheme;
 use std::{
     borrow::Cow,
     io::{self, Read, Seek, SeekFrom},
     sync::{Arc, atomic::AtomicBool},
 };
 use vnlens_core::Error;
-use vnlens_crypto::{compress::zlib, hash::murmur2::Murmur2};
+use vnlens_crypto::{checksum::adler32::Adler32, compress::zlib, hash::murmur2::Murmur2};
 use vnlens_io::{ReadAt, ReadSeek, ReplayReader};
 
 #[derive(Clone)]
@@ -16,6 +17,7 @@ pub(super) struct YpfSource {
     pub packed: bool,
     pub size: u64,
     pub checksum: u32,
+    pub checksum_scheme: ChecksumScheme,
     pub offset: u64,
 }
 impl ReadAt for YpfSource {
@@ -40,7 +42,10 @@ impl ReadAt for YpfSource {
             let reader = Stored {
                 reader: self.source.clone().reader(cancelled)?,
                 remaining: self.source.len(),
-                hash: Murmur2::new(self.source.len(), 0),
+                hash: match self.checksum_scheme {
+                    ChecksumScheme::Murmur2 => Hash::Murmur2(Murmur2::new(self.source.len(), 0)),
+                    ChecksumScheme::Crc32Adler32 => Hash::Adler32(Adler32::default()),
+                },
                 checksum: self.checksum,
                 offset: self.offset,
             };
@@ -56,9 +61,27 @@ impl ReadAt for YpfSource {
 struct Stored {
     reader: Box<dyn ReadSeek>,
     remaining: u64,
-    hash: Murmur2,
+    hash: Hash,
     checksum: u32,
     offset: u64,
+}
+enum Hash {
+    Murmur2(Murmur2),
+    Adler32(Adler32),
+}
+impl Hash {
+    fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Murmur2(hash) => hash.update(bytes),
+            Self::Adler32(hash) => hash.update(bytes),
+        }
+    }
+    fn checksum(&self) -> u32 {
+        match self {
+            Self::Murmur2(hash) => hash.clone().finish(),
+            Self::Adler32(hash) => hash.checksum(),
+        }
+    }
 }
 impl Read for Stored {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -76,7 +99,7 @@ impl Read for Stored {
             .remaining
             .checked_sub(read as u64)
             .ok_or_else(|| io::Error::other("YPF stored length overflow"))?;
-        if self.remaining == 0 && self.hash.clone().finish() != self.checksum {
+        if self.remaining == 0 && self.hash.checksum() != self.checksum {
             return Err(io::Error::other(Error::Corrupt {
                 offset: self.offset,
                 reason: "YPF stored payload hash mismatch".into(),

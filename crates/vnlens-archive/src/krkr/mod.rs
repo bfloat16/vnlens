@@ -73,7 +73,7 @@ fn chunk<'a>(r: &mut BinaryReader<'a>) -> Result<(&'a [u8], &'a [u8])> {
         .map_err(|_| corrupt(r.position() as u64, "XP3 chunk size does not fit memory"))?;
     Ok((tag, r.read_bytes(len)?))
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Segment {
     offset: u64,
     stored: u64,
@@ -93,7 +93,7 @@ struct Xp3Archive {
     view: Arc<ArcView>,
     entries: Vec<Entry>,
     records: Vec<Record>,
-    names: BTreeMap<String, usize>,
+    names: BTreeMap<String, BTreeMap<(u64, u64), usize>>,
     filter: Option<Arc<Filter>>,
     xor31: bool,
 }
@@ -291,8 +291,29 @@ impl Xp3Archive {
                     size: end - begin,
                     packed: Some(packed),
                 };
-                if names.insert(entry.name.clone(), selected.len()).is_some() {
-                    return Err(corrupt(begin, "Duplicate XP3 entry path"));
+                // Hxv4 can assign several synthetic IDs to the same hashed
+                // path and physical segments. Keep every index entry, and
+                // distinguish repeated paths by their actual storage extent.
+                let identity = (entry.offset, entry.size);
+                let ranges = names
+                    .entry(entry.name.clone())
+                    .or_insert_with(BTreeMap::new);
+                if let Some(&previous) = ranges.get(&identity) {
+                    let old: &Record = &selected[previous];
+                    if old.flags != record.flags
+                        || old.size != record.size
+                        || old.stored != record.stored
+                        || old.segments != record.segments
+                        || old.adler != record.adler
+                        || old.filter != record.filter
+                    {
+                        return Err(corrupt(
+                            begin,
+                            "Conflicting XP3 metadata for identical entry storage",
+                        ));
+                    }
+                } else {
+                    ranges.insert(identity, selected.len());
                 }
                 entries.push(entry);
             }
@@ -389,6 +410,7 @@ impl Xp3Archive {
     fn record(&self, entry: &Entry) -> Result<&Record> {
         self.names
             .get(&entry.name)
+            .and_then(|ranges| ranges.get(&(entry.offset, entry.size)))
             .map(|&i| &self.records[i])
             .ok_or_else(|| corrupt(entry.offset, "Entry does not belong to this XP3"))
     }

@@ -5,16 +5,17 @@
 //! `<package>_body.bin`, `<package>body.bin`, or `<package>.bin`.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use vnlens_core::{
     ArcView, Archive, ArchiveFormat, Entry, Error, Format, ResourceKind, Result, register_archive,
 };
-use vnlens_script::mdf;
-use vnlens_script::psb::{self, ArchiveInfoEntry, ParseOptions};
+use vnlens_middleware::mdf;
+use vnlens_middleware::psb::{self, ArchiveInfoEntry};
 
-const SIGNATURES: &[u32] = &[0x0042_5350, 0x0066_646d, 0x0073_7a6d];
+const SIGNATURES: &[u32] = &[0x0042_5350, 0x0066_646d, 0x0073_7a6d, 0x005a_5350];
 
 /// Emote archive-info PSB format.
 #[derive(Debug, Default)]
@@ -22,7 +23,7 @@ struct EmoteArchiveInfo;
 
 impl Format for EmoteArchiveInfo {
     fn tag(&self) -> &'static str {
-        "psb/emote-archive-info"
+        "psb/archive-info"
     }
 
     fn signatures(&self) -> &'static [u32] {
@@ -30,7 +31,7 @@ impl Format for EmoteArchiveInfo {
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        &["psb", "m"]
+        &["psb", "m", "mdf", "mzs", "psz"]
     }
 
     fn description(&self) -> &'static str {
@@ -58,23 +59,13 @@ impl ArchiveFormat for EmoteArchiveInfo {
                     .map_err(|_| Error::Unsupported("MDF key length exceeds address space".into()))
             })
             .transpose()?;
-        let psb_key = options
-            .keys
-            .get("psb")
-            .map(|key| {
-                if key.bytes().len() != 4 {
-                    return Err(Error::UnknownScheme(Some("Invalid PSB key".into())));
-                }
-                Ok(vnlens_io::BinaryReader::u32_le(key.bytes()))
-            })
-            .transpose()?;
-        let parsed = parse_info_psb(view, mdf_base_key.as_deref(), mdf_key_len, psb_key)?;
-        let (_, info_entries) = psb::archive_info_entries(&parsed)?;
+        let info = psb::PsbFile::open_configured(view.clone(), view.file_name(), options, None)?;
+        let (_, info_entries) = psb::archive_info_entries(&info.document)?;
         let body_path = find_body_path(view).ok_or_else(|| {
             Error::Unsupported("missing sibling body.bin for Emote archive-info PSB".to_string())
         })?;
         let mut entries = build_entries(&info_entries, view.related_len(&body_path)?)?;
-        let suffix = psb::archive_info_suffix(&parsed).map(str::to_string);
+        let suffix = psb::archive_info_suffix(&info.document).map(str::to_string);
         let kaleido = options.numbers.get("kaleido") == Some(&1);
         if kaleido {
             for entry in &mut entries {
@@ -91,7 +82,20 @@ impl ArchiveFormat for EmoteArchiveInfo {
             }
         }
 
+        let mut used: BTreeSet<_> = entries.iter().map(|entry| entry.name.clone()).collect();
+        let mut index_entries = BTreeMap::new();
+        for (index, entry) in info.entries().iter().enumerate() {
+            let mut exposed = entry.clone();
+            exposed.name = format!("index/{}", entry.name);
+            while !used.insert(exposed.name.clone()) {
+                exposed.name = format!("index/{}", exposed.name);
+            }
+            index_entries.insert(exposed.name.clone(), index);
+            entries.push(exposed);
+        }
         Ok(Box::new(EmoteArchive {
+            info,
+            index_entries,
             index: view.clone(),
             body_path,
             body: OnceLock::new(),
@@ -105,6 +109,8 @@ impl ArchiveFormat for EmoteArchiveInfo {
 }
 
 struct EmoteArchive {
+    info: psb::PsbFile,
+    index_entries: BTreeMap<String, usize>,
     index: Arc<ArcView>,
     body_path: PathBuf,
     body: OnceLock<ArcView>,
@@ -124,11 +130,27 @@ impl std::fmt::Debug for EmoteArchive {
 }
 
 impl Archive for EmoteArchive {
+    fn metadata(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.info.metadata()
+    }
     fn entries(&self) -> &[Entry] {
         &self.entries
     }
 
+    fn entry_metadata(
+        &self,
+        entry: &Entry,
+    ) -> Result<Option<Arc<dyn std::any::Any + Send + Sync>>> {
+        match self.info_entry(entry) {
+            Some(entry) => self.info.entry_metadata(entry),
+            None => Ok(None),
+        }
+    }
+
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
+        if let Some(entry) = self.info_entry(entry) {
+            return self.info.open_entry(entry);
+        }
         let raw = self.body_view()?.slice(entry.offset, entry.size)?;
         if mdf::is_mdf(raw) {
             return Ok(Cow::Owned(decode_entry_mdf(
@@ -142,6 +164,13 @@ impl Archive for EmoteArchive {
         Ok(Cow::Borrowed(raw))
     }
 
+    fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn vnlens_io::ReadAt>>> {
+        match self.info_entry(entry) {
+            Some(entry) => self.info.open_entry_source(entry),
+            None => Ok(None),
+        }
+    }
+
     fn virtual_paths(&self) -> Result<Vec<(usize, String)>> {
         if !self.kaleido {
             return Ok(Vec::new());
@@ -149,6 +178,7 @@ impl Archive for EmoteArchive {
         Ok(self
             .entries
             .iter()
+            .take(self.entries.len() - self.info.entries().len())
             .enumerate()
             .map(|(i, entry)| {
                 (
@@ -158,18 +188,11 @@ impl Archive for EmoteArchive {
             })
             .collect())
     }
-    fn has_references(&self, entry: &Entry) -> bool {
-        self.kaleido && entry.kind == ResourceKind::Data
-    }
-    fn open_references(&self, entry: &Entry) -> Result<Option<Box<dyn Archive>>> {
-        if !self.has_references(entry) {
-            return Ok(None);
-        }
-        let bytes: Arc<[u8]> = self.open_entry(entry)?.into_owned().into();
-        super::psb_resources::from_source(Arc::new(bytes), None).map(Some)
-    }
 
     fn open_entry_raw(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
+        if let Some(entry) = self.info_entry(entry) {
+            return self.info.open_entry_raw(entry);
+        }
         Ok(Cow::Borrowed(
             self.body_view()?.slice(entry.offset, entry.size)?,
         ))
@@ -177,6 +200,11 @@ impl Archive for EmoteArchive {
 }
 
 impl EmoteArchive {
+    fn info_entry(&self, entry: &Entry) -> Option<&Entry> {
+        self.index_entries
+            .get(&entry.name)
+            .map(|&index| &self.info.entries()[index])
+    }
     fn body_view(&self) -> Result<&ArcView> {
         if let Some(view) = self.body.get() {
             return Ok(view);
@@ -187,23 +215,6 @@ impl EmoteArchive {
             .get()
             .ok_or_else(|| Error::Unsupported("body view initialization failed".into()))
     }
-}
-
-fn parse_info_psb(
-    view: &Arc<ArcView>,
-    base_key: Option<&str>,
-    key_len: Option<usize>,
-    psb_key: Option<u32>,
-) -> Result<psb::Psb> {
-    let key = base_key.map(|base| format!("{base}{}", view.file_name()));
-    let source = psb::open_source(
-        Arc::clone(view),
-        ParseOptions {
-            psb_key,
-            mdf_key: key.as_deref().map(|key| mdf::MdfKey { key, key_len }),
-        },
-    )?;
-    psb::parse_source(&*source, psb_key)
 }
 
 fn decode_entry_mdf(

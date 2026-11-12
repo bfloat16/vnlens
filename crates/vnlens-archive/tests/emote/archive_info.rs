@@ -24,17 +24,27 @@ fn catalog_opens_info_psb_with_sibling_body() {
     let opened = catalog
         .open(
             &info_path,
-            &vnlens_core::ArchiveRoute::new("psb/emote-archive-info"),
+            &vnlens_core::ArchiveRoute::new("psb/archive-info"),
         )
         .unwrap();
-    assert_eq!(opened.format_tag, "psb/emote-archive-info");
+    assert_eq!(opened.format_tag, "psb/archive-info");
     let entries = opened.archive.entries();
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].name, "dir/file.bin");
     assert_eq!(entries[0].offset, 1);
+    assert_eq!(entries[1].name, "index/file_info");
     // A mapped body would prevent replacement on Windows. Mounting must
     // leave it unopened until an entry is actually requested.
     fs::rename(&body_path, dir.join("unused_body.bin")).unwrap();
+    let metadata = opened
+        .archive
+        .entry_metadata(&entries[1])
+        .unwrap()
+        .unwrap()
+        .downcast::<psb::PsbValueFile>()
+        .unwrap();
+    assert!(metadata.value().unwrap().as_object().is_some());
+    assert!(!opened.archive.open_entry(&entries[1]).unwrap().is_empty());
     fs::write(&body_path, b"ABCDEF").unwrap();
     assert_eq!(
         opened.archive.open_entry_raw(&entries[0]).unwrap().as_ref(),

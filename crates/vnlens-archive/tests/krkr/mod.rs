@@ -275,6 +275,44 @@ fn chained_indices_both_nonces_and_segment_offsets_are_lazy() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn repeated_paths_preserve_entries_and_select_their_storage() -> Result<()> {
+    let mut sample = Sample::new(0)?;
+    let mut bytes = MAGIC.to_vec();
+    u64v(&mut bytes, 0);
+    let first = bytes.len() as u64;
+    bytes.extend(b"one");
+    let second = bytes.len() as u64;
+    bytes.extend(b"two");
+    let mut index = Vec::new();
+    for (offset, text) in [(first, b"one"), (first, b"one"), (second, b"two")] {
+        index.extend(record(
+            "same.bin",
+            0,
+            3,
+            &[(0, offset, 3, 3)],
+            adler32::checksum(text),
+        ));
+    }
+    let at = bytes.len() as u64;
+    bytes.push(0);
+    u64v(&mut bytes, index.len() as u64);
+    bytes.extend(index);
+    BinaryWriter::u64_le(at, &mut bytes[11..]);
+    sample.bytes = bytes;
+    let archive = sample.open()?;
+    assert_eq!(archive.entries().len(), 3);
+    for (entry, expected) in archive.entries().iter().zip([b"one", b"one", b"two"]) {
+        assert_eq!(entry.name, "same.bin");
+        assert_eq!(&*archive.open_entry(entry)?, expected);
+        assert_eq!(&*archive.open_entry_raw(entry)?, expected);
+        let mut foreign = entry.clone();
+        foreign.offset += 1;
+        assert!(archive.open_entry(&foreign).is_err());
+    }
+    Ok(())
+}
 #[test]
 fn rejects_modified_authentication_cycles_truncation_and_segment_overflow() -> Result<()> {
     let mut sample = Sample::new(0)?;
@@ -398,7 +436,7 @@ fn recovery_is_explicit_cross_archive_cancellable_and_keeps_unresolved_hashes() 
     let images = Sample::new(0)?;
     let first = hashed("scenario/chapter/", "first.ks");
     let missing = hashed("unknown/", "unreferenced.png");
-    write(&source.path,&[(hashed("","startup.tjs"),br#"var a="scenario/"+"chapter/first.ks"; var b="image/bg.png"; var c="prefix"+unknown+"suffix.png";"#)])?;
+    write(&source.path,&[(hashed("","startup.tjs"),br#"var a="scenario/"+"chapter/first.ks"; var b="image/bg.png"; var c="prefix"+unknown+"suffix.png"; var actor="actor.stand";"#)])?;
     write(
         &images.path,
         &[
@@ -406,16 +444,18 @@ fn recovery_is_explicit_cross_archive_cancellable_and_keeps_unresolved_hashes() 
             (hashed("image/", "bg.png"), b"\x89PNG\r\n\x1a\n\0\0"),
             (missing.clone(), b"\0\x01"),
             (hashed("", "bad.ks"), b"\xfe\xfe"),
+            (hashed("", "actor.stand"), br#"[%["filename"=>"actor1"]]"#),
+            (hashed("", "actor1.txt"), b"#layer_type\tname\tleft\ttop\twidth\theight\ttype\topacity\tvisible\tlayer_id\tgroup_layer_id\tbase\timages\n0\tface\t0\t0\t1\t1\t13\t255\t1\t7\n"),
+            (hashed("", "actor1_7.tlg"), b"\0"),
+            (hashed("", "actor1_8.tlg"), b"\0"),
         ],
     )?;
     let cancel = AtomicBool::new(false);
-    let mut recovery = NameRecovery::open(
-        &[
-            (images.path.clone(), ArchiveOptions::default()),
-            (source.path.clone(), ArchiveOptions::default()),
-        ],
-        &cancel,
-    )?;
+    let inputs = [
+        (images.path.clone(), ArchiveOptions::default()),
+        (source.path.clone(), ArchiveOptions::default()),
+    ];
+    let mut recovery = NameRecovery::open(&inputs, &cancel)?;
     assert_eq!(recovery.progress().completed, 0);
     let original = Xp3.open(
         &Arc::new(ArcView::open(&images.path)?),
@@ -426,10 +466,70 @@ fn recovery_is_explicit_cross_archive_cancellable_and_keeps_unresolved_hashes() 
     assert_eq!(paths[&images.path][0], "scenario/chapter/first.ks");
     assert_eq!(paths[&images.path][1], "image/bg.png");
     assert_eq!(paths[&images.path][2], missing);
+    assert_eq!(paths[&images.path][4], "actor.stand");
+    assert_eq!(paths[&images.path][5], "actor1.txt");
+    assert_eq!(paths[&images.path][6], "actor1_7.tlg");
+    assert_eq!(
+        paths[&images.path][7],
+        hashed("", "actor1_8.tlg")
+            .split_once('/')
+            .map(|(_, file)| file)
+            .unwrap_or("")
+    );
     assert_eq!(original.entries()[0].name, first);
     assert_eq!(recovery.progress().failed, 1);
     assert_eq!(recovery.take_errors().len(), 1);
     assert!(recovery.take_errors().is_empty());
+    // Parallel dispatch can precede discovery of a definition's name. Both
+    // fresh sessions and partially stepped sessions must reach the same paths.
+    for steps in [0, 3] {
+        let mut parallel = NameRecovery::open(&inputs, &cancel)?;
+        for _ in 0..steps {
+            assert!(parallel.step(&cancel)?);
+        }
+        let mut snapshots = 0;
+        let mut live_names = false;
+        let mut finished = 0;
+        parallel.run(&cancel, |session, done| {
+            snapshots += 1;
+            let progress = session.progress();
+            assert!(progress.completed <= progress.total);
+            if done {
+                finished += 1;
+                assert_eq!(progress.completed, progress.total);
+            } else if progress.completed < progress.total {
+                live_names |= session.paths()[&images.path][4] == "actor.stand";
+            }
+        })?;
+        assert!(snapshots > 1);
+        assert!(live_names);
+        assert_eq!(finished, 1);
+        assert_eq!(parallel.paths(), paths);
+        assert_eq!(parallel.progress().resolved, recovery.progress().resolved);
+        assert_eq!(parallel.progress().failed, 1);
+        assert_eq!(parallel.take_errors().len(), 1);
+        assert!(parallel.take_errors().is_empty());
+    }
+    let mut interrupted = NameRecovery::open(&inputs, &cancel)?;
+    let mut failures = 0;
+    assert!(matches!(
+        interrupted.run(&cancel, |session, done| {
+            assert!(!done);
+            failures = session.progress().failed;
+            cancel.store(true, Ordering::Relaxed);
+        }),
+        Err(Error::Cancelled)
+    ));
+    assert_eq!(interrupted.progress().failed, failures);
+    cancel.store(false, Ordering::Relaxed);
+    let mut empty = NameRecovery::open(&[], &cancel)?;
+    let mut finished = 0;
+    empty.run(&cancel, |session, done| {
+        assert!(done);
+        assert_eq!(session.progress(), NameProgress::default());
+        finished += 1;
+    })?;
+    assert_eq!(finished, 1);
     assert!(matches!(
         recovery.step(&AtomicBool::new(true)),
         Err(Error::Cancelled)
@@ -552,5 +652,78 @@ fn xor31_segments_plain_entries_and_bad_payloads_remain_lazy() -> Result<()> {
         Xp3.open(&view, &options),
         Err(Error::Unsupported(_))
     ));
+    Ok(())
+}
+
+#[test]
+#[ignore = "Requires licensed local Hxv4 installations under VNLENS_HXV4_SAMPLES; run cargo test -p vnlens-archive hxv4_local -- --ignored --nocapture"]
+fn hxv4_local_indices_and_protected_entries() -> Result<()> {
+    use std::sync::atomic::AtomicBool;
+    use vnlens_core::{ResourceOrigin, ResourceRoute};
+    let root = std::env::var_os("VNLENS_HXV4_SAMPLES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("E:/VN/_Engine/krkrz_hxv4"));
+    let cancel = AtomicBool::new(false);
+    for name in [
+        "Hanagane Kanade Gram",
+        "Tenshin Ranman Lucky or Unlucky!",
+        "Tenshi☆Souzou RE-BOOT!",
+        "Café Stella to Shinigami no Chou",
+        "LimeLight Lemonade Jam",
+        "AMBITIOUS MISSION",
+    ] {
+        let path = root.join(name);
+        let game = vnlens_engine::identify(&path, &cancel)?.ok_or(Error::InvalidFormat)?;
+        assert_eq!(game.engine, vnlens_engine::Engine::KrkrzHxv4);
+        let mut archives = 0;
+        let mut checked = 0;
+        for file in std::fs::read_dir(path)? {
+            let file = file?;
+            if !file
+                .path()
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("xp3"))
+            {
+                continue;
+            }
+            let file_name = file.file_name();
+            let ResourceRoute::Archive(route) =
+                game.resource_route(&file_name.to_string_lossy(), ResourceOrigin::File, &[])
+            else {
+                return Err(Error::InvalidFormat);
+            };
+            assert_eq!(route.tag, "xp3/krkr");
+            let view = Arc::new(game.files.open(&file.path())?);
+            let archive = Xp3Archive::open(&view, &route.options)?;
+            archives += 1;
+            let protected = archive
+                .entries
+                .iter()
+                .filter(|entry| {
+                    archive
+                        .record(entry)
+                        .is_ok_and(|record| record.filter.is_some())
+                })
+                .collect::<Vec<_>>();
+            if !protected.is_empty() {
+                for index in [0, protected.len() / 2, protected.len() - 1] {
+                    let entry = protected[index];
+                    let record = archive.record(entry)?;
+                    assert!(record.adler.is_some());
+                    let bytes = archive.open_entry(entry)?;
+                    assert_eq!(bytes.len() as u64, record.size);
+                    assert_eq!(Some(adler32::checksum(&bytes)), record.adler);
+                    checked += 1;
+                }
+            }
+            println!(
+                "Mounted {name}/{}: {} entries",
+                file_name.to_string_lossy(),
+                archive.entries.len()
+            );
+        }
+        assert!(archives > 0 && checked > 0);
+        println!("Verified {name}: {archives} archives, {checked} protected entry checksums");
+    }
     Ok(())
 }

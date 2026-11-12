@@ -4,12 +4,12 @@
 
 use super::*;
 use std::{
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Read},
     sync::atomic::{AtomicBool, Ordering},
 };
-use vnlens_io::{RangeSource, ReadAt, ReadSeek, ReplayReader};
+use vnlens_io::{RangeSource, ReadAt, ReplaySource};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) struct Xp3Source {
     pub view: Arc<ArcView>,
     pub segments: Arc<[Segment]>,
@@ -17,33 +17,7 @@ pub(super) struct Xp3Source {
     pub entry_filter: Option<(u64, u16)>,
     pub xor_hash: Option<u32>,
     pub checksum: Option<u32>,
-    pub size: u64,
     pub offset: u64,
-}
-
-impl ReadAt for Xp3Source {
-    fn len(&self) -> u64 {
-        self.size
-    }
-    fn read_at(&self, offset: u64, size: usize) -> io::Result<Cow<'_, [u8]>> {
-        if offset > self.size || size as u64 > self.size - offset {
-            return Err(vnlens_io::BinaryIo::unexpected_eof(
-                "XP3 stream range exceeds entry",
-            ));
-        }
-        let mut reader = Arc::new(self.clone()).reader(Arc::new(AtomicBool::new(false)))?;
-        reader.seek(SeekFrom::Start(offset))?;
-        let mut data = vec![0; size];
-        reader.read_exact(&mut data)?;
-        Ok(Cow::Owned(data))
-    }
-    fn reader(self: Arc<Self>, cancelled: Arc<AtomicBool>) -> io::Result<Box<dyn ReadSeek>> {
-        let size = self.size;
-        let factory = Arc::new(move |cancelled| -> io::Result<Box<dyn Read + Send>> {
-            Ok(Box::new(Segments::new(self.clone(), cancelled)))
-        });
-        Ok(Box::new(ReplayReader::new(factory, size, cancelled)?))
-    }
 }
 
 struct Segments {
@@ -170,9 +144,9 @@ impl Xp3Archive {
         );
     }
 
-    pub(super) fn source(&self, entry: &Entry) -> Result<Arc<Xp3Source>> {
+    pub(super) fn source(&self, entry: &Entry) -> Result<Arc<ReplaySource>> {
         let record = self.record(entry)?;
-        Ok(Arc::new(Xp3Source {
+        let source = Arc::new(Xp3Source {
             view: self.view.clone(),
             segments: record.segments.clone().into(),
             filter: self.filter.clone(),
@@ -181,17 +155,20 @@ impl Xp3Archive {
                 .then_some(record.adler)
                 .flatten(),
             checksum: record.adler,
-            size: record.size,
             offset: entry.offset,
-        }))
+        });
+        let factory = Arc::new(move |cancelled| -> io::Result<Box<dyn Read + Send>> {
+            Ok(Box::new(Segments::new(source.clone(), cancelled)))
+        });
+        Ok(Arc::new(ReplaySource::new(factory, record.size)?))
     }
 
     pub(super) fn read_cancellable(&self, entry: &Entry, cancel: &AtomicBool) -> Result<Vec<u8>> {
         let source = self.source(entry)?;
-        let capacity = usize::try_from(source.size)
-            .map_err(|_| corrupt(source.offset, "XP3 size does not fit memory"))?;
+        let capacity = usize::try_from(source.len())
+            .map_err(|_| corrupt(entry.offset, "XP3 size does not fit memory"))?;
         let mut out = Vec::with_capacity(capacity);
-        let mut reader = Segments::new(source, Arc::new(AtomicBool::new(false)));
+        let mut reader = source.reader(Arc::new(AtomicBool::new(false)))?;
         let mut block = [0; 65536];
         loop {
             if cancel.load(Ordering::Relaxed) {
