@@ -1,6 +1,7 @@
 //! TLG5/6 images, as specified by KiriKiri's LoadTLG.cpp/SaveTLG5.cpp.
 //! Planar residuals use a shared slide dictionary, green decorrelation, then
 //! horizontal and vertical predictors modulo 256. TLG0 tags carry pixel offsets.
+mod pimg;
 mod tlg6;
 use crate::{Image, ImageFormat, ImageMeta, ImageRegistration, OffsetUnit, PixelBuffer};
 use vnlens_core::{Error, Format, Result};

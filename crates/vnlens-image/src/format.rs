@@ -13,6 +13,17 @@ pub trait ImageFormat: Format {
     ) -> Result<Image> {
         self.decode_frame(data, 0)
     }
+    /// Receives already resolved host parameters and cancellation when a
+    /// container image needs middleware decryption or layer composition.
+    fn decode_with_options(
+        &self,
+        data: &[u8],
+        resources: Option<&dyn ResourceResolver>,
+        _options: &vnlens_core::ArchiveOptions,
+        _cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Image> {
+        self.decode_with_resources(data, resources)
+    }
     /// Counts frames from container metadata without decoding all pixels.
     fn frame_count(&self, _data: &[u8]) -> Result<usize> {
         Ok(1)
@@ -56,6 +67,15 @@ pub fn decode_with_resources_as(
     resources: Option<&dyn ResourceResolver>,
 ) -> Result<Image> {
     selected(tag)?.decode_with_resources(data, resources)
+}
+pub fn decode_with_options_as(
+    tag: &str,
+    data: &[u8],
+    resources: Option<&dyn ResourceResolver>,
+    options: &vnlens_core::ArchiveOptions,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Image> {
+    selected(tag)?.decode_with_options(data, resources, options, cancelled)
 }
 pub fn frame_count_as(tag: &str, data: &[u8]) -> Result<usize> {
     selected(tag)?.frame_count(data)

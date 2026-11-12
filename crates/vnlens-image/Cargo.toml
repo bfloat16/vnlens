@@ -11,6 +11,7 @@ encoding_rs.workspace = true
 vnlens-core.workspace = true
 vnlens-crypto.workspace = true
 vnlens-io.workspace = true
+vnlens-middleware.workspace = true
 image.workspace = true
 texture2ddecoder.workspace = true
 
