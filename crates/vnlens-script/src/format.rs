@@ -3,13 +3,6 @@
 use crate::ir::Script;
 use vnlens_core::{Format, ResourceResolver, Result};
 
-/// Decoded non-bytecode content, retaining structured values for tree previews.
-#[derive(Debug)]
-pub enum ScriptContent {
-    Text(String),
-    Psb(crate::psb::Psb),
-}
-
 pub trait ScriptFormat: Format {
     /// Removes resource encryption using parameters resolved by the engine.
     /// Unrecognized resources borrow their original bytes unchanged.
@@ -24,11 +17,6 @@ pub trait ScriptFormat: Format {
     /// unrelated bytes return None; the source resource remains unchanged.
     fn decode_text(&self, _data: &[u8]) -> Result<Option<String>> {
         Ok(None)
-    }
-    /// Decodes text or structured content without flattening object trees.
-    fn decode_content(&self, data: &[u8]) -> Result<Option<ScriptContent>> {
-        self.decode_text(data)
-            .map(|text| text.map(ScriptContent::Text))
     }
     fn disassemble(
         &self,
@@ -73,19 +61,6 @@ pub fn decode_text_as(tag: &str, data: &[u8]) -> Result<Option<String>> {
         let format = (registration.0)();
         if format.tag() == tag {
             return format.decode_text(data);
-        }
-    }
-    Err(vnlens_core::Error::Unsupported(format!(
-        "Script route is not registered: {tag}"
-    )))
-}
-
-/// Selects structured or text decoding using the identified engine's route.
-pub fn decode_content_as(tag: &str, data: &[u8]) -> Result<Option<ScriptContent>> {
-    for registration in vnlens_core::inventory::iter::<ScriptRegistration>() {
-        let format = (registration.0)();
-        if format.tag() == tag {
-            return format.decode_content(data);
         }
     }
     Err(vnlens_core::Error::Unsupported(format!(

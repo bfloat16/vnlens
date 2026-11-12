@@ -8,6 +8,7 @@ autotests = false
 
 [dependencies]
 vnlens-core.workspace = true
+vnlens-middleware.workspace = true
 vnlens-crypto.workspace = true
 vnlens-io.workspace = true
 encoding_rs.workspace = true

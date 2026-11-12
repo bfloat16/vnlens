@@ -2,11 +2,13 @@
 
 mod expression;
 mod opcode;
+mod scenario;
 mod tables;
 mod ybn;
+mod ystb;
 
-pub use tables::script_paths;
-pub use ybn::decrypt_ystb;
+pub use tables::{Argument, Command, commands, script_paths};
+pub use ystb::{decrypt as decrypt_ystb, recover_key as recover_ystb_key};
 
 use crate::{ScriptFormat, ScriptRegistration, ir::*};
 use vnlens_core::{Error, Format, ResourceResolver, Result};

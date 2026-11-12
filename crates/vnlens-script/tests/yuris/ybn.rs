@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use crate::yuris::decrypt_ystb;
 use vnlens_io::BinaryWriter;
 
 fn fixture() -> Vec<u8> {
@@ -76,7 +77,7 @@ fn type_four_expressions_and_labels_are_resolved_only_when_referenced() {
     label.extend_from_slice(b"\x03abc");
     let at = label.len();
     label.resize(at + 12, 0);
-    BinaryWriter::u32_le(0x1357_7c9b, &mut label[at..]);
+    BinaryWriter::u32_le(0x3524_41c2, &mut label[at..]);
     BinaryWriter::u32_le(42, &mut label[at + 4..]);
     BinaryWriter::u16_le(7, &mut label[at + 8..]);
     let resources = Resources {

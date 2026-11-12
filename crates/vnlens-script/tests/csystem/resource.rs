@@ -3,7 +3,7 @@ use vnlens_io::BinaryWriter;
 
 fn words(values: &[u32]) -> Vec<u8> {
     let mut bytes = vec![0; values.len() * 4];
-    for (word, &value) in bytes.chunks_exact_mut(4).zip(values) {
+    for (word, &value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         BinaryWriter::u32_le(value, word);
     }
     bytes

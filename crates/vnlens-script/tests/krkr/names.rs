@@ -51,41 +51,31 @@ fn scene_fixture() -> Vec<u8> {
 
 #[test]
 fn mdf_scenario_voice_fields_generate_sound_and_companion_names() -> Result<()> {
+    use std::io::Write;
+
     let cancel = AtomicBool::new(false);
     let plain = scene_fixture();
-    let mdf = crate::mdf::tests::encode_fixture(&plain);
-    let json = crate::decode_text_as("script/krkr", &plain)?.ok_or(Error::InvalidFormat)?;
-    assert_eq!(
-        crate::decode_text_as("script/krkr", &mdf)?,
-        Some(json.clone())
-    );
-    for data in [&plain, &mdf] {
-        let Some(crate::ScriptContent::Psb(psb)) = crate::decode_content_as("script/krkr", data)?
-        else {
-            return Err(Error::InvalidFormat);
-        };
-        assert_eq!(psb.to_json()?, json);
-        assert_eq!(psb.root.to_json()?, json);
-    }
-    assert!(crate::decode_content_as("script/krkr", b"unrecognized")?.is_none());
-    assert!(crate::decode_content_as("missing/script", &plain).is_err());
-    let tree: serde_json::Value =
-        serde_json::from_str(&json).map_err(|e| Error::Unsupported(e.to_string()))?;
-    assert_eq!(tree["voice"], "scene_001");
-    let raw = name_candidates(&plain, "scene.scn", &cancel)?;
-    let wrapped = name_candidates(&mdf, "hashed", &cancel)?;
+    let mut header = b"mdf\0\0\0\0\0".to_vec();
+    BinaryWriter::u32_le(plain.len() as u32, &mut header[4..]);
+    let mut encoder = flate2::write::ZlibEncoder::new(header, flate2::Compression::fast());
+    encoder.write_all(&plain)?;
+    let mdf = encoder.finish()?;
+    let parse = |data: &[u8]| {
+        let bytes: std::sync::Arc<[u8]> = data.into();
+        vnlens_middleware::psb::PsbFile::open(std::sync::Arc::new(bytes), Default::default())
+    };
+    let plain_file = parse(&plain)?;
+    let wrapped_file = parse(&mdf)?;
+    assert_eq!(plain_file.document.root, wrapped_file.document.root);
+    let raw = psb_name_candidates(&plain_file.document, &cancel)?;
+    let wrapped = psb_name_candidates(&wrapped_file.document, &cancel)?;
     assert_eq!(raw, wrapped);
     assert!(wrapped.contains(&"scene_001.opus".into()));
     assert!(wrapped.contains(&"scene_001.opus.sli".into()));
     assert!(!wrapped.contains(&"unrelated.opus".into()));
     assert!(!wrapped.contains(&"scene_002.opus".into()));
-    let mut broken = mdf.clone();
-    let end = broken.len() - 1;
-    broken[end] ^= 1;
-    assert!(crate::decode_content_as("script/krkr", &broken).is_err());
-    assert!(name_candidates(&broken, "scene.scn", &cancel).is_err());
     assert!(matches!(
-        name_candidates(&mdf, "scene.scn", &AtomicBool::new(true)),
+        psb_name_candidates(&wrapped_file.document, &AtomicBool::new(true)),
         Err(Error::Cancelled)
     ));
     Ok(())
@@ -127,5 +117,59 @@ fn exact_text_concatenations_and_scene_rules_only() -> Result<()> {
         name_candidates(b"text", "x", &AtomicBool::new(true)),
         Err(Error::Cancelled)
     ));
+    Ok(())
+}
+
+#[test]
+fn stand_filename_properties_use_composite_suffixes_without_evaluating_code() -> Result<()> {
+    let source = br#"[%["filename" => "actor" + "1", "note" => "unused"],
+        %["filename", "actor2"], %["filename": "explicit.pimg"],
+        %["filename" => "prefix" + unknown], %["filename" => &getFile()],
+        // "filename" => "commented"
+        %["filename" => "%dress|fallback"]]"#;
+    let cancel = AtomicBool::new(false);
+    let names = name_candidates(source, "characters/actor.stand", &cancel)?;
+    for name in ["actor1.pimg", "actor1.txt", "actor2.txt", "explicit.pimg"] {
+        assert!(names.iter().any(|value| value == name), "{name}");
+    }
+    for name in [
+        "unused.pimg",
+        "prefix.pimg",
+        "commented.pimg",
+        "%dress|fallback.pimg",
+        "explicit.pimg.pimg",
+    ] {
+        assert!(!names.iter().any(|value| value == name), "{name}");
+    }
+    assert!(
+        !name_candidates(source, "unrelated.tjs", &cancel)?
+            .iter()
+            .any(|value| value == "actor1.pimg")
+    );
+    Ok(())
+}
+
+#[test]
+fn stage_time_templates_use_declared_labels_and_prefixes() -> Result<()> {
+    let input = br#"%["times", %[
+        "day", %["label", "a"], "evening", %["prefix" => "b"],
+        "dynamic", %["label", &getTime()]],
+        "stages", %["room", %["image", "bg01TIMEo"],
+        "fixed", %["image", "fixed"],
+        // "unused", %["image", "commentTIME"],
+        "dynamic", %["image", "prefix"+unknown]]];"#;
+    let cancel = AtomicBool::new(false);
+    let names = name_candidates(input, "base.stage", &cancel)?;
+    for name in ["bg01ao.png", "bg01bo.jpg", "fixed.tlg"] {
+        assert!(names.iter().any(|value| value == name), "{name}");
+    }
+    for name in ["bg01co.png", "commenta.png", "prefix.png"] {
+        assert!(!names.iter().any(|value| value == name), "{name}");
+    }
+    assert!(
+        !name_candidates(input, "unrelated.tjs", &cancel)?
+            .iter()
+            .any(|value| value == "bg01ao.png")
+    );
     Ok(())
 }

@@ -1,63 +1,23 @@
-//! YSTB 0x1EE disassembly, verified at 0x452299 (sections/instructions),
+//! YSTB 0x1DF..=0x1E0 and 0x1E6..=0x22B disassembly. The four-section layout is shared by
+//! loaders 0x44A601 (0x1DF), 0x4503F5 (0x1E0), 0x45071D (0x1E6),
+//! 0x451715 (0x1ED), 0x452299 (0x1EE), and 0x45124D (0x22B).
 //! 0x429E7D (12-byte args), 0x446044 (conditional targets), and 0x45D83C
-//! (YSCM command definitions). The four XOR sections restart independently.
+//! (0x1EE command definitions). The 0x22B command table is loaded at
+//! 0x463550. Integers are little-endian; the four XOR sections restart
+//! independently. The companion YSCM supplies command identities independently
+//! of version-specific numbering; raw opcodes remain intact in the IR.
 
-use super::{attribute, corrupt, expression, opcode, operand, section, tables};
+use super::{attribute, corrupt, expression, opcode, operand, section, tables, ystb::sections};
 use crate::ir::StorageOperation;
 use crate::ir::*;
 use vnlens_core::{Error, ResourceResolver, Result};
 use vnlens_io::BinaryReader;
 
-fn sections(data: &[u8]) -> Result<(usize, Vec<std::ops::Range<usize>>)> {
-    let mut reader = BinaryReader::new(data);
-    if reader.read_bytes(4)? != b"YSTB" {
-        return Err(Error::InvalidFormat);
-    }
-    let version = reader.read_u32_le()?;
-    if version != 0x1ee {
-        return Err(Error::Unsupported(format!("YSTB version 0x{version:X}")));
-    }
-    let count = reader.read_u32_le()? as usize;
-    let mut start = 32usize;
-    let mut sections = Vec::with_capacity(4);
-    for _ in 0..4 {
-        let size = reader.read_u32_le()? as usize;
-        let end = start
-            .checked_add(size)
-            .filter(|&end| end <= data.len())
-            .ok_or_else(|| corrupt(start, "YSTB section exceeds file"))?;
-        sections.push(start..end);
-        start = end;
-    }
-    reader.read_u32_le()?;
-    if start != data.len() {
-        return Err(corrupt(start, "YSTB section sizes do not cover file"));
-    }
-    if count.checked_mul(4) != Some(sections[0].len())
-        || sections[3].len() != sections[0].len()
-        || !sections[1].len().is_multiple_of(12)
-    {
-        return Err(corrupt(
-            8,
-            "YSTB instruction, operand, or source-line table size mismatch",
-        ));
-    }
-    Ok((count, sections))
-}
-
-pub fn decrypt_ystb(data: &mut [u8], key: &[u8; 4]) -> Result<()> {
-    let (_, ranges) = sections(data)?;
-    for range in ranges {
-        vnlens_crypto::cipher::xor::apply_u32_key(&mut data[range], key);
-    }
-    Ok(())
-}
-
 pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>) -> Result<Script> {
     let mut header = BinaryReader::new(data);
     let magic = header.read_bytes(4)?;
     let version = header.read_u32_le()?;
-    if version != 0x1ee {
+    if !matches!(version, 0x1df..=0x1e0 | 0x1e6..=0x22b) {
         return Err(Error::Unsupported(format!("YBN version 0x{version:X}")));
     }
     let mut script = Script {
@@ -81,11 +41,16 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
     let definitions = if let Some(resources) = resources {
         resources
             .read_resource("ysbin/ysc.ybn")?
-            .map(|bytes| tables::commands(&bytes).map(|v| v.0))
+            .map(|bytes| tables::commands(&bytes, None).map(|v| v.0))
             .transpose()?
     } else {
         None
     };
+    if definitions.is_none() && !matches!(version, 0x1ee | 0x22b) {
+        return Err(Error::Unsupported(
+            "This YSTB revision requires its ysbin/ysc.ybn command table".into(),
+        ));
+    }
     let mut code = BinaryReader::new(&data[ranges[0].clone()]);
     let mut params = BinaryReader::new(&data[ranges[1].clone()]);
     let values = &data[ranges[2].clone()];
@@ -100,6 +65,8 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
         let definition = definitions
             .as_ref()
             .and_then(|defs| defs.get(usize::from(op)));
+        let semantic_op =
+            opcode::semantic_code(version, u32::from(op), definition.map(|d| d.name.as_str()));
         let mut instruction = Instruction {
             id: id as u64,
             span: Span {
@@ -107,7 +74,11 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
                 size: 4,
             },
             source_line: Some(lines.read_u32_le()?),
-            opcode: opcode::opcode(u32::from(op), definition.map(|d| d.name.clone())),
+            opcode: opcode::opcode(
+                u32::from(op),
+                semantic_op,
+                definition.map(|d| d.name.clone()),
+            ),
             args: Vec::with_capacity(usize::from(argc)),
             attributes: vec![attribute("flags", flags), attribute("reserved", reserved)],
         };
@@ -123,9 +94,10 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
                 offset: start as u64,
                 size: 12,
             };
-            let is_control = (matches!(op, 11 | 45 | 46 | 56) && arg_index > 0) || op == 79;
+            let is_control = (matches!(semantic_op, Some(11 | 45 | 46 | 56)) && arg_index > 0)
+                || semantic_op == Some(79);
             let argument = definition.and_then(|d| d.arguments.get(usize::from(arg)));
-            if op == 54 && arg_index == 0 {
+            if semantic_op == Some(54) && arg_index == 0 {
                 let operation = match operator {
                     0 => Qualifier::Assign,
                     1 => Qualifier::AddAssign,
@@ -141,9 +113,9 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
                 instruction.opcode.operation = Operation::Storage(StorageOperation::Store);
                 instruction.opcode.variant = Some(operation);
             }
-            let name = opcode::argument(u32::from(op), arg, arg_index, is_control);
+            let name = opcode::argument(semantic_op, arg, arg_index, is_control);
             let value = if is_control {
-                if op != 79 && length as usize > count {
+                if semantic_op != Some(79) && length as usize > count {
                     return Err(corrupt(
                         start + 4,
                         "Control target exceeds instruction stream",
@@ -151,7 +123,7 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
                 }
                 Value::Group(vec![
                     operand(
-                        if op == 79 {
+                        if semantic_op == Some(79) {
                             ArgName::Id
                         } else {
                             ArgName::Descriptor
@@ -163,7 +135,7 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
                         Value::Unsigned(u64::from(BinaryReader::u32_le(&data[start..]))),
                     ),
                     operand(
-                        if op == 79 {
+                        if semantic_op == Some(79) {
                             ArgName::Metadata
                         } else {
                             ArgName::Target
@@ -172,7 +144,7 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
                             offset: start as u64 + 4,
                             size: 4,
                         },
-                        if op == 79 {
+                        if semantic_op == Some(79) {
                             Value::Unsigned(u64::from(length))
                         } else {
                             Value::InstructionTarget(u64::from(length))
@@ -199,7 +171,7 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
                     })?;
                 let raw = &values[offset as usize..end];
                 let address = (ranges[2].start + offset as usize) as u64;
-                if ty == 0 && matches!(op, 106 | 110) {
+                if ty == 0 && matches!(semantic_op, Some(106 | 110)) {
                     Value::Text(expression::text(raw, address)?)
                 } else if ty <= 4 {
                     Value::Expression(expression::decode(raw, address)?)
@@ -226,7 +198,7 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
                 value,
                 attributes,
             });
-            if matches!(op, 43 | 44)
+            if matches!(semantic_op, Some(43 | 44))
                 && arg == 0
                 && let Some(Value::Expression(tokens)) = instruction.args.last().map(|p| &p.value)
                 && let [token] = tokens.as_slice()

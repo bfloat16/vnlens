@@ -88,7 +88,7 @@ fn labels_include_hash_buckets_and_cross_script_targets() {
     }
     bytes.push(5);
     bytes.extend_from_slice(b"hello");
-    number(&mut bytes, 0xe561_29cb, 4);
+    number(&mut bytes, 0x3610_a686, 4);
     number(&mut bytes, 42, 4);
     number(&mut bytes, 7, 2);
     bytes.extend_from_slice(&[2, 3]);

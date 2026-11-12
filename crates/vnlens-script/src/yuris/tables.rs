@@ -1,27 +1,91 @@
-//! YU-RIS 0x1EE auxiliary tables, from the engine loaders at 0x45D83C
+//! YU-RIS auxiliary tables. The 0x1EE engine loaders are 0x45D83C
 //! (YSCM), 0x45DEFC (YSTD), 0x45E15C (YSTL), 0x45E45C (YSCF),
 //! 0x45E97C (YSLB), and variable initialization at 0x45293C (YSVR).
+//! The same little-endian layouts are used by 0x22B loaders 0x463550,
+//! 0x463C08, 0x463CCC, 0x463E2C, 0x464170, and 0x451798 respectively.
+//! The earlier 0x1DF readers 0x455090 (YSCM), 0x45599C (YSTL), and
+//! 0x4561BC (YSLB) retain these record layouts but use different command IDs.
+//! YSVR 0x1DF/0x1E0 readers 0x44AC6C/0x450A98 have seven-byte variable
+//! headers; the 0x1E6 reader 0x450DC0 adds a storage byte after the scope.
+//! Revisions between 0x1E0 and 0x1E6 are not assumed to share either layout.
 //! Table headers differ; record boundaries are not inferred from a shared header.
 
 use super::{attribute, c_string, corrupt, expression, opcode, operand, section};
 use crate::ir::DataOperation;
 use crate::ir::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use vnlens_core::{Error, Result};
 use vnlens_io::BinaryReader;
 
 #[derive(Debug)]
-pub(super) struct Argument {
+pub struct Argument {
     pub name: String,
     pub kind: u8,
     pub rule: u8,
-    span: Span,
+    pub span: Span,
 }
 
 #[derive(Debug)]
-pub(super) struct Command {
+pub struct Command {
     pub name: String,
     pub arguments: Vec<Argument>,
-    span: Span,
+    pub span: Span,
+}
+
+/// Reads native definitions and returns the consumed byte offset. Callers
+/// retain any remaining table fields rather than silently discarding them.
+pub fn commands(data: &[u8], cancelled: Option<&AtomicBool>) -> Result<(Vec<Command>, usize)> {
+    let mut r = BinaryReader::new(data);
+    if r.read_bytes(4)? != b"YSCM" {
+        return Err(corrupt(0, "Companion command table is not YSCM"));
+    }
+    let version = r.read_u32_le()?;
+    if !matches!(version, 0x1df..=0x1e0 | 0x1e6..=0x22b) {
+        return Err(Error::Unsupported(format!("YSCM version 0x{version:X}")));
+    }
+    let count = r.read_u32_le()? as usize;
+    r.read_u32_le()?;
+    if count > r.remaining() / 2 {
+        return Err(corrupt(8, "Command count exceeds table"));
+    }
+    let mut result = Vec::with_capacity(count);
+    for _ in 0..count {
+        if cancelled.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            return Err(Error::Cancelled);
+        }
+        let start = r.position();
+        let name = c_string(&mut r)?;
+        let count = usize::from(r.read_u8()?);
+        if count > r.remaining() / 3 {
+            return Err(corrupt(r.position(), "Argument count exceeds table"));
+        }
+        let mut arguments = Vec::with_capacity(count);
+        for _ in 0..count {
+            if cancelled.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+                return Err(Error::Cancelled);
+            }
+            let start = r.position();
+            let name = c_string(&mut r)?;
+            arguments.push(Argument {
+                name,
+                kind: r.read_u8()?,
+                rule: r.read_u8()?,
+                span: Span {
+                    offset: start as u64,
+                    size: (r.position() - start) as u64,
+                },
+            });
+        }
+        result.push(Command {
+            name,
+            arguments,
+            span: Span {
+                offset: start as u64,
+                size: (r.position() - start) as u64,
+            },
+        });
+    }
+    Ok((result, r.position()))
 }
 
 #[derive(Debug)]
@@ -82,54 +146,6 @@ pub(super) fn labels(data: &[u8]) -> Result<Vec<Label>> {
         result.push(label);
     }
     Ok(result)
-}
-
-pub(super) fn commands(data: &[u8]) -> Result<(Vec<Command>, usize)> {
-    let mut r = BinaryReader::new(data);
-    if r.read_bytes(4)? != b"YSCM" {
-        return Err(corrupt(0, "Companion command table is not YSCM"));
-    }
-    let version = r.read_u32_le()?;
-    if version != 0x1ee {
-        return Err(Error::Unsupported(format!("YSCM version 0x{version:X}")));
-    }
-    let count = r.read_u32_le()? as usize;
-    r.read_u32_le()?;
-    if count > r.remaining() / 2 {
-        return Err(corrupt(8, "Command count exceeds table"));
-    }
-    let mut result = Vec::with_capacity(count);
-    for _ in 0..count {
-        let start = r.position();
-        let name = c_string(&mut r)?;
-        let count = usize::from(r.read_u8()?);
-        if count > r.remaining() / 3 {
-            return Err(corrupt(r.position(), "Argument count exceeds table"));
-        }
-        let mut arguments = Vec::with_capacity(count);
-        for _ in 0..count {
-            let start = r.position();
-            let name = c_string(&mut r)?;
-            arguments.push(Argument {
-                name,
-                kind: r.read_u8()?,
-                rule: r.read_u8()?,
-                span: Span {
-                    offset: start as u64,
-                    size: (r.position() - start) as u64,
-                },
-            });
-        }
-        result.push(Command {
-            name,
-            arguments,
-            span: Span {
-                offset: start as u64,
-                size: (r.position() - start) as u64,
-            },
-        });
-    }
-    Ok((result, r.position()))
 }
 
 /// Collect typed fields with their exact source spans while walking each record.
@@ -225,8 +241,10 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
             r.unsigned(ArgName::CommandCount, 4)?;
             r.unsigned(ArgName::Reserved, 4)?;
             r.finish(&mut script, 0, Qualifier::CommandTable);
-            let (definitions, end) = commands(data)?;
+            let (definitions, end) = commands(data, None)?;
             for (id, definition) in definitions.into_iter().enumerate() {
+                let semantic =
+                    opcode::semantic_code(script.format_version, id as u32, Some(&definition.name));
                 script.instructions.push(Instruction {
                     id: script.instructions.len() as u64,
                     span: definition.span,
@@ -243,7 +261,7 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
                         .into_iter()
                         .enumerate()
                         .map(|(arg_id, arg)| Arg {
-                            name: opcode::argument(id as u32, arg_id as u8, arg_id as u8, false),
+                            name: opcode::argument(semantic, arg_id as u8, arg_id as u8, false),
                             native_name: Some(arg.name),
                             span: arg.span,
                             value: Value::Unsigned(u64::from(arg.kind)),
@@ -326,7 +344,7 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
                     Value::Text(expression::text(raw, start as u64)?),
                 );
                 let hash = r.unsigned(ArgName::NameHash, 4)?;
-                if hash != u64::from(vnlens_crypto::hash::murmur2::hash(raw, 0)) {
+                if hash != u64::from(vnlens_crypto::checksum::crc32::ieee(0, raw)) {
                     return Err(corrupt(start, "Label name hash mismatch"));
                 }
                 let start = r.reader.position();
@@ -345,10 +363,13 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
         b"YSVR" => {
             let count = r.unsigned(ArgName::VariableCount, 2)? as usize;
             r.finish(&mut script, 0, Qualifier::VariableTable);
-            r.count(count, 8)?;
+            let has_storage = script.format_version >= 0x1e6;
+            r.count(count, if has_storage { 8 } else { 7 })?;
             for _ in 0..count {
                 r.unsigned(ArgName::Scope, 1)?;
-                r.unsigned(ArgName::Storage, 1)?;
+                if has_storage {
+                    r.unsigned(ArgName::Storage, 1)?;
+                }
                 r.unsigned(ArgName::ScriptId, 2)?;
                 let id = r.unsigned(ArgName::VariableId, 2)? as u32;
                 let ty = r.unsigned(ArgName::Type, 1)?;

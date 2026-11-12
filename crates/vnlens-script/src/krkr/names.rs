@@ -1,9 +1,11 @@
 //! Proven name hints: TJS constants and local CONST/CP/ADD expressions, textual
-//! literals and literal concatenations, MDF/PSB references and the SCN list.
+//! literals and literal concatenations, parsed PSB references and the SCN list.
 //! KAG sound references follow getExistSoundName/WaveSoundBuffer.open suffix
 //! lookup and its .sli companion rule. No runtime code or numeric search runs.
+mod psd;
+mod scenario;
 use super::{bytecode, text};
-use crate::ir::Value;
+use crate::ir::{ArgName, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicBool, Ordering},
@@ -21,11 +23,6 @@ fn check(cancel: &AtomicBool) -> Result<()> {
 /// instructions, strings and lines. Invalid recognized formats return errors.
 pub fn name_candidates(data: &[u8], name: &str, cancel: &AtomicBool) -> Result<Vec<String>> {
     check(cancel)?;
-    let unwrapped = crate::mdf::is_mdf(data)
-        .then(|| crate::mdf::decode(data, None))
-        .transpose()?;
-    check(cancel)?;
-    let data = unwrapped.as_deref().unwrap_or(data);
     if data.starts_with(b"TJS2100\0") {
         let mut out = bytecode::string_constants(data)?
             .into_iter()
@@ -47,6 +44,9 @@ pub fn name_candidates(data: &[u8], name: &str, cancel: &AtomicBool) -> Result<V
         let mut object = None;
         for instruction in script.instructions {
             check(cancel)?;
+            if instruction.opcode.namespace != "krkr/tjs2" {
+                continue;
+            }
             let current = instruction
                 .attributes
                 .iter()
@@ -59,8 +59,13 @@ pub fn name_candidates(data: &[u8], name: &str, cancel: &AtomicBool) -> Result<V
             let args = &instruction.args;
             let reg = |i: usize| {
                 args.get(i).and_then(|o| {
-                    if let Value::Integer(v) = o.value {
-                        Some(v)
+                    if let Value::Group(fields) = &o.value {
+                        fields
+                            .iter()
+                            .find_map(|field| match (&field.name, &field.value) {
+                                (ArgName::Register, Value::Integer(v)) => Some(*v),
+                                _ => None,
+                            })
                     } else {
                         None
                     }
@@ -70,7 +75,16 @@ pub fn name_candidates(data: &[u8], name: &str, cancel: &AtomicBool) -> Result<V
                 1 => {
                     if let Some(dst) = reg(0) {
                         registers.remove(&dst);
-                        if let Some(Value::Text(s)) = args.get(1).map(|o| &o.value) {
+                        if let Some(Value::Text(s)) = args.get(1).and_then(|o| {
+                            if let Value::Group(fields) = &o.value {
+                                fields
+                                    .iter()
+                                    .find(|field| field.name == ArgName::Value)
+                                    .map(|field| &field.value)
+                            } else {
+                                None
+                            }
+                        }) {
                             registers.insert(dst, s.clone());
                         }
                     }
@@ -108,10 +122,6 @@ pub fn name_candidates(data: &[u8], name: &str, cancel: &AtomicBool) -> Result<V
         }
         return Ok(out.into_iter().collect());
     }
-    if data.starts_with(b"PSB\0") {
-        let psb = crate::psb::parse_source(&data, None)?;
-        return psb_candidates(&psb, cancel);
-    }
     let decoded = text::decode(data)?;
     let plain = if let Some(value) = decoded {
         value
@@ -127,7 +137,8 @@ pub fn name_candidates(data: &[u8], name: &str, cancel: &AtomicBool) -> Result<V
         }
         value.to_owned()
     };
-    let mut out = literals(&plain, cancel)?;
+    let mut out = literals(&plain, cancel, name)?;
+    psd::candidates(&plain, name, cancel, &mut out)?;
     if name
         .rsplit('/')
         .next()
@@ -194,14 +205,18 @@ pub fn name_candidates(data: &[u8], name: &str, cancel: &AtomicBool) -> Result<V
     Ok(out.into_iter().collect())
 }
 
-fn psb_candidates(psb: &crate::psb::Psb, cancel: &AtomicBool) -> Result<Vec<String>> {
-    use crate::psb::PsbValue;
-    let mut out = psb
-        .strings
-        .iter()
-        .chain(&psb.names)
-        .cloned()
-        .collect::<BTreeSet<_>>();
+/// Reads scenario references from middleware's already parsed PSB document.
+pub fn psb_name_candidates(
+    psb: &vnlens_middleware::psb::Psb,
+    cancel: &AtomicBool,
+) -> Result<Vec<String>> {
+    use vnlens_middleware::psb::PsbValue;
+    check(cancel)?;
+    let mut out = BTreeSet::new();
+    for value in psb.strings.iter().chain(&psb.names) {
+        check(cancel)?;
+        out.insert(value.clone());
+    }
     let mut pending = vec![&psb.root];
     while let Some(value) = pending.pop() {
         check(cancel)?;
@@ -227,6 +242,7 @@ fn psb_candidates(psb: &crate::psb::Psb, cancel: &AtomicBool) -> Result<Vec<Stri
             _ => {}
         }
     }
+    scenario::candidates(&psb.root, cancel, &mut out)?;
     Ok(out.into_iter().collect())
 }
 
@@ -254,11 +270,14 @@ fn sound_candidates(value: &str, out: &mut BTreeSet<String>) {
         }
     }
 }
-fn literals(text: &str, cancel: &AtomicBool) -> Result<BTreeSet<String>> {
+fn literals(text: &str, cancel: &AtomicBool, name: &str) -> Result<BTreeSet<String>> {
+    let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     let mut chars = text.chars().peekable();
     let mut out = BTreeSet::new();
     let mut previous = None::<String>;
     let mut concatenate = false;
+    let mut property = None::<String>;
+    let mut properties = BTreeMap::<String, BTreeSet<String>>::new();
     while let Some(c) = chars.next() {
         check(cancel)?;
         if c.is_whitespace() {
@@ -267,6 +286,7 @@ fn literals(text: &str, cancel: &AtomicBool) -> Result<BTreeSet<String>> {
         if c == '/' && chars.peek() == Some(&'/') {
             chars.next();
             for c in chars.by_ref() {
+                check(cancel)?;
                 if c == '\n' {
                     break;
                 }
@@ -277,6 +297,7 @@ fn literals(text: &str, cancel: &AtomicBool) -> Result<BTreeSet<String>> {
             chars.next();
             let mut star = false;
             for c in chars.by_ref() {
+                check(cancel)?;
                 if star && c == '/' {
                     break;
                 }
@@ -288,12 +309,27 @@ fn literals(text: &str, cancel: &AtomicBool) -> Result<BTreeSet<String>> {
             concatenate = true;
             continue;
         }
+        // Serialized definitions use quoted keys and either TJS dictionary
+        // separator. Retain only a complete literal expression, after its
+        // delimiter proves the expression ended.
+        if property.is_none()
+            && matches!(
+                (extension.as_str(), previous.as_deref()),
+                ("stand", Some("filename")) | ("stage", Some("image" | "label" | "prefix"))
+            )
+            && (matches!(c, ',' | ':') || (c == '=' && chars.next_if_eq(&'>').is_some()))
+        {
+            property = previous.take();
+            concatenate = false;
+            continue;
+        }
         if matches!(c, '\'' | '"') {
             let quote = c;
             let mut value = String::new();
             let mut closed = false;
             let mut valid = true;
             while let Some(c) = chars.next() {
+                check(cancel)?;
                 if c == quote {
                     closed = true;
                     break;
@@ -334,6 +370,7 @@ fn literals(text: &str, cancel: &AtomicBool) -> Result<BTreeSet<String>> {
             if !closed || !valid {
                 previous = None;
                 concatenate = false;
+                property = None;
                 continue;
             }
             out.insert(value.clone());
@@ -345,8 +382,60 @@ fn literals(text: &str, cancel: &AtomicBool) -> Result<BTreeSet<String>> {
             previous = Some(value);
             concatenate = false;
         } else {
+            if let Some(property) = property.take()
+                && !concatenate
+                && matches!(c, ',' | ']' | '}')
+                && let Some(value) = &previous
+            {
+                properties
+                    .entry(property)
+                    .or_default()
+                    .insert(value.clone());
+            }
             previous = None;
             concatenate = false;
+        }
+    }
+    if let Some(property) = property
+        && !concatenate
+        && let Some(value) = &previous
+    {
+        properties
+            .entry(property)
+            .or_default()
+            .insert(value.clone());
+    }
+    if let Some(filenames) = properties.get("filename") {
+        for value in filenames {
+            check(cancel)?;
+            scenario::add_candidates(value, scenario::Reference::Composite, &mut out);
+        }
+    }
+    if let Some(images) = properties.get("image") {
+        // Stage image names replace the first TIME with timeInfo.label, or
+        // its legacy prefix field. Both sets come from this definition;
+        // no alphabet or numeric filename range is generated.
+        for image in images {
+            check(cancel)?;
+            if image.contains("TIME") {
+                for time in properties
+                    .get("label")
+                    .into_iter()
+                    .flatten()
+                    .chain(properties.get("prefix").into_iter().flatten())
+                {
+                    check(cancel)?;
+                    if !time.starts_with(['@', '&', '%', '*']) && !time.contains("${") {
+                        scenario::add_candidates(
+                            &image.replacen("TIME", time, 1),
+                            scenario::Reference::Image,
+                            &mut out,
+                        );
+                    }
+                }
+            } else {
+                scenario::add_candidates(image, scenario::Reference::Image, &mut out);
+            }
         }
     }
     Ok(out)

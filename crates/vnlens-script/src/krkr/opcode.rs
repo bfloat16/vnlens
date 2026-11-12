@@ -1,133 +1,134 @@
-//! TJS2 instruction widths, shared operation selection and native names.
-//! tTJSInterCodeContext uses signed 16-bit VM words and expanded call args.
+//! TJS2100 VM widths and semantic mapping, checked against
+//! tTJSByteCodeLoader::TranslateCodeAddress and tTJSInterCodeContext::ExecuteCode.
 use super::bad;
 use crate::ir::*;
 use vnlens_core::Result;
+use vnlens_io::BinaryIo;
 
-pub(super) fn width(code: &[i16], pc: usize) -> Result<usize> {
-    Ok(match code[pc] {
+pub(super) fn width(code: &[i16], pc: usize, base: usize) -> Result<usize> {
+    let at = base + pc * 2;
+    let word = |index| {
+        code.get(pc + index).copied().ok_or_else(|| {
+            vnlens_core::Error::Io(BinaryIo::unexpected_eof(format!(
+                "Truncated TJS instruction at 0x{at:X}"
+            )))
+        })
+    };
+    let width = match word(0)? {
         0 | 14 | 119 | 121 | 126 | 127 => 1,
         3 | 5 | 6 | 11..=13 | 15..=18 | 22 | 82 | 83 | 86 | 87 | 89..=98 | 118 | 122 | 124 => 2,
         1 | 2 | 4 | 7..=10 | 21 | 25 | 88 | 114 | 115 | 120 | 123 | 125 => 3,
         19 | 20 | 23 | 24 | 84 | 85 | 103..=113 | 116 | 117 => 4,
-        26..=81 => match (code[pc] - 26) % 4 {
+        op @ 26..=81 => match (op - 26) % 4 {
             0 => 3,
             1 | 2 => 5,
             _ => 4,
         },
-        99..=102 => {
-            let base = if matches!(code[pc], 99 | 102) { 4 } else { 5 };
-            let count = *code
-                .get(pc + base - 1)
-                .ok_or_else(|| bad(pc, "Truncated TJS call"))?;
-            match count {
-                -1 => base,
+        op @ 99..=102 => {
+            let start = if matches!(op, 99 | 102) { 4 } else { 5 };
+            match word(start - 1)? {
+                -1 => start,
                 -2 => {
-                    let count = *code
-                        .get(pc + base)
-                        .ok_or_else(|| bad(pc, "Truncated TJS expanded call"))?;
-                    base + 1
-                        + usize::try_from(count)
-                            .map_err(|_| bad(pc, "Negative TJS argument count"))?
-                            * 2
+                    let count = usize::try_from(word(start)?)
+                        .map_err(|_| bad(at, "Negative TJS expanded argument count"))?;
+                    count
+                        .checked_mul(2)
+                        .and_then(|n| n.checked_add(start + 1))
+                        .ok_or_else(|| bad(at, "TJS call width overflow"))?
                 }
-                n if n >= 0 => base + n as usize,
-                _ => return Err(bad(pc, "Invalid TJS call count")),
+                count if count >= 0 => start + count as usize,
+                _ => return Err(bad(at, "Invalid TJS call argument count")),
             }
         }
-        _ => code.len() - pc,
-    })
+        op => {
+            return Err(bad(
+                at,
+                &format!("Unknown TJS opcode {op}; instruction width is undefined"),
+            ));
+        }
+    };
+    word(width - 1)?;
+    Ok(width)
 }
+
 pub(super) fn operation(code: i16) -> (Operation, Option<Qualifier>) {
+    use BasicOperation as B;
+    use ControlFlowOperation as C;
+    use Operation::{Basic, ControlFlow, Runtime, Storage};
+    use Qualifier as Q;
+    use StorageOperation as S;
     if (26..=81).contains(&code) {
         return (
             [
-                Operation::ControlFlow(ControlFlowOperation::LogicalOr),
-                Operation::ControlFlow(ControlFlowOperation::LogicalAnd),
-                Operation::Basic(BasicOperation::BitOr),
-                Operation::Basic(BasicOperation::BitXor),
-                Operation::Basic(BasicOperation::BitAnd),
-                Operation::Basic(BasicOperation::ShiftRight),
-                Operation::Basic(BasicOperation::ShiftLeft),
-                Operation::Basic(BasicOperation::ShiftRight),
-                Operation::Basic(BasicOperation::Add),
-                Operation::Basic(BasicOperation::Subtract),
-                Operation::Basic(BasicOperation::Remainder),
-                Operation::Basic(BasicOperation::Divide),
-                Operation::Basic(BasicOperation::Divide),
-                Operation::Basic(BasicOperation::Multiply),
+                ControlFlow(C::LogicalOr),
+                ControlFlow(C::LogicalAnd),
+                Basic(B::BitOr),
+                Basic(B::BitXor),
+                Basic(B::BitAnd),
+                Basic(B::ShiftRight),
+                Basic(B::ShiftLeft),
+                Basic(B::ShiftRight),
+                Basic(B::Add),
+                Basic(B::Subtract),
+                Basic(B::Remainder),
+                Basic(B::Divide),
+                Basic(B::Divide),
+                Basic(B::Multiply),
             ][((code - 26) / 4) as usize],
             match (code - 26) / 4 {
-                5 => Some(Qualifier::Arithmetic),
-                7 => Some(Qualifier::Logical),
-                12 => Some(Qualifier::Integer),
+                5 => Some(Q::Arithmetic),
+                7 => Some(Q::Logical),
+                12 => Some(Q::Integer),
                 _ => None,
             },
         );
     }
     match code {
-        1 => (
-            Operation::Storage(StorageOperation::Load),
-            Some(Qualifier::Constant),
-        ),
-        2 => (
-            Operation::Storage(StorageOperation::Store),
-            Some(Qualifier::Register),
-        ),
-        3 | 4 => (
-            Operation::Storage(StorageOperation::Store),
-            Some(Qualifier::Clear),
-        ),
-        7 => (Operation::ControlFlow(ControlFlowOperation::Equal), None),
-        8 => (
-            Operation::ControlFlow(ControlFlowOperation::Equal),
-            Some(Qualifier::Strict),
-        ),
-        9 => (Operation::ControlFlow(ControlFlowOperation::Less), None),
-        10 => (Operation::ControlFlow(ControlFlowOperation::Greater), None),
-        13 => (
-            Operation::ControlFlow(ControlFlowOperation::LogicalNot),
-            None,
-        ),
-        15 | 16 => (Operation::ControlFlow(ControlFlowOperation::Branch), None),
-        17 => (Operation::ControlFlow(ControlFlowOperation::Jump), None),
-        18..=21 => (
-            Operation::Basic(BasicOperation::Add),
-            Some(Qualifier::Increment),
-        ),
-        22..=25 => (
-            Operation::Basic(BasicOperation::Subtract),
-            Some(Qualifier::Decrement),
-        ),
-        82 => (Operation::Basic(BasicOperation::BitNot), None),
-        89..=91 | 95..=98 => (Operation::Basic(BasicOperation::Convert), None),
-        92 => (Operation::Basic(BasicOperation::Negate), None),
-        99..=101 => (Operation::ControlFlow(ControlFlowOperation::Call), None),
-        102 => (
-            Operation::ControlFlow(ControlFlowOperation::Call),
-            Some(Qualifier::Constructor),
-        ),
-        103 | 107 | 110 | 112 | 115 | 124 => (Operation::Storage(StorageOperation::Load), None),
-        104..=106 | 108 | 109 | 111 | 113 | 114 => {
-            (Operation::Storage(StorageOperation::Store), None)
-        }
-        116 | 117 => (
-            Operation::Storage(StorageOperation::Store),
-            Some(Qualifier::Delete),
-        ),
-        119 => (Operation::ControlFlow(ControlFlowOperation::Return), None),
-        120 => (
-            Operation::ControlFlow(ControlFlowOperation::RegisterException),
-            None,
-        ),
-        121 => (
-            Operation::ControlFlow(ControlFlowOperation::UnregisterException),
-            None,
-        ),
-        122 => (
-            Operation::ControlFlow(ControlFlowOperation::Halt),
-            Some(Qualifier::Throw),
-        ),
+        0 => (Runtime(RuntimeOperation::NoOp), None),
+        1 => (Storage(S::Load), Some(Q::Constant)),
+        2 => (Storage(S::Store), Some(Q::Register)),
+        3 | 4 => (Storage(S::Store), Some(Q::Clear)),
+        5 | 11 => (Storage(S::Store), Some(Q::Flag)),
+        6 | 12 | 14 => (ControlFlow(C::LogicalNot), Some(Q::Flag)),
+        7 => (ControlFlow(C::Equal), None),
+        8 => (ControlFlow(C::Equal), Some(Q::Strict)),
+        9 => (ControlFlow(C::Less), None),
+        10 => (ControlFlow(C::Greater), None),
+        13 => (ControlFlow(C::LogicalNot), None),
+        15 => (ControlFlow(C::Branch), Some(Q::Nonzero)),
+        16 => (ControlFlow(C::Branch), Some(Q::Zero)),
+        17 => (ControlFlow(C::Jump), None),
+        18..=21 => (Basic(B::Add), Some(Q::Increment)),
+        22..=25 => (Basic(B::Subtract), Some(Q::Decrement)),
+        82 => (Basic(B::BitNot), None),
+        83..=85 => (Basic(B::TypeOf), None),
+        86 | 87 => (Basic(B::Evaluate), Some(Q::Text)),
+        88 => (ControlFlow(C::InstanceOf), None),
+        89 => (Basic(B::CharacterCode), None),
+        90 => (Basic(B::CharacterFromCode), None),
+        91 => (Basic(B::Convert), Some(Q::Number)),
+        92 => (Basic(B::Negate), None),
+        93 => (Storage(S::Invalidate), None),
+        94 => (Basic(B::IsValid), None),
+        95 => (Basic(B::Convert), Some(Q::Integer)),
+        96 => (Basic(B::Convert), Some(Q::Float64)),
+        97 => (Basic(B::Convert), Some(Q::Text)),
+        98 => (Basic(B::Convert), Some(Q::Bytes)),
+        99..=101 => (ControlFlow(C::Call), None),
+        102 => (ControlFlow(C::Call), Some(Q::Constructor)),
+        103 | 107 | 115 => (Storage(S::Load), Some(Q::Property)),
+        110 | 112 => (Storage(S::Load), Some(Q::Reference)),
+        104..=106 | 108 | 109 | 114 => (Storage(S::Store), Some(Q::Property)),
+        111 | 113 => (Storage(S::Store), Some(Q::Reference)),
+        116 | 117 => (Storage(S::Store), Some(Q::Delete)),
+        118 => (Storage(S::Store), Some(Q::ReturnValue)),
+        119 => (ControlFlow(C::Return), None),
+        120 => (ControlFlow(C::RegisterException), None),
+        121 => (ControlFlow(C::UnregisterException), None),
+        122 => (ControlFlow(C::Halt), Some(Q::Throw)),
+        123 => (Storage(S::BindContext), None),
+        124 => (Storage(S::Load), Some(Q::Global)),
+        125..=127 => (Runtime(RuntimeOperation::EngineCall), None),
         _ => (Operation::Unknown, None),
     }
 }

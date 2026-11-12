@@ -1,11 +1,13 @@
-//! KiriKiri TJS2 bytecode, FE FE text wrappers and PSB/MDF scenario trees.
-//! Bytecode uses the common IR; structured scenarios retain their PSB trees.
+//! KiriKiri TJS2 bytecode and FE FE encoded text. PSB containers are opened
+//! through the archive domain, retaining their metadata and binary resources.
 mod bytecode;
 mod names;
+mod object;
 mod opcode;
+mod operands;
 mod text;
-use crate::{ScriptContent, ScriptFormat, ScriptRegistration, ir::Script};
-pub use names::name_candidates;
+use crate::{ScriptFormat, ScriptRegistration, ir::Script};
+pub use names::{name_candidates, psb_name_candidates};
 use vnlens_core::{Format, ResourceResolver, Result};
 #[derive(Debug, Default)]
 struct Tjs;
@@ -14,15 +16,13 @@ impl Format for Tjs {
         "script/krkr"
     }
     fn signatures(&self) -> &'static [u32] {
-        &[
-            0x32534a54, 0xff00fefe, 0xff01fefe, 0xff02fefe, 0x00425350, 0x0066646d,
-        ]
+        &[0x32534a54, 0xff00fefe, 0xff01fefe, 0xff02fefe]
     }
     fn extensions(&self) -> &'static [&'static str] {
-        &["tjs", "ks", "scn"]
+        &["tjs", "ks"]
     }
     fn description(&self) -> &'static str {
-        "KiriKiri TJS2 bytecode, encoded text and PSB scenarios"
+        "KiriKiri TJS2 bytecode and encoded text"
     }
 }
 impl ScriptFormat for Tjs {
@@ -33,22 +33,7 @@ impl ScriptFormat for Tjs {
         bytecode::parse(data).map(Some)
     }
     fn decode_text(&self, data: &[u8]) -> Result<Option<String>> {
-        self.decode_content(data)?
-            .map(|content| match content {
-                ScriptContent::Text(text) => Ok(text),
-                ScriptContent::Psb(psb) => psb.to_json(),
-            })
-            .transpose()
-    }
-    fn decode_content(&self, data: &[u8]) -> Result<Option<ScriptContent>> {
-        let decoded = crate::mdf::is_mdf(data)
-            .then(|| crate::mdf::decode(data, None))
-            .transpose()?;
-        let data = decoded.as_deref().unwrap_or(data);
-        if data.starts_with(b"PSB\0") {
-            return crate::psb::parse_source(&data, None).map(|psb| Some(ScriptContent::Psb(psb)));
-        }
-        text::decode(data).map(|text| text.map(ScriptContent::Text))
+        text::decode(data)
     }
 }
 vnlens_core::inventory::submit! {ScriptRegistration(||Box::new(Tjs))}

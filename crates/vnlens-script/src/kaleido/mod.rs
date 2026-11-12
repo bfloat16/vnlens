@@ -1,10 +1,9 @@
-//! Kaleido ADV Workshop: Squirrel 2.2.4 closures and PSB scenario trees.
-mod squirrel;
-use crate::{ScriptContent, ScriptFormat, ScriptRegistration, ir::Script};
+//! Kaleido ADV Workshop: Squirrel 2.2.4 closures and text scripts.
+use crate::{ScriptFormat, ScriptRegistration, ir::Script};
 use vnlens_core::{Format, ResourceResolver, Result};
 #[derive(Debug, Default)]
 struct Kaleido;
-const SIGNATURES: &[u32] = &[0x4952_fafa, 0x0042_5350, 0x0073_7a6d, 0x0066_646d];
+const SIGNATURES: &[u32] = &[0x4952_fafa];
 impl Format for Kaleido {
     fn tag(&self) -> &'static str {
         "script/kaleido"
@@ -13,30 +12,27 @@ impl Format for Kaleido {
         SIGNATURES
     }
     fn extensions(&self) -> &'static [&'static str] {
-        &["nut", "cnut", "ks", "scn", "psb"]
+        &["nut", "cnut", "ks", "scn"]
     }
     fn description(&self) -> &'static str {
-        "Kaleido Squirrel bytecode and PSB scenarios"
+        "Kaleido Squirrel bytecode and text scripts"
     }
 }
 impl ScriptFormat for Kaleido {
     fn disassemble(&self, data: &[u8], _: Option<&dyn ResourceResolver>) -> Result<Option<Script>> {
         if data.starts_with(&[0xfa, 0xfa]) {
-            squirrel::parse(data).map(Some)
+            vnlens_middleware::squirrel::disassemble(data).map(Some)
         } else {
             Ok(None)
         }
     }
-    fn decode_content(&self, data: &[u8]) -> Result<Option<ScriptContent>> {
-        if data.starts_with(b"PSB\0") {
-            return crate::psb::parse_source(&data, None).map(|psb| Some(ScriptContent::Psb(psb)));
-        }
-        if data.starts_with(&[0xfa, 0xfa]) {
+    fn decode_text(&self, data: &[u8]) -> Result<Option<String>> {
+        if data.starts_with(&[0xfa, 0xfa]) || data.contains(&0) {
             return Ok(None);
         }
         Ok(std::str::from_utf8(data)
             .ok()
-            .map(|text| ScriptContent::Text(text.trim_start_matches('\u{feff}').to_owned())))
+            .map(|text| text.trim_start_matches('\u{feff}').to_owned()))
     }
 }
 vnlens_core::inventory::submit! {ScriptRegistration(||Box::new(Kaleido))}
