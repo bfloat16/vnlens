@@ -1,0 +1,191 @@
+//! Random access to MDF/MZS/PSZ without retaining unrequested decoded bytes.
+//!
+//! Deflate requires preceding compressed blocks to reach a requested range.
+//! Forward reads retain decoder state; backward reads restart the stream.
+
+use std::borrow::Cow;
+use std::io::{self, Read};
+use std::sync::{Arc, Mutex};
+
+use vnlens_core::Result;
+use vnlens_crypto::cipher::mdf::MdfStream;
+use vnlens_crypto::compress::{zlib, zstd};
+use vnlens_io::{BinaryIo, ReadAt};
+
+use super::mdf::{self, MdfKey, ShellHeader, ShellKind};
+
+pub(crate) struct MdfSource {
+    view: Arc<dyn ReadAt>,
+    len: u64,
+    zstd: bool,
+    payload_offset: u64,
+    payload_end: u64,
+    cipher: Option<MdfStream>,
+    state: Mutex<DecodeState>,
+}
+
+struct DecodeState {
+    decoder: Box<dyn Read + Send>,
+    position: u64,
+}
+
+impl std::fmt::Debug for MdfSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MdfSource")
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MdfSource {
+    pub(crate) fn new(view: Arc<dyn ReadAt>, key: Option<MdfKey<'_>>) -> Result<Self> {
+        let header = ShellHeader::read(&*view)?;
+        let key = key.filter(|_| header.kind != ShellKind::Psz);
+        if let Some(key) = key {
+            mdf::validate_key(key)?;
+        }
+        let len = header.decoded_len;
+        let cipher = key.map(|key| MdfStream::new(key.key, key.key_len));
+        let zstd = header.kind == ShellKind::Mzs;
+        let payload_offset = header.payload_offset;
+        let payload_end = payload_offset + header.payload_len;
+        let state = Mutex::new(Self::decoder(
+            Arc::clone(&view),
+            cipher.clone(),
+            zstd,
+            payload_offset,
+            payload_end,
+        )?);
+        Ok(Self {
+            view,
+            len,
+            zstd,
+            payload_offset,
+            payload_end,
+            cipher,
+            state,
+        })
+    }
+
+    fn decoder(
+        view: Arc<dyn ReadAt>,
+        cipher: Option<MdfStream>,
+        zstd: bool,
+        payload_offset: u64,
+        payload_end: u64,
+    ) -> io::Result<DecodeState> {
+        let input = MdfInput {
+            view,
+            position: payload_offset,
+            end: payload_end,
+            cipher,
+        };
+        Ok(DecodeState {
+            decoder: if zstd {
+                Box::new(zstd::decoder(input)?)
+            } else {
+                Box::new(zlib::decoder(input))
+            },
+            position: 0,
+        })
+    }
+}
+
+impl ReadAt for MdfSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&self, offset: u64, size: usize) -> io::Result<Cow<'_, [u8]>> {
+        let end = offset
+            .checked_add(size as u64)
+            .filter(|&end| end <= self.len)
+            .ok_or_else(|| {
+                BinaryIo::unexpected_eof("MDF range exceeds declared original length")
+            })?;
+        if size == 0 {
+            return Ok(Cow::Borrowed(&[]));
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("MDF decoder lock poisoned"))?;
+        if offset < state.position {
+            *state = self.restart()?;
+        }
+        let result = self.read_range(&mut state, offset, size, end);
+        if result.is_err() {
+            *state = self.restart()?;
+        }
+        result.map(Cow::Owned)
+    }
+}
+
+impl MdfSource {
+    fn restart(&self) -> io::Result<DecodeState> {
+        Self::decoder(
+            Arc::clone(&self.view),
+            self.cipher.clone(),
+            self.zstd,
+            self.payload_offset,
+            self.payload_end,
+        )
+    }
+
+    fn read_range(
+        &self,
+        state: &mut DecodeState,
+        offset: u64,
+        size: usize,
+        end: u64,
+    ) -> io::Result<Vec<u8>> {
+        if state.position < offset {
+            let mut discard = [0u8; 8192];
+            while state.position < offset {
+                let take = usize::try_from((offset - state.position).min(discard.len() as u64))
+                    .map_err(|_| BinaryIo::unexpected_eof("MDF skip length does not fit usize"))?;
+                state.decoder.read_exact(&mut discard[..take])?;
+                state.position += take as u64;
+            }
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(size).map_err(io::Error::other)?;
+        bytes.resize(size, 0);
+        state.decoder.read_exact(&mut bytes)?;
+        state.position = end;
+        if end == self.len {
+            let mut extra = [0u8; 1];
+            if state.decoder.read(&mut extra)? != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "MDF decoded length exceeds its header",
+                ));
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+struct MdfInput {
+    view: Arc<dyn ReadAt>,
+    position: u64,
+    end: u64,
+    cipher: Option<MdfStream>,
+}
+
+impl Read for MdfInput {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let count = usize::try_from((self.end - self.position).min(out.len() as u64))
+            .map_err(|_| BinaryIo::unexpected_eof("MDF input length does not fit usize"))?;
+        out[..count].copy_from_slice(&self.view.read_at(self.position, count)?);
+        if let Some(cipher) = &mut self.cipher {
+            cipher.apply(&mut out[..count]);
+        }
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/mdf_source.rs"]
+mod tests;
