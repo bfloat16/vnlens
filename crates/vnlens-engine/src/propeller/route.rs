@@ -20,3 +20,7 @@ fn headerless(route: &Route<'_>) -> Option<ResourceRoute> {
 fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
     (route.ext == "mpk").then(|| route.archive_with("mpk/propeller"))
 }
+
+#[cfg(test)]
+#[path = "../../tests/propeller/route.rs"]
+mod tests;

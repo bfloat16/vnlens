@@ -50,3 +50,7 @@ fn bitmap(bytes: &[u8]) -> bool {
         && BinaryReader::u16_le(&bytes[6..]) <= 1
         && bytes[8..16] == [0; 8]
 }
+
+#[cfg(test)]
+#[path = "../../tests/bgi/route.rs"]
+mod tests;

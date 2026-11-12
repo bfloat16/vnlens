@@ -16,32 +16,56 @@ pub(super) fn resolve(
     executables: &[PathBuf],
     cancelled: &AtomicBool,
 ) -> Result<ArchiveOptions> {
-    let mut found = None;
+    let mut matched_pe = false;
+    let mut script = None;
+    let mut name = None;
     for path in executables {
         if cancelled.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
         let view = context.files.open(path)?;
         if let Some(image) = context.image(&view, cancelled)?
-            && let Some(key) = from_image(&image, cancelled)?
+            && super::pe(&image)?
         {
-            if found.as_ref().is_some_and(|previous| previous != &key) {
-                return Err(Error::UnknownScheme(Some("Conflicting YU-RIS keys".into())));
-            }
-            found = Some(key);
+            matched_pe = true;
+            let candidate = match from_image(&image, cancelled)? {
+                Some(key) => Some(key),
+                None => super::license::from_image(&image, cancelled)?,
+            };
+            merge(&mut script, candidate)?;
+            merge(&mut name, super::name::from_image(&image, cancelled)?)?;
         }
     }
-    let key = found.ok_or_else(|| {
-        Error::UnknownScheme(Some(
+    if script.is_none()
+        && (matched_pe
+            || !(context.files.is_file(&context.root.join("yscfg.dat"))
+                && context.files.is_file(&context.root.join("yssfs.dat"))))
+    {
+        return Err(Error::UnknownScheme(Some(
             "YU-RIS executable key initialization was not identified".into(),
-        ))
-    })?;
+        )));
+    }
     let mut options = ArchiveOptions::default();
-    options.keys.insert("ystb", key);
-    // 0x45EC64 complements filename bytes; this is the verified 0x1EE profile.
-    options.keys.insert("ypf_name", Secret::new(vec![0xff]));
-    options.numbers.insert("version", 0x1ee);
+    if let Some(key) = script {
+        options.keys.insert("ystb", key);
+    }
+    if let Some(name) = name {
+        options.keys.insert("ypf_name", name);
+    }
     Ok(options)
+}
+
+fn merge(found: &mut Option<Secret>, candidate: Option<Secret>) -> Result<()> {
+    if let Some(candidate) = candidate {
+        if found
+            .as_ref()
+            .is_some_and(|previous| previous != &candidate)
+        {
+            return Err(Error::UnknownScheme(Some("Conflicting YU-RIS keys".into())));
+        }
+        *found = Some(candidate);
+    }
+    Ok(())
 }
 
 fn from_image(pe: &PeImage<'_>, cancel: &AtomicBool) -> Result<Option<Secret>> {

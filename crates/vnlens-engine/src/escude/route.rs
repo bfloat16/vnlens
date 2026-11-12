@@ -40,3 +40,7 @@ fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/escude/route.rs"]
+mod tests;

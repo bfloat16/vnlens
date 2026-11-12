@@ -1,6 +1,6 @@
 //! BasicCryptoFilter's salt operand and PE resources establish the startup
 //! chain. PARAMS/WARNING/UNIQUE are length-prefixed bootstrap records; the
-//! archive seed comes from the --xopt data or the verified KDF call operands.
+//! archive seed comes from the active --xopt selector or the KDF default.
 //! No archives are probed and no executable or script code is run.
 mod native;
 mod startup;
@@ -160,19 +160,6 @@ fn item<'a>(pe: &'a PeImage<'_>, tag: &[u8], valid: impl Fn(&[u8]) -> bool) -> R
 
 fn archive_seed(pe: &PeImage<'_>, cancel: &AtomicBool) -> Result<[u8; 8]> {
     let mut found = native::seeds(pe, cancel)?;
-    let marker = wide_bytes("--xopt--no\0\0");
-    for section in &pe.sections {
-        let data = pe.section_data(section)?;
-        for (i, p) in data.windows(marker.len()).enumerate() {
-            if p == marker
-                && let Some(bytes) = data.get(i + marker.len()..i + marker.len() + 8)
-            {
-                let mut seed = [0; 8];
-                seed.copy_from_slice(bytes);
-                found.push(seed);
-            }
-        }
-    }
     found.sort();
     found.dedup();
     match found.as_slice() {

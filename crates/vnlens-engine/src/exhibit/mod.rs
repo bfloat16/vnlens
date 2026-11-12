@@ -4,7 +4,7 @@ mod route;
 
 use crate::{
     Engine,
-    detect::{Detector, has},
+    detect::{Detector, has, unscoped},
 };
 use vnlens_core::Result;
 use vnlens_io::pe::PeImage;
@@ -29,6 +29,7 @@ vnlens_core::inventory::submit! {
         pe,
         layout,
         resolve: key::resolve,
+        scope: unscoped,
         route: route::ROUTER,
     }
 }

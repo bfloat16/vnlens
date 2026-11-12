@@ -52,3 +52,7 @@ fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/softpal/route.rs"]
+mod tests;

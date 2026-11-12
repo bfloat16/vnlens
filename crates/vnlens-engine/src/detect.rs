@@ -1,8 +1,9 @@
-//! PE evidence precedes directory-layout evidence; no archive is opened here.
+//! PE evidence precedes directory-layout evidence. Parameter recovery runs only
+//! after an engine has independent identification evidence.
 
 use crate::context::Context;
 use crate::routing::Router;
-use crate::{Engine, Identification, emote};
+use crate::{Engine, Identification};
 use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
@@ -17,9 +18,18 @@ pub(crate) struct Detector {
     pub pe: fn(&PeImage<'_>) -> Result<bool>,
     pub layout: fn(&Context) -> bool,
     pub resolve: fn(&Context, &[PathBuf], &AtomicBool) -> Result<ArchiveOptions>,
+    pub scope: fn(&Identification, &Path) -> Option<Identification>,
     pub route: Router,
 }
 vnlens_core::inventory::collect!(Detector);
+
+pub(crate) struct Middleware {
+    pub subdirs: &'static [&'static str],
+    pub pe: fn(&PeImage<'_>) -> Result<bool>,
+    pub layout: fn(&Context) -> bool,
+    pub route: Router,
+}
+vnlens_core::inventory::collect!(Middleware);
 
 pub(crate) fn detector(engine: Engine) -> Option<&'static Detector> {
     vnlens_core::inventory::iter::<Detector>().find(|d| d.engine == engine)
@@ -41,17 +51,85 @@ pub fn identify_with_progress(
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
-    let root = normalize_root(if path.is_dir() {
+    let directory = (if path.is_dir() {
         path
     } else {
         path.parent().unwrap_or(path)
     })
     .canonicalize()?;
-    let mut context = Context {
-        root: root.clone(),
+    let root = normalize_root(&directory).canonicalize()?;
+    let context = Context {
+        root,
         files: Default::default(),
         sections: Default::default(),
     };
+    let identified = identify_context(context, cancelled, progress)?;
+    Ok(identified.map(|game| {
+        detector(game.engine)
+            .and_then(|d| (d.scope)(&game, &directory))
+            .unwrap_or(game)
+    }))
+}
+
+impl Identification {
+    /// Resolves an entered directory with its own executable as a separate game.
+    /// Directories without local executables share this instance. A candidate
+    /// game must identify successfully; unknown engines, conflicts and missing
+    /// keys stop processing instead of inheriting this game's parameters.
+    /// The existing filesystem overlay is retained, and ancestors are not scanned.
+    pub fn for_directory(
+        self: &std::sync::Arc<Self>,
+        path: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<std::sync::Arc<Self>> {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let root = self.files.canonicalize(path)?;
+        if root == self.root {
+            return Ok(self.clone());
+        }
+        if let Some(scoped) = detector(self.engine).and_then(|d| (d.scope)(self, &root)) {
+            return Ok(std::sync::Arc::new(scoped));
+        }
+        for entry in self.files.read_dir(&root)? {
+            if cancelled.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            if !entry.metadata.directory
+                && entry
+                    .path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+            {
+                let context = Context {
+                    root,
+                    files: self.files.clone(),
+                    sections: Default::default(),
+                };
+                return identify_context(context, cancelled, &|_, _| {})?
+                    .map(|mut game| {
+                        game.compose_pimg = self.compose_pimg.clone();
+                        std::sync::Arc::new(game)
+                    })
+                    .ok_or_else(|| {
+                        Error::Unsupported(
+                            "Game engine was not identified in the nested executable directory"
+                                .into(),
+                        )
+                    });
+            }
+        }
+        Ok(self.clone())
+    }
+}
+
+fn identify_context(
+    mut context: Context,
+    cancelled: &AtomicBool,
+    progress: &(dyn Fn(u64, u64) + Sync),
+) -> Result<Option<Identification>> {
+    let root = context.root.clone();
     let mut executables = executable_paths(&context)?;
     let mut visited = std::collections::HashSet::new();
     let mut position = 0;
@@ -105,7 +183,8 @@ pub fn identify_with_progress(
     // a physical DLL encountered before its host could supply stale evidence.
     executables = executable_paths(&context)?;
     let mut matches = Vec::new();
-    let mut has_emote = false;
+    let mut middleware_pe = Vec::new();
+    let mut unreadable_pe = None;
     for executable in &executables {
         if cancelled.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
@@ -114,10 +193,31 @@ pub fn identify_with_progress(
         let Some(pe) = context.image(&view, cancelled)? else {
             continue;
         };
-        has_emote |= emote::pe(&pe)?;
+        for item in vnlens_core::inventory::iter::<Middleware>() {
+            match (item.pe)(&pe) {
+                Ok(true) if !middleware_pe.iter().any(|m| std::ptr::eq(*m, item)) => {
+                    middleware_pe.push(item)
+                }
+                Ok(_) => {}
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    unreadable_pe.get_or_insert(Error::Io(error));
+                }
+                Err(error) => return Err(error),
+            }
+        }
         for detector in vnlens_core::inventory::iter::<Detector>() {
-            if (detector.pe)(&pe)? {
-                matches.push((detector, format!("PE features in {}", executable.display())));
+            match (detector.pe)(&pe) {
+                Ok(true) => {
+                    matches.push((detector, format!("PE features in {}", executable.display())))
+                }
+                Ok(false) => {}
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Protected executables can retain unmapped resource
+                    // directories. This supplies no engine evidence; only an
+                    // independent detector/layout can authorize resolution.
+                    unreadable_pe.get_or_insert(Error::Io(error));
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -131,6 +231,9 @@ pub fn identify_with_progress(
     let superseded: Vec<Engine> = matches.iter().filter_map(|(d, _)| d.supersedes).collect();
     matches.retain(|(d, _)| !superseded.contains(&d.engine));
     let Some((detector, evidence)) = matches.first() else {
+        if let Some(error) = unreadable_pe {
+            return Err(error);
+        }
         return Ok(None);
     };
     if matches
@@ -142,7 +245,12 @@ pub fn identify_with_progress(
         ));
     }
     let options = (detector.resolve)(&context, &executables, cancelled)?;
-    let emote = has_emote || emote::layout(&context);
+    let middleware = vnlens_core::inventory::iter::<Middleware>()
+        .filter(|item| {
+            middleware_pe.iter().any(|m| std::ptr::eq(*m, *item)) || (item.layout)(&context)
+        })
+        .map(|item| &item.route)
+        .collect();
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
@@ -152,7 +260,8 @@ pub fn identify_with_progress(
         evidence: evidence.clone(),
         files: context.files,
         options,
-        emote,
+        middleware,
+        compose_pimg: Default::default(),
     }))
 }
 
@@ -172,25 +281,29 @@ fn normalize_root(mut root: &Path) -> &Path {
         "media",
         "resources",
     ];
-    for detector in vnlens_core::inventory::iter::<Detector>() {
-        for subdir in detector.subdirs {
-            if let Some((parent, leaf)) = subdir.split_once('/')
-                && root
-                    .file_name()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(leaf))
-                && root
-                    .parent()
-                    .and_then(Path::file_name)
-                    .is_some_and(|name| name.eq_ignore_ascii_case(parent))
-            {
-                root = root.parent().unwrap_or(root);
-            }
+    for subdir in vnlens_core::inventory::iter::<Detector>()
+        .flat_map(|d| d.subdirs)
+        .chain(vnlens_core::inventory::iter::<Middleware>().flat_map(|m| m.subdirs))
+    {
+        if let Some((parent, leaf)) = subdir.split_once('/')
+            && root
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case(leaf))
+            && root
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name.eq_ignore_ascii_case(parent))
+        {
+            root = root.parent().unwrap_or(root);
         }
     }
     if root.file_name().is_some_and(|name| {
         GENERIC
             .iter()
-            .chain(emote::SUBDIRS)
+            .chain(
+                vnlens_core::inventory::iter::<Middleware>()
+                    .flat_map(|m| m.subdirs.iter().filter(|s| !s.contains('/'))),
+            )
             .chain(
                 vnlens_core::inventory::iter::<Detector>()
                     .flat_map(|d| d.subdirs.iter().filter(|s| !s.contains('/'))),
@@ -233,6 +346,10 @@ pub(crate) fn plain(_: &Context, _: &[PathBuf], _: &AtomicBool) -> Result<Archiv
     Ok(ArchiveOptions::default())
 }
 
+pub(crate) fn unscoped(_: &Identification, _: &Path) -> Option<Identification> {
+    None
+}
+
 fn executable_paths(context: &Context) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for directory in [
@@ -258,7 +375,3 @@ fn executable_paths(context: &Context) -> Result<Vec<PathBuf>> {
     paths.sort();
     Ok(paths)
 }
-
-#[cfg(test)]
-#[path = "../tests/detect.rs"]
-mod tests;

@@ -13,35 +13,34 @@ pub(super) const ROUTER: Router = Router {
 
 fn header(route: &Route<'_>) -> Option<ResourceRoute> {
     let bytes = route.header;
-    if bytes.starts_with(&[0xfa, 0xfa, b'R', b'I'])
-        || bytes.starts_with(b"PSB\0")
-        || bytes.starts_with(b"mzs\0")
-        || bytes.starts_with(b"mdf\0")
-    {
-        route
-            .archive()
-            .map(|a| ResourceRoute::Archive(Box::new(a)))
-            .or(Some(ResourceRoute::Script("script/kaleido")))
+    if bytes.starts_with(&[0xfa, 0xfa, b'R', b'I']) {
+        Some(ResourceRoute::Script("script/kaleido"))
     } else {
-        None
+        crate::emote::route::header(route)
     }
 }
 
 fn entry(route: &Route<'_>) -> Option<ResourceRoute> {
-    matches!(route.hint, ResourceKind::Script | ResourceKind::Data)
-        .then_some(ResourceRoute::Script("script/kaleido"))
+    match route.hint {
+        ResourceKind::Script => Some(ResourceRoute::Script("script/kaleido")),
+        ResourceKind::Data => Some(ResourceRoute::Archive(Box::new(route.archive_with("psb")))),
+        _ => None,
+    }
 }
 
 fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
-    (route.leaf.ends_with("info.psb") || route.leaf.ends_with("info.psb.m"))
-        .then(|| route.archive_with("psb/emote-archive-info"))
+    crate::emote::route::archive(route)
 }
 
 fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
     use ResourceRoute::{Script, Video};
     match route.ext {
         "webm" => Some(Video("webm/kaleido")),
-        "nut" | "cnut" | "ks" | "scn" | "psb" | "m" => Some(Script("script/kaleido")),
+        "nut" | "cnut" | "ks" | "scn" => Some(Script("script/kaleido")),
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/kaleido/route.rs"]
+mod tests;

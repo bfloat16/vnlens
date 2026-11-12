@@ -43,3 +43,7 @@ fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
 fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
     matches!(route.ext, "ss" | "gan").then_some(ResourceRoute::Script("script/siglus"))
 }
+
+#[cfg(test)]
+#[path = "../../tests/siglus/route.rs"]
+mod tests;

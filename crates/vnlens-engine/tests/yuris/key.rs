@@ -10,6 +10,42 @@ fn from_pe(bytes: &[u8], cancel: &AtomicBool) -> Result<Option<Secret>> {
     from_image(&pe, cancel)
 }
 
+#[test]
+#[ignore = "Requires the licensed local Garudoma installation; set VNLENS_SOFTDENCHI_SAMPLE to girldorm.exe and run cargo test -p vnlens-engine softdenchi_local -- --ignored"]
+fn softdenchi_local_host_identification_and_native_keys() -> Result<()> {
+    let path = std::env::var_os("VNLENS_SOFTDENCHI_SAMPLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from("E:/VN/_Engine/yuris/Garudoma -Joshiryou no Kanrinin-/girldorm.exe")
+        });
+    let view = vnlens_io::ArcView::open(&path)?;
+    let original = PeImage::parse(view.slice(0, view.len())?)?.ok_or(Error::InvalidFormat)?;
+    assert!(!super::super::pe(&original)?);
+    let context = Context {
+        root: path.parent().ok_or(Error::InvalidFormat)?.to_path_buf(),
+        files: Default::default(),
+        sections: Default::default(),
+    };
+    let cancel = AtomicBool::new(false);
+    let image = context.image(&view, &cancel)?.ok_or(Error::InvalidFormat)?;
+    assert_eq!(
+        original.file_bytes().len() - image.file_bytes().len(),
+        0x60000
+    );
+    assert!(super::super::pe(&image)?);
+    let key = match from_image(&image, &cancel)? {
+        Some(key) => key,
+        None => super::super::license::from_image(&image, &cancel)?.ok_or(Error::InvalidFormat)?,
+    };
+    let name = super::super::name::from_image(&image, &cancel)?.ok_or(Error::InvalidFormat)?;
+    let identified = crate::identify(&path, &cancel)?.ok_or(Error::InvalidFormat)?;
+    assert_eq!(identified.engine, crate::Engine::Yuris);
+    assert!(identified.evidence.starts_with("PE features in "));
+    assert_eq!(identified.resource_options().keys["ystb"], key);
+    assert_eq!(identified.resource_options().keys["ypf_name"], name);
+    Ok(())
+}
+
 fn executable(base: u32) -> Vec<u8> {
     let mut b = vec![0; 0x600];
     b[..2].copy_from_slice(b"MZ");
@@ -87,4 +123,54 @@ fn equivalent_mov_encodings_preserve_initialization_dataflow() {
     // A branch to the middle of a load is not the string-length loop.
     bytes[0x20f] = 7;
     assert!(from_pe(&bytes, &AtomicBool::new(false)).unwrap().is_none());
+}
+
+#[test]
+fn unreadable_pe_resources_require_independent_engine_evidence() {
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = Temp(std::env::temp_dir().join(format!(
+        "vnlens-yuris-resource-{}-{timestamp}",
+        std::process::id()
+    )));
+    std::fs::create_dir_all(root.0.join("pac")).unwrap();
+    let mut bytes = vec![0; 0x300];
+    bytes[..2].copy_from_slice(b"MZ");
+    BinaryWriter::u32_le(0x80, &mut bytes[0x3c..]);
+    bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+    BinaryWriter::u16_le(0x14c, &mut bytes[0x84..]);
+    BinaryWriter::u16_le(1, &mut bytes[0x86..]);
+    BinaryWriter::u16_le(0xe0, &mut bytes[0x94..]);
+    BinaryWriter::u16_le(0x10b, &mut bytes[0x98..]);
+    BinaryWriter::u32_le(0x400000, &mut bytes[0xb4..]);
+    BinaryWriter::u32_le(0x200, &mut bytes[0xd4..]);
+    BinaryWriter::u32_le(16, &mut bytes[0xf4..]);
+    // A loader may replace this resource directory at runtime. Its disk RVA
+    // is not mapped, so it cannot provide static PE identification evidence.
+    BinaryWriter::u32_le(0x8000, &mut bytes[0x108..]);
+    BinaryWriter::u32_le(0x100, &mut bytes[0x10c..]);
+    BinaryWriter::u32_le(0x1000, &mut bytes[0x184..]);
+    BinaryWriter::u32_le(0x100, &mut bytes[0x188..]);
+    BinaryWriter::u32_le(0x200, &mut bytes[0x18c..]);
+    BinaryWriter::u32_le(0x2000_0000, &mut bytes[0x19c..]);
+    std::fs::write(root.0.join("protected.exe"), bytes).unwrap();
+    std::fs::write(root.0.join("pac/bn.ypf"), b"YPF\0").unwrap();
+    let cancel = AtomicBool::new(false);
+    assert!(
+        matches!(crate::identify(&root.0, &cancel), Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+    );
+    for name in ["yscfg.dat", "yssfs.dat"] {
+        std::fs::write(root.0.join(name), []).unwrap();
+    }
+    let identified = crate::identify(&root.0, &cancel).unwrap().unwrap();
+    assert_eq!(identified.engine, crate::Engine::Yuris);
+    assert!(identified.resource_options().keys.is_empty());
 }

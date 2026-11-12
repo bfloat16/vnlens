@@ -90,3 +90,7 @@ fn archive_set(
         .collect();
     Some(((*base_path).clone(), members))
 }
+
+#[cfg(test)]
+#[path = "../../tests/rugp/route.rs"]
+mod tests;

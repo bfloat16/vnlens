@@ -21,8 +21,9 @@ pub(crate) struct Route<'a> {
     pub hint: ResourceKind,
     pub header: &'a [u8],
     pub options: &'a ArchiveOptions,
-    pub emote: bool,
+    pub compose_pimg: bool,
     pub(super) router: Option<&'static Router>,
+    pub(super) middleware: &'a [&'static Router],
 }
 
 impl Route<'_> {
@@ -34,18 +35,17 @@ impl Route<'_> {
     }
 
     pub(crate) fn archive(&self) -> Option<ArchiveRoute> {
-        if self.emote
-            && let Some(route) = crate::emote::route::archive(self)
-        {
-            return Some(route);
-        }
-        self.router.and_then(|r| (r.archive)(self))
+        self.middleware
+            .iter()
+            .find_map(|m| (m.archive)(self))
+            .or_else(|| self.router.and_then(|r| (r.archive)(self)))
     }
 }
 
 pub(crate) type ArchiveSetFn =
     fn(&str, &Path, &BTreeMap<String, &PathBuf>) -> Option<(PathBuf, Vec<String>)>;
 
+#[derive(Debug)]
 pub(crate) struct Router {
     pub headerless: fn(&Route<'_>) -> Option<ResourceRoute>,
     pub header: fn(&Route<'_>) -> Option<ResourceRoute>,
@@ -99,14 +99,18 @@ impl Identification {
             hint,
             header,
             options: &self.options,
-            emote: self.emote,
+            compose_pimg: self.compose_pimg.load(std::sync::atomic::Ordering::Relaxed),
             router,
+            middleware: &self.middleware,
         };
 
         if let Some(matched) = router.and_then(|r| (r.headerless)(&route)) {
             return matched;
         }
         if let Some(matched) = router.and_then(|r| (r.header)(&route)) {
+            return matched;
+        }
+        if let Some(matched) = self.middleware.iter().find_map(|m| (m.header)(&route)) {
             return matched;
         }
         if let Some(matched) = standard_header(header) {
@@ -193,7 +197,3 @@ fn standard_extension(ext: &str, hint: ResourceKind) -> ResourceRoute {
         _ => Other(hint),
     }
 }
-
-#[cfg(test)]
-#[path = "../tests/routing.rs"]
-mod tests;

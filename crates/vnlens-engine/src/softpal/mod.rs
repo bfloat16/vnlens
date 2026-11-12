@@ -4,7 +4,7 @@ mod route;
 
 use crate::{
     Engine,
-    detect::{Detector, has, plain},
+    detect::{Detector, has, plain, unscoped},
 };
 use vnlens_core::Result;
 use vnlens_io::pe::PeImage;
@@ -27,6 +27,11 @@ vnlens_core::inventory::submit! {
         pe,
         layout,
         resolve: plain,
+        scope: unscoped,
         route: route::ROUTER,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/softpal/mod.rs"]
+mod tests;

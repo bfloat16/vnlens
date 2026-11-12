@@ -42,9 +42,9 @@ impl Identification {
                 let group = router
                     .and_then(|r| (r.archive_set)(name, primary, names))
                     .or_else(|| {
-                        self.emote
-                            .then(|| crate::emote::route::archive_set(name, primary, names))
-                            .flatten()
+                        self.middleware
+                            .iter()
+                            .find_map(|m| (m.archive_set)(name, primary, names))
                     });
                 let Some((primary_path, mut members)) = group else {
                     continue;
@@ -67,7 +67,3 @@ impl Identification {
         result
     }
 }
-
-#[cfg(test)]
-#[path = "../tests/archive_set.rs"]
-mod tests;

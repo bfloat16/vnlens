@@ -63,3 +63,7 @@ fn archive_set(
 fn volume(name: &str) -> Option<u32> {
     u32::from_str_radix(name.strip_prefix("res")?.strip_suffix(".grp")?, 16).ok()
 }
+
+#[cfg(test)]
+#[path = "../../tests/exhibit/route.rs"]
+mod tests;

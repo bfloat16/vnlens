@@ -1,7 +1,13 @@
 //! Immutable identification results. Secret material is redacted in Debug.
 
-use std::path::PathBuf;
-use vnlens_core::ArchiveOptions;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use vnlens_core::{ArchiveOptions, ResourceKind, ResourceOrigin, ResourceRoute};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
@@ -17,9 +23,11 @@ pub enum Engine {
     Softpal,
     Csystem,
     Siglus,
+    RealLive,
     Kaleido,
     Krkr,
     KrkrzHxv4,
+    Mages,
 }
 
 #[derive(Clone, Debug)]
@@ -29,10 +37,27 @@ pub struct Identification {
     pub evidence: String,
     pub files: std::sync::Arc<vnlens_io::FileSystem>,
     pub(crate) options: ArchiveOptions,
-    pub(crate) emote: bool,
+    pub(crate) middleware: Vec<&'static crate::routing::Router>,
+    pub(crate) compose_pimg: Arc<AtomicBool>,
 }
 
 impl Identification {
+    /// Selects PIMG image composition for this host's shared game context.
+    /// Cloned contexts and mounted archives observe the same setting.
+    pub fn set_compose_pimg(&self, enabled: bool) {
+        self.compose_pimg.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Whether this engine context permits PSB containers, including unnamed
+    /// entries whose logical headers are read only after selection.
+    #[must_use]
+    pub fn supports_psb(&self) -> bool {
+        matches!(
+            self.resource_route("", ResourceOrigin::Entry(ResourceKind::Unknown), b"PSB\0"),
+            ResourceRoute::Archive(_)
+        )
+    }
+
     /// Parameters shared with resource decoders; Debug redacts all keys.
     #[must_use]
     pub fn resource_options(&self) -> &ArchiveOptions {

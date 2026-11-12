@@ -75,3 +75,7 @@ fn archive_set(
     };
     Some((primary.to_path_buf(), vec![name.to_owned(), companion]))
 }
+
+#[cfg(test)]
+#[path = "../../tests/systemnnn/route.rs"]
+mod tests;

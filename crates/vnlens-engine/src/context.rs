@@ -18,6 +18,7 @@ impl Context {
         let Some(mut image) = PeImage::parse(view.slice(0, view.len())?)? else {
             return Ok(None);
         };
+        vnlens_unpack::softdenchi::unpack(&mut image, cancel)?;
         if let Some(sections) = self.sections.get(view.path()) {
             for section in sections {
                 image.restore_section(

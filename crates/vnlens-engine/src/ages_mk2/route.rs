@@ -34,3 +34,7 @@ fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
         options,
     })
 }
+
+#[cfg(test)]
+#[path = "../../tests/ages_mk2/route.rs"]
+mod tests;

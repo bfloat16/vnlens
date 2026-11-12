@@ -1,11 +1,14 @@
 //! Native BasicCryptoFilter salt assignment and Hxv4 KDF seed arguments.
+//! The --xopt selector compares the third UTF-16 unit with 'x' and replaces
+//! the null seed pointer with the eight bytes following its 12-unit record.
+//! A configured seed overrides the local default in the KDF's CMOVNE path.
 //! Match decoded memory/register/immediate operands and control flow, without
 //! byte-pattern searches or offsets tied to a particular instruction encoding.
 use super::check;
 use iced_x86::{Decoder, DecoderOptions, Instruction, MemorySize, Mnemonic, OpKind, Register};
 use std::sync::atomic::AtomicBool;
 use vnlens_core::Result;
-use vnlens_io::{BinaryWriter, pe::PeImage};
+use vnlens_io::{BinaryReader, BinaryWriter, pe::PeImage};
 
 pub(super) fn salts<'a>(image: &'a PeImage<'_>, cancel: &AtomicBool) -> Result<Vec<&'a [u8]>> {
     let mut found = Vec::new();
@@ -29,10 +32,20 @@ pub(super) fn salts<'a>(image: &'a PeImage<'_>, cancel: &AtomicBool) -> Result<V
                 continue;
             }
             let branch = d.decode();
-            let pointer = d.decode();
+            if branch.mnemonic() != Mnemonic::Jbe {
+                continue;
+            }
+            let mut pointer = d.decode();
+            while pointer.mnemonic() == Mnemonic::Mov
+                && pointer.op0_kind() == OpKind::Register
+                && pointer.op1_kind() == OpKind::Memory
+                && absolute(&pointer)
+                && pointer.next_ip() < branch.near_branch_target()
+            {
+                pointer = d.decode();
+            }
             let length = d.decode();
-            if branch.mnemonic() != Mnemonic::Jbe
-                || branch.near_branch_target() < length.next_ip()
+            if branch.near_branch_target() < length.next_ip()
                 || !constant_store(&pointer)
                 || !absolute(&pointer)
                 || !constant_store(&length)
@@ -53,6 +66,83 @@ pub(super) fn salts<'a>(image: &'a PeImage<'_>, cancel: &AtomicBool) -> Result<V
     }
     found.sort();
     found.dedup();
+    Ok(found)
+}
+fn configured_seeds(image: &PeImage<'_>, cancel: &AtomicBool) -> Result<Vec<[u8; 8]>> {
+    let mut found = Vec::new();
+    for section in image.sections.iter().filter(|s| s.executable) {
+        let code = image.section_data(section)?;
+        for start in 0..code.len() {
+            if start.is_multiple_of(4096) {
+                check(cancel)?;
+            }
+            let mut d = Decoder::new(32, &code[start..], DecoderOptions::NONE);
+            let flag = d.decode();
+            if flag.mnemonic() != Mnemonic::Mov
+                || flag.op0_kind() != OpKind::Register
+                || flag.op1_kind() != OpKind::Memory
+                || flag.memory_size() != MemorySize::UInt16
+                || !absolute(&flag)
+            {
+                continue;
+            }
+            let pointer = d.decode();
+            let compare = d.decode();
+            let select = d.decode();
+            let store = d.decode();
+            if pointer.mnemonic() != Mnemonic::Mov
+                || pointer.op0_kind() != OpKind::Register
+                || pointer.op1_kind() != OpKind::Immediate32
+                || compare.mnemonic() != Mnemonic::Cmp
+                || compare.op0_kind() != OpKind::Register
+                || compare.op0_register() != flag.op0_register()
+                || match compare.op1_kind() {
+                    OpKind::Immediate8to16 => compare.immediate8to16() != i16::from(b'x'),
+                    OpKind::Immediate16 => compare.immediate16() != u16::from(b'x'),
+                    _ => true,
+                }
+                || select.mnemonic() != Mnemonic::Cmovne
+                || select.op0_kind() != OpKind::Register
+                || select.op0_register() != pointer.op0_register()
+                || select.op1_kind() != OpKind::Memory
+                || !absolute(&select)
+                || select.memory_size() != MemorySize::UInt32
+                || store.mnemonic() != Mnemonic::Mov
+                || store.op0_kind() != OpKind::Memory
+                || !absolute(&store)
+                || store.memory_size() != MemorySize::UInt32
+                || store.op1_kind() != OpKind::Register
+                || store.op1_register() != pointer.op0_register()
+                || store.memory_displacement32() != select.memory_displacement32()
+            {
+                continue;
+            }
+            let address = u64::from(pointer.immediate32());
+            // The selector's operand, rather than the decorative record text,
+            // decides whether the configured pointer reaches the KDF.
+            let flag_address = u64::from(flag.memory_displacement32());
+            if address.checked_sub(flag_address) != Some(20) {
+                continue;
+            }
+            if image.u32_at_va(u64::from(select.memory_displacement32()))? != 0 {
+                return Err(super::missing(
+                    "Configured archive seed pointer is not statically resolved",
+                ));
+            }
+            let mut flag = BinaryReader::new(image.at_va(flag_address).ok_or_else(|| {
+                vnlens_io::BinaryIo::unexpected_eof("Hxv4 seed selector exceeds mapped storage")
+            })?);
+            if flag.read_u16_le()? != u16::from(b'x') {
+                continue;
+            }
+            let mut reader = BinaryReader::new(image.at_va(address).ok_or_else(|| {
+                vnlens_io::BinaryIo::unexpected_eof("Hxv4 configured seed exceeds mapped storage")
+            })?);
+            let mut seed = [0; 8];
+            seed.copy_from_slice(reader.read_bytes(8)?);
+            found.push(seed);
+        }
+    }
     Ok(found)
 }
 
@@ -157,7 +247,15 @@ pub(super) fn seeds(image: &PeImage<'_>, cancel: &AtomicBool) -> Result<Vec<[u8;
             }
         }
     }
-    Ok(found)
+    if found.is_empty() {
+        return Ok(found);
+    }
+    let configured = configured_seeds(image, cancel)?;
+    Ok(if configured.is_empty() {
+        found
+    } else {
+        configured
+    })
 }
 fn absolute(i: &Instruction) -> bool {
     i.memory_base() == Register::None && i.memory_index() == Register::None
