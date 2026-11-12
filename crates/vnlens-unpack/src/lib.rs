@@ -2,4 +2,5 @@
 #![forbid(unsafe_code)]
 
 pub mod enigma;
+pub mod softdenchi;
 pub mod steamstub;
