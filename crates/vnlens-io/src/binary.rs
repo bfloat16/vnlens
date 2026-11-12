@@ -586,6 +586,34 @@ impl<'a> BinaryReader<'a> {
         Ok(Self::u16_le(self.read_bytes(2)?))
     }
 
+    /// Reads a signed integer whose high bits were stored in a preceding tag.
+    /// Remaining whole bytes are little-endian; the combined width determines
+    /// the sign bit. Used by mixed-width expression immediates.
+    pub fn read_signed_le_with_high_bits(
+        &mut self,
+        high: u8,
+        high_bits: u8,
+        payload_bytes: u8,
+    ) -> std::io::Result<i64> {
+        if high_bits == 0
+            || high_bits > 8
+            || payload_bytes > 7
+            || u16::from(high) >= (1u16 << high_bits)
+        {
+            return Err(BinaryIo::invalid_input(
+                "Invalid signed integer prefix width",
+            ));
+        }
+        let low = if payload_bytes == 0 {
+            0
+        } else {
+            self.read_compact_u64(payload_bytes, Endian::Little)?
+        };
+        let bits = u32::from(payload_bytes) * 8 + u32::from(high_bits);
+        let value = low | (u64::from(high) << (u32::from(payload_bytes) * 8));
+        Ok(((value << (64 - bits)) as i64) >> (64 - bits))
+    }
+
     /// Reads a little-endian `u32`.
     pub fn read_u32_le(&mut self) -> std::io::Result<u32> {
         Ok(Self::u32_le(self.read_bytes(4)?))

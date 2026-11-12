@@ -62,3 +62,40 @@ fn replay_reader_supports_forward_skip_backward_replay_and_size_checks() -> io::
     );
     Ok(())
 }
+
+#[test]
+fn replay_source_reuses_forward_reads_and_isolates_cursors() -> io::Result<()> {
+    use std::sync::atomic::AtomicUsize;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let factory: ReadFactory = {
+        let starts = starts.clone();
+        Arc::new(move |_| {
+            starts.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::new(io::Cursor::new(*b"0123456789")))
+        })
+    };
+    let source = Arc::new(ReplaySource::new(factory, 10)?);
+    for at in 0..5 {
+        assert_eq!(source.read_at(at, 1)?.as_ref(), &[b'0' + at as u8]);
+    }
+    assert_eq!(source.read_at(7, 2)?.as_ref(), b"78");
+    assert_eq!(starts.load(Ordering::Relaxed), 1);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut cursor = source.clone().reader(cancel.clone())?;
+    let mut bytes = [0; 3];
+    cursor.read_exact(&mut bytes)?;
+    assert_eq!(&bytes, b"012");
+    assert_eq!(source.read_at(9, 1)?.as_ref(), b"9");
+    assert_eq!(starts.load(Ordering::Relaxed), 2);
+    assert_eq!(source.read_at(1, 2)?.as_ref(), b"12");
+    assert_eq!(starts.load(Ordering::Relaxed), 3);
+    assert_eq!(source.read_at(10, 0)?.as_ref(), b"");
+    assert_eq!(
+        source.read_at(10, 1).err().map(|error| error.kind()),
+        Some(io::ErrorKind::UnexpectedEof)
+    );
+    cancel.store(true, Ordering::Relaxed);
+    assert!(cursor.read_exact(&mut bytes).is_err());
+    assert_eq!(source.read_at(3, 1)?.as_ref(), b"3");
+    Ok(())
+}

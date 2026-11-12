@@ -18,5 +18,7 @@ pub use binary::{
     BinaryIo, BinaryReader, BinaryWriter, BitOrder, BitReader, BitWriter, Endian, InterleavedBits,
 };
 pub use files::{DirectoryEntry, FileMetadata, FileSystem};
-pub use source::{BinarySourceReader, RangeSource, ReadAt, ReadFactory, ReadSeek, ReplayReader};
+pub use source::{
+    BinarySourceReader, RangeSource, ReadAt, ReadFactory, ReadSeek, ReplayReader, ReplaySource,
+};
 pub use view::ArcView;

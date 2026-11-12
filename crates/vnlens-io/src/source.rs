@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -127,6 +127,73 @@ impl<T: ReadAt + ?Sized> Seek for SourceCursor<T> {
 pub type ReadFactory =
     Arc<dyn Fn(Arc<AtomicBool>) -> io::Result<Box<dyn Read + Send>> + Send + Sync>;
 
+/// Random access over a sequential transform. Small forward reads reuse one
+/// decoder; backward reads replay it. Explicit cursors keep independent state.
+pub struct ReplaySource {
+    factory: ReadFactory,
+    size: u64,
+    reader: Mutex<ReplayReader>,
+}
+
+impl std::fmt::Debug for ReplaySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplaySource")
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReplaySource {
+    pub fn new(factory: ReadFactory, size: u64) -> io::Result<Self> {
+        let reader = ReplayReader::new(factory.clone(), size, Arc::new(AtomicBool::new(false)))?;
+        Ok(Self {
+            factory,
+            size,
+            reader: Mutex::new(reader),
+        })
+    }
+}
+
+impl ReadAt for ReplaySource {
+    fn len(&self) -> u64 {
+        self.size
+    }
+
+    fn read_at(&self, offset: u64, size: usize) -> io::Result<Cow<'_, [u8]>> {
+        if offset > self.size || size as u64 > self.size - offset {
+            return Err(BinaryIo::unexpected_eof("read exceeds transformed source"));
+        }
+        if size == 0 {
+            return Ok(Cow::Borrowed(&[]));
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(size).map_err(io::Error::other)?;
+        bytes.resize(size, 0);
+        let mut reader = self
+            .reader
+            .lock()
+            .map_err(|_| io::Error::other("Source reader lock poisoned"))?;
+        reader.seek(SeekFrom::Start(offset))?;
+        let result = reader.read_exact(&mut bytes);
+        if result.is_err() {
+            *reader = ReplayReader::new(
+                self.factory.clone(),
+                self.size,
+                Arc::new(AtomicBool::new(false)),
+            )?;
+        }
+        result.map(|()| Cow::Owned(bytes))
+    }
+
+    fn reader(self: Arc<Self>, cancelled: Arc<AtomicBool>) -> io::Result<Box<dyn ReadSeek>> {
+        Ok(Box::new(ReplayReader::new(
+            self.factory.clone(),
+            self.size,
+            cancelled,
+        )?))
+    }
+}
+
 /// A bounded-memory cursor over a sequential transform. Forward seeks discard
 /// output; backward seeks restart the transform. Length comes from the format.
 pub struct ReplayReader {
@@ -206,11 +273,14 @@ impl Read for ReplayReader {
             self.decoded = 0;
             self.finished = false;
         }
-        let mut scratch = [0; 65536];
-        while self.decoded < self.position {
-            let size = usize::try_from((self.position - self.decoded).min(scratch.len() as u64))
-                .map_err(io::Error::other)?;
-            self.read_decoded(&mut scratch[..size])?;
+        if self.decoded < self.position {
+            let mut scratch = [0; 65536];
+            while self.decoded < self.position {
+                let size =
+                    usize::try_from((self.position - self.decoded).min(scratch.len() as u64))
+                        .map_err(io::Error::other)?;
+                self.read_decoded(&mut scratch[..size])?;
+            }
         }
         let size = buffer
             .len()

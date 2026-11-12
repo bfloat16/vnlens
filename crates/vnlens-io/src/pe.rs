@@ -43,6 +43,7 @@ pub struct PeImage<'a> {
     exports: Option<(u32, u32)>,
     imports: Option<(u32, u32)>,
     resources: Option<(u32, u32)>,
+    exceptions: Option<(u32, u32)>,
     tls: Option<(u32, u32)>,
     replacements: BTreeMap<u32, Arc<[u8]>>,
 }
@@ -96,22 +97,29 @@ impl<'a> PeImage<'a> {
         let image_size = fields.read_u32_le()?;
         let header_size = fields.read_u32_le()?;
         let directory_count_offset = if kind == 0x10b { 92 } else { 108 };
-        let (exports, imports, resources, tls) = if optional.len() >= directory_count_offset + 4 {
-            fields.set_position(directory_count_offset)?;
-            let count = fields.read_u32_le()?;
-            let mut directory = |index: u32| -> io::Result<Option<(u32, u32)>> {
-                if index >= count {
-                    return Ok(None);
-                }
-                fields.set_position(directory_count_offset + 4 + index as usize * 8)?;
-                let rva = fields.read_u32_le()?;
-                let size = fields.read_u32_le()?;
-                Ok((rva != 0 && size != 0).then_some((rva, size)))
+        let (exports, imports, resources, exceptions, tls) =
+            if optional.len() >= directory_count_offset + 4 {
+                fields.set_position(directory_count_offset)?;
+                let count = fields.read_u32_le()?;
+                let mut directory = |index: u32| -> io::Result<Option<(u32, u32)>> {
+                    if index >= count {
+                        return Ok(None);
+                    }
+                    fields.set_position(directory_count_offset + 4 + index as usize * 8)?;
+                    let rva = fields.read_u32_le()?;
+                    let size = fields.read_u32_le()?;
+                    Ok((rva != 0 && size != 0).then_some((rva, size)))
+                };
+                (
+                    directory(0)?,
+                    directory(1)?,
+                    directory(2)?,
+                    directory(3)?,
+                    directory(9)?,
+                )
+            } else {
+                (None, None, None, None, None)
             };
-            (directory(0)?, directory(1)?, directory(2)?, directory(9)?)
-        } else {
-            (None, None, None, None)
-        };
         let table_size = count
             .checked_mul(40)
             .ok_or_else(|| BinaryIo::unexpected_eof("PE section count overflow"))?;
@@ -154,6 +162,7 @@ impl<'a> PeImage<'a> {
             exports,
             imports,
             resources,
+            exceptions,
             tls,
             replacements: BTreeMap::new(),
         }))
@@ -163,6 +172,34 @@ impl<'a> PeImage<'a> {
     #[must_use]
     pub fn file_bytes(&self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// Maps an AMD64 RUNTIME_FUNCTION's declared code range containing `address`.
+    /// Leaf functions without unwind records return None. Malformed exception
+    /// records retain I/O errors; no machine-code boundary guessing is involved.
+    pub fn runtime_function(&self, address: u64) -> io::Result<Option<&[u8]>> {
+        if self.machine != 0x8664 {
+            return Ok(None);
+        }
+        let Some((rva, size)) = self.exceptions else {
+            return Ok(None);
+        };
+        let Some(relative) = address
+            .checked_sub(self.image_base)
+            .and_then(|v| u32::try_from(v).ok())
+        else {
+            return Ok(None);
+        };
+        let mut reader = BinaryReader::new(self.read(rva, size as usize)?);
+        while reader.remaining() != 0 {
+            let start = reader.read_u32_le()?;
+            let end = reader.read_u32_le()?;
+            reader.read_u32_le()?;
+            if start <= relative && relative < end {
+                return self.read(relative, (end - relative) as usize).map(Some);
+            }
+        }
+        Ok(None)
     }
 
     /// Locates the section containing an RVA, preferring the nearest base.
