@@ -1,0 +1,19 @@
+[package]
+name = "vnlens-dataset"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+autotests = false
+
+[dependencies]
+vnlens-core.workspace = true
+vnlens-engine.workspace = true
+vnlens-archive.workspace = true
+vnlens-script.workspace = true
+vnlens-io.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
