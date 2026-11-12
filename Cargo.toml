@@ -6,6 +6,7 @@ members = [
     "crates/vnlens-core",
     "crates/vnlens-crypto",
     "crates/vnlens-bin",
+    "crates/vnlens-middleware",
     "crates/vnlens-unpack",
     "crates/vnlens-engine",
     "crates/vnlens-archive",
@@ -13,6 +14,7 @@ members = [
     "crates/vnlens-audio",
     "crates/vnlens-script",
     "crates/vnlens-video",
+    "crates/vnlens-dataset",
     "crates/vnlens-gui",
     "crates/vnlens-xtask",
 ]
@@ -30,6 +32,7 @@ vnlens-io = { path = "crates/vnlens-io" }
 vnlens-core = { path = "crates/vnlens-core" }
 vnlens-crypto = { path = "crates/vnlens-crypto" }
 vnlens-bin = { path = "crates/vnlens-bin" }
+vnlens-middleware = { path = "crates/vnlens-middleware" }
 vnlens-unpack = { path = "crates/vnlens-unpack" }
 vnlens-engine = { path = "crates/vnlens-engine" }
 vnlens-archive = { path = "crates/vnlens-archive" }
@@ -37,7 +40,7 @@ vnlens-image = { path = "crates/vnlens-image" }
 vnlens-audio = { path = "crates/vnlens-audio" }
 vnlens-script = { path = "crates/vnlens-script" }
 vnlens-video = { path = "crates/vnlens-video" }
-
+vnlens-dataset = { path = "crates/vnlens-dataset" }
 
 memmap2 = "0.9"
 thiserror = "2"
