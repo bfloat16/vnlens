@@ -110,5 +110,5 @@ impl ReadAt for MovieSource {
 }
 
 #[cfg(test)]
-#[path = "../tests/kaleido.rs"]
+#[path = "../../tests/kaleido/mod.rs"]
 mod tests;
