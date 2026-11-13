@@ -6,6 +6,7 @@
 mod ages_mk2;
 pub mod bgi;
 pub mod csystem;
+mod entisgls;
 mod format;
 pub mod levels;
 mod model;
