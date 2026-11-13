@@ -152,6 +152,55 @@ pub struct BitReader<'a> {
     order: BitOrder,
 }
 
+/// Bit cursor over a sequential source. It consumes no bytes beyond the field
+/// being requested; callers can wrap the source in a buffered reader.
+#[derive(Debug)]
+pub struct StreamBitReader<R> {
+    reader: R,
+    byte: u8,
+    available: u8,
+    order: BitOrder,
+}
+
+impl<R: std::io::Read> StreamBitReader<R> {
+    #[must_use]
+    pub fn new(reader: R, order: BitOrder) -> Self {
+        Self {
+            reader,
+            byte: 0,
+            available: 0,
+            order,
+        }
+    }
+
+    pub fn read_bit(&mut self) -> std::io::Result<u8> {
+        if self.available == 0 {
+            let mut byte = [0];
+            self.reader.read_exact(&mut byte)?;
+            self.byte = match self.order {
+                BitOrder::Msb => byte[0],
+                BitOrder::Lsb => byte[0].reverse_bits(),
+            };
+            self.available = 8;
+        }
+        let value = self.byte >> 7;
+        self.byte <<= 1;
+        self.available -= 1;
+        Ok(value)
+    }
+
+    pub fn read_bits(&mut self, count: u8) -> std::io::Result<u32> {
+        if count > 32 {
+            return Err(BinaryIo::invalid_input("Bit field exceeds u32"));
+        }
+        let mut value = 0;
+        for _ in 0..count {
+            value = (value << 1) | u32::from(self.read_bit()?);
+        }
+        Ok(value)
+    }
+}
+
 impl<'a> BitReader<'a> {
     /// Returns the next byte index and bit offset, excluding buffered lookahead.
     #[must_use]
@@ -202,10 +251,7 @@ impl<'a> BitReader<'a> {
     #[inline]
     pub fn read_bits(&mut self, count: u8) -> std::io::Result<u32> {
         if count > 32 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Bit field exceeds u32",
-            ));
+            return Err(BinaryIo::invalid_input("Bit field exceeds u32"));
         }
         while self.available < count {
             if !self.refill() {
@@ -316,10 +362,7 @@ impl<'a> BinaryReader<'a> {
     /// redundant extension groups remain legal and are checked for consistency.
     pub fn read_tagged_sleb64(&mut self, tag_bits: u8) -> std::io::Result<(u64, i64)> {
         if tag_bits > 7 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Base-128 tag exceeds first group",
-            ));
+            return Err(BinaryIo::invalid_input("Base-128 tag exceeds first group"));
         }
         let mut value = 0u64;
         let mut bits = 0u32;

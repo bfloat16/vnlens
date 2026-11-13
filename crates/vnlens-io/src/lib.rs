@@ -16,6 +16,7 @@ pub mod pe;
 
 pub use binary::{
     BinaryIo, BinaryReader, BinaryWriter, BitOrder, BitReader, BitWriter, Endian, InterleavedBits,
+    StreamBitReader,
 };
 pub use files::{DirectoryEntry, FileMetadata, FileSystem};
 pub use source::{

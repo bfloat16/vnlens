@@ -391,6 +391,17 @@ impl<'a> BinarySourceReader<'a> {
         Ok(bytes)
     }
 
+    /// Advances over an unused field without requesting its bytes.
+    pub fn skip(&mut self, size: usize) -> io::Result<()> {
+        let end = self
+            .position
+            .checked_add(size)
+            .filter(|&end| end as u64 <= self.source.len())
+            .ok_or_else(|| BinaryIo::unexpected_eof("Skipped field exceeds source"))?;
+        self.position = end;
+        Ok(())
+    }
+
     pub fn read_u8(&mut self) -> io::Result<u8> {
         Ok(self.read_bytes(1)?[0])
     }
