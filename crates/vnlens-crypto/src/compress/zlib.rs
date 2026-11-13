@@ -1,10 +1,50 @@
 //! zlib (RFC 1950) inflate, wrapping `flate2`.
 
 use std::io::Read;
+use vnlens_io::BinaryReader;
 
 pub use flate2::read::ZlibDecoder;
 
 use super::CompressError;
+
+/// Checks the RFC 1950 CMF/FLG fields without decoding the stream. A valid
+/// header does not establish valid deflate data or the trailing checksum.
+#[must_use]
+pub fn has_header(data: &[u8]) -> bool {
+    let Some(header) = data.get(..2) else {
+        return false;
+    };
+    header[0] & 15 == 8 && header[0] >> 4 <= 7 && BinaryReader::u16_be(header).is_multiple_of(31)
+}
+
+/// Validates deflate termination, Adler32 and the caller's format-defined
+/// output length with bounded scratch memory, without retaining decoded bytes.
+pub fn validate(data: &[u8], expected: usize) -> Result<(), CompressError> {
+    let mut decoder = flate2::Decompress::new(true);
+    let mut buffer = [0; 8192];
+    loop {
+        let input = decoder.total_in();
+        let output = decoder.total_out();
+        let start = usize::try_from(input).map_err(|_| CompressError::Inflate)?;
+        let remaining = data.get(start..).ok_or(CompressError::Inflate)?;
+        let status = decoder
+            .decompress(remaining, &mut buffer, flate2::FlushDecompress::None)
+            .map_err(|_| CompressError::Inflate)?;
+        if decoder.total_out() > expected as u64 {
+            return Err(CompressError::OutputTooLarge { limit: expected });
+        }
+        if status == flate2::Status::StreamEnd {
+            return if decoder.total_out() == expected as u64 {
+                Ok(())
+            } else {
+                Err(CompressError::Inflate)
+            };
+        }
+        if decoder.total_in() == input && decoder.total_out() == output {
+            return Err(CompressError::Inflate);
+        }
+    }
+}
 
 /// Opens a streaming zlib decoder. Reads produce only the requested output.
 #[must_use]
