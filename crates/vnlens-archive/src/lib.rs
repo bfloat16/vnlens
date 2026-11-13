@@ -5,6 +5,7 @@ mod ages_mk2;
 mod bgi;
 mod csystem;
 mod emote;
+mod entisgls;
 mod escude;
 mod exhibit;
 pub mod krkr;

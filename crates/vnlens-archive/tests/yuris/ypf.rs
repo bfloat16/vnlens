@@ -3,45 +3,8 @@
 use super::*;
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
-use vnlens_core::ResourceKind;
 use vnlens_crypto::checksum::{adler32, crc32};
 use vnlens_io::BinaryWriter;
-
-#[test]
-#[ignore = "Requires the local Justy x Nasty bn.ypf; run cargo test -p vnlens-archive justy -- --ignored"]
-fn justy_recovered_keys_open_and_disassemble_the_native_script() {
-    use vnlens_core::ResourceResolver;
-    struct Resources<'a>(&'a YpfArchive);
-    impl ResourceResolver for Resources<'_> {
-        fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>> {
-            self.0
-                .entries()
-                .iter()
-                .find(|entry| entry.name.replace('\\', "/").eq_ignore_ascii_case(name))
-                .map(|entry| self.0.open_entry(entry).map(|data| data.into_owned()))
-                .transpose()
-        }
-    }
-    let path = "E:/VN/_Engine/yuris/Justy×Nasty ~Maou Hajimemashita~/pac/bn.ypf";
-    let view = Arc::new(ArcView::open(path).unwrap());
-    let archive = YpfArchive::open(view, None, None).unwrap();
-    assert_eq!(archive.entries().len(), 282);
-    let script = archive
-        .entries()
-        .iter()
-        .position(|entry| {
-            entry
-                .name
-                .replace('\\', "/")
-                .eq_ignore_ascii_case("ysbin/yst00026.ybn")
-        })
-        .unwrap();
-    let data = archive.open_entry(&archive.entries()[script]).unwrap();
-    let decoded = vnlens_script::disassemble_as("ybn/yuris", &data, Some(&Resources(&archive)))
-        .unwrap()
-        .unwrap();
-    assert_eq!(decoded.instructions.len(), 7376);
-}
 
 struct TestFile(std::path::PathBuf);
 impl Drop for TestFile {
@@ -64,6 +27,75 @@ fn file(bytes: &[u8]) -> TestFile {
     TestFile(path)
 }
 const RECORDS: &[(&str, &[u8], u8)] = &[("bad.ybn", b"x", 1), ("folder/ok.txt", b"hello", 0)];
+
+#[test]
+fn engine_selected_snappy_keeps_mount_lazy_and_verifies_each_payload() -> Result<()> {
+    let encoded = [9, 8, b'a', b'b', b'c', 9, 3];
+    let mut bytes = fixture(&[("voice.ogg", &encoded, 1), ("bad.bin", b"x", 1)]);
+    BinaryWriter::u32_le(9, &mut bytes[32 + 5 + "voice.ogg".len() + 2..]);
+    let path = file(&bytes);
+    let archive = YpfArchive::open(
+        Arc::new(ArcView::open(&path.0)?),
+        None,
+        None,
+        Compression::ExternalSnappy,
+    )?;
+    assert!(archive.script_key.get().is_none());
+    assert_eq!(archive.entries().len(), 2);
+    assert!(archive.open_entry_source(&archive.entries()[0])?.is_none());
+    assert_eq!(&*archive.open_entry(&archive.entries()[0])?, b"abcabcabc");
+    assert_eq!(&*archive.open_entry_raw(&archive.entries()[0])?, &encoded);
+    assert!(archive.open_entry(&archive.entries()[1]).is_err());
+    Ok(())
+}
+
+#[test]
+fn external_compression_uses_framing_and_does_not_retry_a_damaged_zlib_stream() -> Result<()> {
+    let encoded = [120, 156, 203, 72, 205, 201, 201, 7, 0, 6, 44, 2, 21];
+    let mut bytes = fixture(&[("hello.txt", &encoded, 1)]);
+    BinaryWriter::u32_le(5, &mut bytes[32 + 5 + "hello.txt".len() + 2..]);
+    let path = file(&bytes);
+    let archive = YpfArchive::open(
+        Arc::new(ArcView::open(&path.0)?),
+        None,
+        None,
+        Compression::ExternalSnappy,
+    )?;
+    assert_eq!(&*archive.open_entry(&archive.entries()[0])?, b"hello");
+    let mut damaged = encoded;
+    damaged[12] ^= 1;
+    let mut bytes = fixture(&[("damaged.txt", &damaged, 1)]);
+    BinaryWriter::u32_le(5, &mut bytes[32 + 5 + "damaged.txt".len() + 2..]);
+    let path = file(&bytes);
+    let archive = YpfArchive::open(
+        Arc::new(ArcView::open(&path.0)?),
+        None,
+        None,
+        Compression::ExternalSnappy,
+    )?;
+    assert!(matches!(
+        archive.open_entry(&archive.entries()[0]),
+        Err(Error::Corrupt { .. })
+    ));
+    let mut ambiguous = vec![120, 156];
+    ambiguous.extend(std::iter::repeat_n(b'a', 40));
+    ambiguous.extend_from_slice(&[0xfe, 1, 0, 0x3e, 1, 0]);
+    assert!(vnlens_crypto::compress::snappy::validate(&ambiguous, 120).is_ok());
+    let mut bytes = fixture(&[("ambiguous.txt", &ambiguous, 1)]);
+    BinaryWriter::u32_le(120, &mut bytes[32 + 5 + "ambiguous.txt".len() + 2..]);
+    let path = file(&bytes);
+    let archive = YpfArchive::open(
+        Arc::new(ArcView::open(&path.0)?),
+        None,
+        None,
+        Compression::ExternalSnappy,
+    )?;
+    assert_eq!(
+        &*archive.open_entry(&archive.entries()[0])?,
+        &vec![b'a'; 120]
+    );
+    Ok(())
+}
 fn fixture(records: &[(&str, &[u8], u8)]) -> Vec<u8> {
     fixture_version(0x1ee, records)
 }
@@ -71,10 +103,12 @@ fn fixture_version(version: u32, records: &[(&str, &[u8], u8)]) -> Vec<u8> {
     fixture_scheme(version, records, ChecksumScheme::Crc32Adler32)
 }
 fn fixture_scheme(version: u32, records: &[(&str, &[u8], u8)], scheme: ChecksumScheme) -> Vec<u8> {
+    let width = if version < 0x1df { 4 } else { 8 };
+    let record_size = 19 + width;
     let index_end = 32
         + records
             .iter()
-            .map(|(name, _, _)| 27 + name.len())
+            .map(|(name, _, _)| record_size + name.len())
             .sum::<usize>();
     let mut bytes = vec![0; 32];
     bytes[..4].copy_from_slice(b"YPF\0");
@@ -87,14 +121,16 @@ fn fixture_scheme(version: u32, records: &[(&str, &[u8], u8)], scheme: ChecksumS
     }
     let mut offset = index_end as u64;
     for (name, data, packed) in records {
-        let mut record = vec![0; 27 + name.len()];
+        let mut record = vec![0; record_size + name.len()];
         let hash = match scheme {
             ChecksumScheme::Murmur2 => vnlens_crypto::hash::murmur2::hash(name.as_bytes(), 0),
             ChecksumScheme::Crc32Adler32 => crc32::ieee(0, name.as_bytes()),
         };
         BinaryWriter::u32_le(hash, &mut record);
         let mut length = name.len() as u8;
-        let swaps = if version == 0x1f4 {
+        let swaps = if version < 0x198 {
+            LENGTH_SWAPS_EARLY
+        } else if version == 0x1f4 {
             LENGTH_SWAPS_1F4
         } else {
             LENGTH_SWAPS_PRE_1F4
@@ -118,12 +154,16 @@ fn fixture_scheme(version: u32, records: &[(&str, &[u8], u8)], scheme: ChecksumS
         record[at + 1] = *packed;
         BinaryWriter::u32_le(data.len() as u32, &mut record[at + 2..]);
         BinaryWriter::u32_le(data.len() as u32, &mut record[at + 6..]);
-        BinaryWriter::u64_le(offset, &mut record[at + 10..]);
+        if width == 4 {
+            BinaryWriter::u32_le(offset as u32, &mut record[at + 10..]);
+        } else {
+            BinaryWriter::u64_le(offset, &mut record[at + 10..]);
+        }
         let checksum = match scheme {
             ChecksumScheme::Murmur2 => vnlens_crypto::hash::murmur2::hash(data, 0),
             ChecksumScheme::Crc32Adler32 => adler32::checksum(data),
         };
-        BinaryWriter::u32_le(checksum, &mut record[at + 18..]);
+        BinaryWriter::u32_le(checksum, &mut record[at + 10 + width..]);
         offset += data.len() as u64;
         bytes.extend(record);
     }
@@ -193,29 +233,70 @@ fn checksum_vectors_and_mixed_index_schemes() {
 }
 
 #[test]
-fn recovers_all_filename_key_values_and_selects_exact_index_layout() {
-    for width in [4, 8] {
-        for checksum_scheme in [ChecksumScheme::Murmur2, ChecksumScheme::Crc32Adler32] {
-            for key in u8::MIN..=u8::MAX {
-                let bytes: Arc<[u8]> = single_entry_fixture(width, key, checksum_scheme).into();
-                let index = read_index(&bytes, None, None).unwrap();
-                assert_eq!(index.checksum_scheme, checksum_scheme);
-                assert_eq!(index.name_key.unwrap().bytes(), [key]);
-                assert_eq!(index.entries[0].name, format!("{}.bin", "r".repeat(46)));
-                assert_eq!(
-                    &*read_entry(
-                        &bytes,
-                        &index.entries[0],
-                        index.checksums[0],
-                        index.checksum_scheme
-                    )
-                    .unwrap(),
-                    b"abc"
-                );
-                assert!(read_index(&bytes, Some(key ^ 1), None).is_err());
-            }
-        }
+fn earlier_versions_use_32_bit_offsets_and_crc32_adler32() {
+    for version in [0xea, 0x12c, 0x198, 0x1c6, 0x1d0, 0x1da, 0x1dc, 0x1de] {
+        let mut bytes = single_entry_fixture(4, 0x37, ChecksumScheme::Crc32Adler32);
+        BinaryWriter::u32_le(version, &mut bytes[4..]);
+        let source: Arc<[u8]> = bytes.clone().into();
+        let index = read_index(&source, None, None).unwrap();
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].name, format!("{}.bin", "r".repeat(46)));
+        assert_eq!(index.checksum_scheme, ChecksumScheme::Crc32Adler32);
+        assert_eq!(
+            &*read_entry(
+                &source,
+                &index.entries[0],
+                index.checksums[0],
+                index.checksum_scheme,
+                Compression::Zlib
+            )
+            .unwrap(),
+            b"abc"
+        );
+        bytes[32] ^= 1;
+        let corrupt: Arc<[u8]> = bytes.into();
+        assert!(read_index(&corrupt, Some(0x37), None).is_err());
+        let mut wider = single_entry_fixture(8, 0x37, ChecksumScheme::Crc32Adler32);
+        BinaryWriter::u32_le(version, &mut wider[4..]);
+        let wider: Arc<[u8]> = wider.into();
+        assert!(read_index(&wider, None, None).is_err());
     }
+    for version in [0xe9, 0x1f5] {
+        let mut bytes = single_entry_fixture(4, 0x37, ChecksumScheme::Crc32Adler32);
+        BinaryWriter::u32_le(version, &mut bytes[4..]);
+        let source: Arc<[u8]> = bytes.into();
+        assert!(matches!(
+            read_index(&source, None, None),
+            Err(Error::Unsupported(_))
+        ));
+    }
+}
+
+#[test]
+fn earlier_length_variants_require_complete_index_validation() {
+    let names = [3, 6, 12, 17, 28].map(|length| "x".repeat(length));
+    let records: Vec<_> = names
+        .iter()
+        .map(|name| (name.as_str(), &b"abc"[..], 0))
+        .collect();
+    for version in [0x12c, 0x198] {
+        let mut bytes = fixture_version(version, &records);
+        BinaryWriter::u32_le(0x12c, &mut bytes[4..]);
+        let source: Arc<[u8]> = bytes.into();
+        let index = read_index(&source, None, None).unwrap();
+        assert_eq!(
+            index
+                .entries
+                .iter()
+                .map(|entry| &entry.name)
+                .collect::<Vec<_>>(),
+            names.iter().collect::<Vec<_>>()
+        );
+    }
+    let mut bytes = fixture_version(0x12c, &records);
+    BinaryWriter::u32_le(0x198, &mut bytes[4..]);
+    let source: Arc<[u8]> = bytes.into();
+    assert!(read_index(&source, None, None).is_err());
 }
 
 #[test]
@@ -245,13 +326,16 @@ fn index_recovery_is_lazy_and_payload_corruption_stays_local() {
         end,
     };
     let index = read_index(&source, None, None).unwrap();
+    assert_eq!(index.name_key.unwrap().bytes(), [0x37]);
+    assert!(read_index(&source, Some(0x36), None).is_err());
     let bytes: Arc<[u8]> = bytes.into();
     assert!(
         read_entry(
             &bytes,
             &index.entries[0],
             index.checksums[0],
-            index.checksum_scheme
+            index.checksum_scheme,
+            Compression::Zlib
         )
         .is_err()
     );
@@ -266,7 +350,7 @@ fn index_recovery_is_lazy_and_payload_corruption_stays_local() {
 }
 
 #[test]
-fn missing_keys_recover_lazily_on_archive_open_and_entry_read() {
+fn pe_script_keys_take_precedence_and_missing_keys_are_recovered_lazily() {
     let mut script = vec![0; 32];
     script[..4].copy_from_slice(b"YSTB");
     for (at, value) in [(4, 0x227), (8, 2), (12, 8), (16, 24), (20, 12), (24, 8)] {
@@ -303,13 +387,182 @@ fn missing_keys_recover_lazily_on_archive_open_and_entry_read() {
     let third = 32 + (27 + "ysbin/ysc.ybn".len()) + (27 + "ysbin/yst00001.ybn".len());
     bytes[third + 5 + "broken.bin".len() + 18] ^= 1;
     let file = file(&bytes);
-    let archive = YpfArchive::open(Arc::new(ArcView::open(&file.0).unwrap()), None, None).unwrap();
-    assert_eq!(archive.entries().len(), 3);
+    for hint in [None, Some([0x12, 0x34, 0x56, 0x78])] {
+        let archive = YpfArchive::open(
+            Arc::new(ArcView::open(&file.0).unwrap()),
+            hint,
+            None,
+            Compression::Zlib,
+        )
+        .unwrap();
+        assert_eq!(archive.entries().len(), 3);
+        assert!(archive.script_key.get().is_none());
+        assert!(
+            archive
+                .open_entry_source(&archive.entries()[1])
+                .unwrap()
+                .is_none()
+        );
+        let decrypted = archive.open_entry(&archive.entries()[1]).unwrap();
+        assert_eq!(&*decrypted, plain_script);
+        assert_eq!(archive.script_key.get(), Some(&[0x12, 0x34, 0x56, 0x78]));
+        assert!(archive.open_entry(&archive.entries()[2]).is_err());
+    }
+    let pe_key = [0xff; 4];
+    let archive = YpfArchive::open(
+        Arc::new(ArcView::open(&file.0).unwrap()),
+        Some(pe_key),
+        None,
+        Compression::Zlib,
+    )
+    .unwrap();
+    let mut expected = script.clone();
+    vnlens_script::yuris::decrypt_ystb(&mut expected, &pe_key).unwrap();
+    assert_eq!(
+        &*archive.open_entry(&archive.entries()[1]).unwrap(),
+        expected
+    );
+    assert_ne!(expected, plain_script);
+    assert_eq!(archive.script_key.get(), Some(&pe_key));
+    // PE-key access must not open even the command-table payload.
+    let mut bad_commands = bytes;
+    bad_commands[32 + 5 + "ysbin/ysc.ybn".len() + 18] ^= 1;
+    let bad_path = self::file(&bad_commands);
+    let archive = YpfArchive::open(
+        Arc::new(ArcView::open(&bad_path.0).unwrap()),
+        Some([0x12, 0x34, 0x56, 0x78]),
+        None,
+        Compression::Zlib,
+    )
+    .unwrap();
+    assert_eq!(
+        &*archive.open_entry(&archive.entries()[1]).unwrap(),
+        plain_script
+    );
+    assert!(archive.open_entry(&archive.entries()[0]).is_err());
+    let patch = self::file(&fixture_version(
+        0x1f4,
+        &[("ysbin/yst00001.ybn", &script, 0)],
+    ));
+    let archive = YpfArchive::open(
+        Arc::new(ArcView::open(&patch.0).unwrap()),
+        Some([0x12, 0x34, 0x56, 0x78]),
+        None,
+        Compression::Zlib,
+    )
+    .unwrap();
     assert!(archive.script_key.get().is_none());
-    let decrypted = archive.open_entry(&archive.entries()[1]).unwrap();
-    assert_eq!(&*decrypted, plain_script);
-    assert_eq!(archive.script_key.get(), Some(&[0x12, 0x34, 0x56, 0x78]));
-    assert!(archive.open_entry(&archive.entries()[2]).is_err());
+    assert_eq!(
+        &*archive.open_entry(&archive.entries()[0]).unwrap(),
+        plain_script
+    );
+}
+
+#[test]
+fn ambiguous_scripts_use_unique_archive_evidence_and_validate_the_original_candidate() {
+    let script = |size: usize, offsets: [u32; 2]| {
+        let mut bytes = vec![0; 32];
+        bytes[..4].copy_from_slice(b"YSTB");
+        for (offset, value) in [
+            (4, 0x227),
+            (8, 2),
+            (12, 8),
+            (16, 24),
+            (20, size as u32),
+            (24, 8),
+        ] {
+            BinaryWriter::u32_le(value, &mut bytes[offset..]);
+        }
+        bytes.extend_from_slice(&[0, 1, 0, 0, 0, 1, 0, 0]);
+        for offset in offsets {
+            let mut argument = [0; 12];
+            BinaryWriter::u32_le(4, &mut argument[4..]);
+            BinaryWriter::u32_le(offset, &mut argument[8..]);
+            bytes.extend_from_slice(&argument);
+        }
+        bytes.resize(bytes.len() + size + 8, 0);
+        bytes
+    };
+    let small = script(8, [0, 4]);
+    let ambiguous = script(48, [0, 4]);
+    let unique = script(32, [0, 0]);
+    let mut commands = vec![0; 16];
+    commands[..4].copy_from_slice(b"YSCM");
+    BinaryWriter::u32_le(0x227, &mut commands[4..]);
+    BinaryWriter::u32_le(5, &mut commands[8..]);
+    for _ in 0..5 {
+        commands.extend_from_slice(b"WORD\0\0");
+    }
+    let definitions = vnlens_script::yuris::commands(&commands, None).unwrap().0;
+    assert!(matches!(
+        vnlens_script::yuris::recover_ystb_key(&small, &definitions, &AtomicBool::new(false)),
+        Err(Error::UnknownScheme(_))
+    ));
+    let data = fixture_version(
+        0x1f4,
+        &[
+            ("ysbin/ysc.ybn", &commands, 0),
+            ("ysbin/yst00000.ybn", &small, 0),
+            ("ysbin/yst00002.ybn", &ambiguous, 0),
+            ("ysbin/yst00001.ybn", &unique, 0),
+        ],
+    );
+    let path = file(&data);
+    let archive = YpfArchive::open(
+        Arc::new(ArcView::open(&path.0).unwrap()),
+        None,
+        None,
+        Compression::Zlib,
+    )
+    .unwrap();
+    assert!(archive.script_key.get().is_none());
+    assert_eq!(&*archive.open_entry(&archive.entries()[1]).unwrap(), small);
+    assert_eq!(archive.script_key.get(), Some(&[0; 4]));
+    assert_eq!(
+        &*archive.open_entry(&archive.entries()[2]).unwrap(),
+        ambiguous
+    );
+    let path = file(&fixture_version(
+        0x1f4,
+        &[
+            ("ysbin/ysc.ybn", &commands, 0),
+            ("ysbin/yst00000.ybn", &small, 0),
+        ],
+    ));
+    let unresolved = YpfArchive::open(
+        Arc::new(ArcView::open(&path.0).unwrap()),
+        None,
+        None,
+        Compression::Zlib,
+    )
+    .unwrap();
+    assert!(matches!(
+        unresolved.open_entry(&unresolved.entries()[1]),
+        Err(Error::UnknownScheme(_))
+    ));
+    assert!(unresolved.script_key.get().is_none());
+    let mut conflicting = unique;
+    vnlens_script::yuris::decrypt_ystb(&mut conflicting, &[8, 0, 0, 0]).unwrap();
+    let path = file(&fixture_version(
+        0x1f4,
+        &[
+            ("ysbin/ysc.ybn", &commands, 0),
+            ("ysbin/yst00000.ybn", &small, 0),
+            ("ysbin/yst00001.ybn", &conflicting, 0),
+        ],
+    ));
+    let conflict = YpfArchive::open(
+        Arc::new(ArcView::open(&path.0).unwrap()),
+        None,
+        None,
+        Compression::Zlib,
+    )
+    .unwrap();
+    assert!(matches!(
+        conflict.open_entry(&conflict.entries()[1]),
+        Err(Error::UnknownScheme(_))
+    ));
+    assert!(conflict.script_key.get().is_none());
 }
 
 #[test]
@@ -336,6 +589,7 @@ fn same_version_checksum_variants_are_kept_for_direct_and_streamed_reads() {
                 Arc::new(ArcView::open(&path.0).unwrap()),
                 Some([0; 4]),
                 Some(0xa7),
+                Compression::Zlib,
             )
             .unwrap();
             assert_eq!(archive.checksum_scheme, scheme);
@@ -362,6 +616,7 @@ fn same_version_checksum_variants_are_kept_for_direct_and_streamed_reads() {
                 Arc::new(ArcView::open(&path.0).unwrap()),
                 Some([0; 4]),
                 Some(0xa7),
+                Compression::Zlib,
             )
             .unwrap();
             assert!(archive.open_entry(&archive.entries()[0]).is_err());
@@ -373,95 +628,6 @@ fn same_version_checksum_variants_are_kept_for_direct_and_streamed_reads() {
             assert_eq!(&*archive.open_entry(&archive.entries()[1]).unwrap(), plain);
         }
     }
-}
-
-#[test]
-#[ignore = "Requires licensed Egao no Riyuu, ExS-Tia and Justy installations under VNLENS_YURIS_SAMPLES; run cargo test -p vnlens-archive ypf_hash_local -- --ignored --nocapture"]
-fn ypf_hash_local_complete_indices_and_selected_payloads() -> Result<()> {
-    use std::io::Read;
-    use std::sync::atomic::AtomicBool;
-    let root = std::env::var_os("VNLENS_YURIS_SAMPLES")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("E:/VN/_Engine/yuris"));
-    for (game, filename, scheme, count) in [
-        (
-            "Egao no Riyuu",
-            "data.ypf",
-            ChecksumScheme::Murmur2,
-            Some(10827),
-        ),
-        (
-            "Kouyoku Senki ExS-Tia Concerto finale",
-            "pac/date.ypf",
-            ChecksumScheme::Murmur2,
-            None,
-        ),
-        (
-            "Justy×Nasty ~Maou Hajimemashita~",
-            "pac/bn.ypf",
-            ChecksumScheme::Crc32Adler32,
-            Some(282),
-        ),
-    ] {
-        let directory = root.join(game);
-        let identified = vnlens_engine::identify(&directory, &AtomicBool::new(false))?
-            .ok_or(Error::InvalidFormat)?;
-        assert_eq!(identified.engine, vnlens_engine::Engine::Yuris);
-        let options = identified.resource_options();
-        let key = options
-            .keys
-            .get("ystb")
-            .map(|key| <[u8; 4]>::try_from(key.bytes()))
-            .transpose()
-            .map_err(|_| Error::InvalidFormat)?;
-        let name = options.keys.get("ypf_name").map(|key| key.bytes()[0]);
-        let archive = YpfArchive::open(
-            Arc::new(ArcView::open(directory.join(filename))?),
-            key,
-            name,
-        )?;
-        assert_eq!(archive.checksum_scheme, scheme);
-        if let Some(count) = count {
-            assert_eq!(archive.entries().len(), count);
-        }
-        let mut checked = std::collections::BTreeSet::new();
-        for kind in [
-            ResourceKind::Script,
-            ResourceKind::Image,
-            ResourceKind::Audio,
-            ResourceKind::Unknown,
-        ] {
-            for packed in [false, true] {
-                if let Some((index, entry)) = archive
-                    .entries()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, entry)| {
-                        entry.kind == kind
-                            && entry.size != 0
-                            && entry.packed.is_some_and(|p| p.is_packed == packed)
-                    })
-                    .min_by_key(|(_, entry)| entry.size)
-                {
-                    let bytes = archive.open_entry(entry)?;
-                    if let Some(source) = archive.open_entry_source(entry)? {
-                        let mut reader = source.reader(Arc::new(AtomicBool::new(false)))?;
-                        let mut streamed = Vec::new();
-                        reader.read_to_end(&mut streamed)?;
-                        assert_eq!(&*bytes, streamed);
-                    }
-                    checked.insert(index);
-                }
-            }
-        }
-        assert!(!checked.is_empty());
-        println!(
-            "{game}: {} entries, {} payload checks, {scheme:?}",
-            archive.entries().len(),
-            checked.len()
-        );
-    }
-    Ok(())
 }
 
 #[test]
@@ -493,6 +659,7 @@ fn version_1f4_lengths_compression_and_lazy_checksum_validation() {
             Arc::new(ArcView::open(&file.0).unwrap()),
             Some([0; 4]),
             Some(0xa7),
+            Compression::Zlib,
         )
         .unwrap();
         let entry = &archive.entries()[1];
@@ -511,47 +678,14 @@ fn version_1f4_lengths_compression_and_lazy_checksum_validation() {
             YpfArchive::open(
                 Arc::new(ArcView::open(&file.0).unwrap()),
                 Some([0; 4]),
-                Some(0xff)
+                Some(0xff),
+                Compression::Zlib
             )
             .is_err()
         );
     }
 }
 
-#[test]
-fn index_mount_is_lazy_and_identified_name_key_is_verified() {
-    let bytes = fixture(RECORDS);
-    let file = file(&bytes);
-    let archive = YpfArchive::open(
-        Arc::new(ArcView::open(&file.0).unwrap()),
-        Some([0; 4]),
-        Some(0xa7),
-    )
-    .unwrap();
-    assert_eq!(archive.entries()[1].name, "folder/ok.txt");
-    assert!(
-        archive
-            .open_entry_source(&archive.entries()[0])
-            .unwrap()
-            .is_none()
-    );
-    let source = archive
-        .open_entry_source(&archive.entries()[1])
-        .unwrap()
-        .unwrap();
-    assert_eq!(&*source.read_at(1, 3).unwrap(), b"ell");
-    assert_eq!(&*source.read_at(0, 5).unwrap(), b"hello");
-    assert_eq!(
-        &*archive.open_entry(&archive.entries()[1]).unwrap(),
-        b"hello"
-    );
-    assert!(archive.open_entry(&archive.entries()[0]).is_err());
-    assert_eq!(
-        &*archive.open_entry_raw(&archive.entries()[0]).unwrap(),
-        b"x"
-    );
-    drop(archive);
-}
 #[test]
 fn rejects_truncated_index_and_out_of_range_64_bit_offsets() {
     let mut bytes = fixture(RECORDS);
@@ -562,7 +696,8 @@ fn rejects_truncated_index_and_out_of_range_64_bit_offsets() {
         YpfArchive::open(
             Arc::new(ArcView::open(&file.0).unwrap()),
             Some([0; 4]),
-            Some(0xa7)
+            Some(0xa7),
+            Compression::Zlib
         )
         .is_err()
     );
@@ -571,7 +706,8 @@ fn rejects_truncated_index_and_out_of_range_64_bit_offsets() {
         YpfArchive::open(
             Arc::new(ArcView::open(&file.0).unwrap()),
             Some([0; 4]),
-            Some(0xa7)
+            Some(0xa7),
+            Compression::Zlib
         )
         .is_err()
     );
@@ -598,6 +734,7 @@ fn virtual_paths_read_only_the_script_list_and_preserve_entry_names() {
         Arc::new(ArcView::open(&file.0).unwrap()),
         Some([0; 4]),
         Some(0xa7),
+        Compression::Zlib,
     )
     .unwrap();
     assert_eq!(archive.entries()[0].name, "ysbin/yst00003.ybn");
@@ -614,6 +751,7 @@ fn virtual_paths_read_only_the_script_list_and_preserve_entry_names() {
         Arc::new(ArcView::open(&file.0).unwrap()),
         Some([0; 4]),
         Some(0xa7),
+        Compression::Zlib,
     )
     .unwrap();
     assert_eq!(archive.entries().len(), 3);

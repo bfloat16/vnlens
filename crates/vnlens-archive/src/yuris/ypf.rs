@@ -1,4 +1,6 @@
-//! YPF 0x1DF..=0x1F4. Index readers 0x4564A4 (0x1DF), 0x45D01C
+//! YPF 0xEA..=0x1F4. Index readers 0x448918 (0x12C), 0x44DF24
+//! (0x1C6), 0x44F1FC (0x1D0), 0x455404 (0x1DA), 0x455934 (0x1DC),
+//! 0x4564A4 (0x1DF), 0x45D01C
 //! (0x1E6), 0x45CBE0 (0x1EA), 0x45DB10 (0x1ED), 0x45EC64 (0x1EE)
 //! and 0x464314 (0x1F4) share this layout. All integers are little-endian.
 //! The header's index end includes its 0x20 bytes. Records contain
@@ -9,6 +11,13 @@
 //! Both length substitutions occur in 0x1F4 archives; exact record coverage,
 //! name checksums and payload ranges select the layout and checksum scheme;
 //! the version alone does not distinguish these variants.
+//! Earlier records have 32-bit offsets and CRC32/Adler32 checksums. The
+//! 0x12C initializer 0x44F7C8 has seven filename-length swaps; the later
+//! initializer 0x459C0C has twelve. Older archives retain both verified
+//! involutions, selected by complete index coverage and filename hashes.
+//! The external YSSnp_Uncompress backend admits raw Snappy blocks. Its complete
+//! tag layout and RFC 1950 zlib headers select the entry codec before decoding;
+//! framing ambiguity and selected-codec errors never trigger another decoder.
 
 use std::{
     borrow::Cow,
@@ -25,7 +34,17 @@ use vnlens_crypto::{
 };
 use vnlens_io::{BinaryReader, ReadAt};
 
-/// Filename-length involution constructed by clients preceding 0x1F4.
+/// Earlier filename-length involution (initializer 0x44F7C8).
+pub(super) const LENGTH_SWAPS_EARLY: &[(u8, u8)] = &[
+    (9, 11),
+    (13, 19),
+    (21, 27),
+    (32, 35),
+    (38, 41),
+    (44, 47),
+    (46, 50),
+];
+/// Expanded filename-length involution constructed by clients preceding 0x1F4.
 pub(super) const LENGTH_SWAPS_PRE_1F4: &[(u8, u8)] = &[
     (3, 72),
     (6, 53),
@@ -71,6 +90,13 @@ pub(super) struct Index {
 pub(super) enum ChecksumScheme {
     Murmur2,
     Crc32Adler32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) enum Compression {
+    #[default]
+    Zlib,
+    ExternalSnappy,
 }
 
 impl ChecksumScheme {
@@ -137,7 +163,8 @@ pub(super) fn read_index(
     }
     let version = reader.read_u32_le()?;
     let tables = match version {
-        0x1df..=0x1f3 => &[LENGTH_SWAPS_PRE_1F4][..],
+        0xea..=0x197 => &[LENGTH_SWAPS_EARLY, LENGTH_SWAPS_PRE_1F4][..],
+        0x198..=0x1f3 => &[LENGTH_SWAPS_PRE_1F4][..],
         0x1f4 => &[LENGTH_SWAPS_1F4, LENGTH_SWAPS_PRE_1F4][..],
         _ => return Err(Error::Unsupported(format!("YPF version 0x{version:X}"))),
     };
@@ -155,9 +182,15 @@ pub(super) fn read_index(
     }
     let mut found: Option<Index> = None;
     let mut first_error = None;
+    let widths: &[usize] = if version < 0x1df { &[4] } else { &[4, 8] };
+    let checksum_schemes: &[ChecksumScheme] = if version < 0x1df {
+        &[ChecksumScheme::Crc32Adler32]
+    } else {
+        &[ChecksumScheme::Murmur2, ChecksumScheme::Crc32Adler32]
+    };
     for swaps in tables {
-        for width in [4, 8] {
-            for checksum_scheme in [ChecksumScheme::Murmur2, ChecksumScheme::Crc32Adler32] {
+        for &width in widths {
+            for &checksum_scheme in checksum_schemes {
                 match parse_index(
                     &index,
                     source.len(),
@@ -350,6 +383,7 @@ pub(super) fn read_entry<'a>(
     entry: &Entry,
     checksum: u32,
     checksum_scheme: ChecksumScheme,
+    compression: Compression,
 ) -> Result<Cow<'a, [u8]>> {
     let stored = source.read_at(
         entry.offset,
@@ -362,8 +396,26 @@ pub(super) fn read_entry<'a>(
     if let Some(packed) = entry.packed.filter(|packed| packed.is_packed) {
         let expected = usize::try_from(packed.unpacked_size)
             .map_err(|_| corrupt(entry.offset, "Decoded size exceeds address space"))?;
-        let decoded = zlib::inflate_with_limit(&stored, expected)
-            .map_err(|error| corrupt(entry.offset, &error.to_string()))?;
+        let decoded = match compression {
+            Compression::Zlib => zlib::inflate_with_limit(&stored, expected),
+            Compression::ExternalSnappy => {
+                let snappy = vnlens_crypto::compress::snappy::validate(&stored, expected);
+                match (zlib::has_header(&stored), snappy) {
+                    (true, Ok(())) => {
+                        if zlib::validate(&stored, expected).is_ok() {
+                            return Err(Error::UnknownScheme(Some(
+                                "Ambiguous YPF compression framing".into(),
+                            )));
+                        }
+                        vnlens_crypto::compress::snappy::decode(&stored, expected)
+                    }
+                    (true, Err(_)) => zlib::inflate_with_limit(&stored, expected),
+                    (false, Ok(())) => vnlens_crypto::compress::snappy::decode(&stored, expected),
+                    (false, Err(error)) => Err(error),
+                }
+            }
+        }
+        .map_err(|error| corrupt(entry.offset, &error.to_string()))?;
         if decoded.len() != expected {
             return Err(corrupt(entry.offset, "Decompressed length mismatch"));
         }
@@ -378,6 +430,8 @@ pub(super) struct YpfArchive {
     entries: Vec<Entry>,
     checksums: Vec<u32>,
     checksum_scheme: ChecksumScheme,
+    compression: Compression,
+    identified_script_key: Option<[u8; 4]>,
     script_key: OnceLock<[u8; 4]>,
 }
 
@@ -395,18 +449,17 @@ impl YpfArchive {
         view: Arc<ArcView>,
         script_key: Option<[u8; 4]>,
         name_key: Option<u8>,
+        compression: Compression,
     ) -> Result<Self> {
         let index = read_index(&*view, name_key, None)?;
-        let resolved_script_key = OnceLock::new();
-        if let Some(key) = script_key {
-            let _ = resolved_script_key.set(key);
-        }
         Ok(Self {
             view,
             entries: index.entries,
             checksums: index.checksums,
             checksum_scheme: index.checksum_scheme,
-            script_key: resolved_script_key,
+            compression,
+            identified_script_key: script_key,
+            script_key: OnceLock::new(),
         })
     }
 
@@ -428,36 +481,54 @@ impl YpfArchive {
         if let Some(&key) = self.script_key.get() {
             return Ok(key);
         }
-        let key = self.recover_script_key(current_ystb)?;
+        // Engine-resolved PE material is authoritative. Archive recovery is
+        // only used when the engine could not obtain a script key.
+        let key = match self.identified_script_key {
+            Some(key) => key,
+            None => self.recover_script_key(current_ystb)?,
+        };
         let _ = self.script_key.set(key);
         Ok(key)
     }
 
     fn recover_script_key(&self, current_ystb: &[u8]) -> Result<[u8; 4]> {
-        let ysc_index = self
-            .entries
-            .iter()
-            .position(|entry| {
-                entry
-                    .name
-                    .replace('\\', "/")
-                    .eq_ignore_ascii_case("ysbin/ysc.ybn")
-            })
-            .ok_or_else(|| Error::UnknownScheme(Some("Missing identified YSTB key".into())))?;
+        let ysc_index = self.entries.iter().position(|entry| {
+            entry
+                .name
+                .replace('\\', "/")
+                .eq_ignore_ascii_case("ysbin/ysc.ybn")
+        });
+        let Some(ysc_index) = ysc_index else {
+            return Err(Error::UnknownScheme(Some(
+                "YSTB key recovery requires the archive command table".into(),
+            )));
+        };
         let ysc_bytes = read_entry(
             &*self.view,
             &self.entries[ysc_index],
             self.checksums[ysc_index],
             self.checksum_scheme,
+            self.compression,
         )?;
         let (definitions, _) = vnlens_script::yuris::commands(&ysc_bytes, None)?;
         let cancelled = AtomicBool::new(false);
-        if let Some(secret) =
-            vnlens_script::yuris::recover_ystb_key(current_ystb, &definitions, &cancelled)?
-        {
-            return <[u8; 4]>::try_from(secret.bytes())
-                .map_err(|_| Error::UnknownScheme(Some("Invalid recovered YSTB key".into())));
-        }
+        let mut evidence_error = None;
+        let current_ambiguous =
+            match vnlens_script::yuris::recover_ystb_key(current_ystb, &definitions, &cancelled) {
+                Ok(Some(secret)) => {
+                    return <[u8; 4]>::try_from(secret.bytes()).map_err(|_| {
+                        Error::UnknownScheme(Some("Invalid recovered YSTB key".into()))
+                    });
+                }
+                Ok(None) => false,
+                Err(error @ Error::UnknownScheme(_)) => {
+                    // A small script may admit several keys. Other scripts in this
+                    // same archive can disambiguate them without weakening validation.
+                    evidence_error = Some(error);
+                    true
+                }
+                Err(error) => return Err(error),
+            };
         let mut candidates: Vec<usize> = self
             .entries
             .iter()
@@ -475,13 +546,13 @@ impl YpfArchive {
             let entry = &self.entries[index];
             std::cmp::Reverse(entry.packed.map_or(entry.size, |p| p.unpacked_size))
         });
-        let mut evidence_error = None;
         for index in candidates {
             let result = read_entry(
                 &*self.view,
                 &self.entries[index],
                 self.checksums[index],
                 self.checksum_scheme,
+                self.compression,
             )
             .and_then(|data| {
                 if !data.starts_with(b"YSTB") {
@@ -491,12 +562,21 @@ impl YpfArchive {
             });
             match result {
                 Ok(Some(secret)) => {
-                    return <[u8; 4]>::try_from(secret.bytes()).map_err(|_| {
+                    let key = <[u8; 4]>::try_from(secret.bytes()).map_err(|_| {
                         Error::UnknownScheme(Some("Invalid recovered YSTB key".into()))
-                    });
+                    })?;
+                    if !current_ambiguous
+                        || vnlens_script::yuris::validate_ystb_key(
+                            current_ystb,
+                            &definitions,
+                            &key,
+                            &cancelled,
+                        )?
+                    {
+                        return Ok(key);
+                    }
                 }
                 Ok(None) => {}
-                Err(error @ Error::UnknownScheme(_)) => return Err(error),
                 Err(error) => {
                     evidence_error.get_or_insert(error);
                 }
@@ -517,11 +597,13 @@ impl Archive for YpfArchive {
     }
     fn open_entry_source(&self, entry: &Entry) -> Result<Option<Arc<dyn vnlens_io::ReadAt>>> {
         let index = self.index(entry)?;
-        if entry
-            .name
-            .rsplit('.')
-            .next()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("ybn"))
+        if (matches!(self.compression, Compression::ExternalSnappy)
+            && entry.packed.is_some_and(|packed| packed.is_packed))
+            || entry
+                .name
+                .rsplit('.')
+                .next()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("ybn"))
         {
             return Ok(None);
         }
@@ -577,6 +659,7 @@ impl Archive for YpfArchive {
             entry,
             self.checksums[index],
             self.checksum_scheme,
+            self.compression,
         )?;
         if bytes.starts_with(b"YSTB") {
             let key = self.script_key(&bytes)?;

@@ -56,6 +56,11 @@ impl ArchiveFormat for YpfArchiveFormat {
             Arc::clone(view),
             key,
             name_key,
+            if options.numbers.get("ypf_snappy") == Some(&1) {
+                ypf::Compression::ExternalSnappy
+            } else {
+                ypf::Compression::Zlib
+            },
         )?))
     }
 }
