@@ -10,6 +10,7 @@ autotests = false
 vnlens-core.workspace = true
 vnlens-engine.workspace = true
 vnlens-archive.workspace = true
+vnlens-audio.workspace = true
 vnlens-script.workspace = true
 vnlens-io.workspace = true
 serde.workspace = true

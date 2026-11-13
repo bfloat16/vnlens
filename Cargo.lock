@@ -7352,6 +7352,7 @@ dependencies = [
  "vnlens-core",
  "vnlens-crypto",
  "vnlens-io",
+ "vnlens-middleware",
 ]
 
 [[package]]
@@ -7398,6 +7399,7 @@ dependencies = [
  "serde",
  "serde_json",
  "vnlens-archive",
+ "vnlens-audio",
  "vnlens-core",
  "vnlens-engine",
  "vnlens-io",
@@ -7510,9 +7512,11 @@ dependencies = [
  "ffmpeg-next",
  "image",
  "tracing",
+ "vnlens-archive",
  "vnlens-core",
  "vnlens-crypto",
  "vnlens-io",
+ "vnlens-middleware",
 ]
 
 [[package]]

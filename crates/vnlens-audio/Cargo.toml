@@ -9,6 +9,7 @@ autotests = false
 build = "../vnlens-video/build.rs"
 
 [dependencies]
+vnlens-middleware.workspace = true
 vnlens-core.workspace = true
 vnlens-crypto.workspace = true
 vnlens-io.workspace = true

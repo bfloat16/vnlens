@@ -7,6 +7,7 @@ license.workspace = true
 autotests = false
 
 [dependencies]
+vnlens-middleware.workspace = true
 vnlens-core.workspace = true
 vnlens-crypto.workspace = true
 vnlens-io.workspace = true
@@ -14,6 +15,7 @@ ffmpeg-next.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+vnlens-archive.workspace = true
 image.workspace = true
 
 [lints]
