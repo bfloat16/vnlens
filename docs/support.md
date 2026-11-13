@@ -30,6 +30,16 @@
 | 脚本 | `.a0`、`.b0`、`.c0`、`.e0`、`.f0`、`.i0`、`.l0`、`.m0`、`.q0`、`.r0`、`.s0`、`.t0`、`.v0`、`.x0` |
 | 视频 | `.y0`、`<ffmpeg>` |
 
+## EntisGLS / Cotopha / SakuraGL
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.noa` |
+| 音频 | `.mio` |
+| 图片 | `.eri` |
+| 脚本 | `.csx`、`.srcxml`、`.xml`、`.inf`、`.gds`、`.txt`、`.ini` |
+| 视频 | `.mei`、`<ffmpeg>` |
+
 ## Escu:de
 
 | 类型 | 格式 |
