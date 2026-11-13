@@ -6,6 +6,7 @@
 mod bgi;
 mod csystem;
 mod dds;
+mod entisgls;
 mod exhibit;
 mod format;
 mod krkr;
