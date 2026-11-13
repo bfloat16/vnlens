@@ -21,6 +21,7 @@ pub enum Engine {
     AgesMk2,
     Bgi,
     Softpal,
+    EntisGls,
     Csystem,
     Siglus,
     RealLive,

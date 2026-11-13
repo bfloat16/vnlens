@@ -21,7 +21,6 @@ fn layout(context: &crate::context::Context) -> bool {
             .files
             .is_file(&context.root.join("pac/Graphics.ypf")))
         || (context.files.is_file(&context.root.join("yscfg.dat"))
-            && context.files.is_file(&context.root.join("yssfs.dat"))
             && context
                 .files
                 .read_dir(&context.root.join("pac"))

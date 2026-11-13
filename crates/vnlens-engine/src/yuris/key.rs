@@ -16,9 +16,9 @@ pub(super) fn resolve(
     executables: &[PathBuf],
     cancelled: &AtomicBool,
 ) -> Result<ArchiveOptions> {
-    let mut matched_pe = false;
     let mut script = None;
     let mut name = None;
+    let mut uses_zlib = false;
     for path in executables {
         if cancelled.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
@@ -27,7 +27,7 @@ pub(super) fn resolve(
         if let Some(image) = context.image(&view, cancelled)?
             && super::pe(&image)?
         {
-            matched_pe = true;
+            uses_zlib |= super::has(&image, b"YSZLB.DLL")?;
             let candidate = match from_image(&image, cancelled)? {
                 Some(key) => Some(key),
                 None => super::license::from_image(&image, cancelled)?,
@@ -36,16 +36,24 @@ pub(super) fn resolve(
             merge(&mut name, super::name::from_image(&image, cancelled)?)?;
         }
     }
-    if script.is_none()
-        && (matched_pe
-            || !(context.files.is_file(&context.root.join("yscfg.dat"))
-                && context.files.is_file(&context.root.join("yssfs.dat"))))
-    {
-        return Err(Error::UnknownScheme(Some(
-            "YU-RIS executable key initialization was not identified".into(),
-        )));
-    }
+    // Identification already established YU-RIS evidence. Missing PE key
+    // material is deferred to the selected YPF/YSTB structural recovery path.
     let mut options = ArchiveOptions::default();
+    // YSSnp_Uncompress accepts raw Snappy blocks. Confirm the exported ABI
+    // and the native Snappy ByteArraySource RTTI before selecting the codec.
+    let codec_path = context.root.join("YSSnp.dll");
+    if !uses_zlib
+        && context.files.is_file(&codec_path)
+        && !context.files.is_file(&context.root.join("YSZLB.DLL"))
+    {
+        let view = context.files.open(&codec_path)?;
+        if let Some(image) = context.image(&view, cancelled)?
+            && image.export(b"YSSnp_Uncompress")?.is_some()
+            && super::has(&image, b".?AVByteArraySource@snappy@@")?
+        {
+            options.numbers.insert("ypf_snappy", 1);
+        }
+    }
     if let Some(key) = script {
         options.keys.insert("ystb", key);
     }

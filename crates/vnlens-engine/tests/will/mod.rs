@@ -87,10 +87,10 @@ fn pe_strings_precede_layout_and_archive_bytes_are_not_evidence() {
         vnlens_core::ResourceKind::Unknown
     );
     fs::remove_file(dir.0.join("renamed.exe")).unwrap();
-    assert!(matches!(
-        identify(&dir.0, &cancel),
-        Err(Error::UnknownScheme(_))
-    ));
+    let game = identify(&dir.0, &cancel).unwrap().unwrap();
+    assert_eq!(game.engine, Engine::Yuris);
+    assert!(game.resource_options().keys.is_empty());
+    assert_eq!(archive_tag(&game, "Scripts.ypf"), "ypf/yuris");
     fs::remove_dir_all(dir.0.join("pac")).unwrap();
     fs::write(dir.0.join("standalone.arc"), b"AdvHD\0WillPlus\0").unwrap();
     assert!(identify(&dir.0, &cancel).unwrap().is_none());
@@ -99,7 +99,7 @@ fn pe_strings_precede_layout_and_archive_bytes_are_not_evidence() {
 }
 
 #[test]
-fn unicode_strings_conflicting_engines_and_missing_keys() {
+fn unicode_strings_conflicting_engines_and_deferred_yuris_keys() {
     let dir = temp();
     let cancel = AtomicBool::new(false);
     let mut text = Vec::new();
@@ -123,10 +123,9 @@ fn unicode_strings_conflicting_engines_and_missing_keys() {
         Err(Error::Unsupported(_))
     ));
     fs::remove_file(dir.0.join("wide.exe")).unwrap();
-    assert!(matches!(
-        identify(&dir.0, &cancel),
-        Err(Error::UnknownScheme(_))
-    ));
+    let game = identify(&dir.0, &cancel).unwrap().unwrap();
+    assert_eq!(game.engine, Engine::Yuris);
+    assert!(game.resource_options().keys.is_empty());
 }
 
 #[test]

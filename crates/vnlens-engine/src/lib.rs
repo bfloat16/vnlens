@@ -8,6 +8,7 @@ mod context;
 mod csystem;
 mod detect;
 mod emote;
+mod entisgls;
 mod escude;
 mod exhibit;
 mod kaleido;

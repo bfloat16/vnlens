@@ -2,48 +2,88 @@
 
 use super::*;
 
+#[test]
+fn snappy_dependency_requires_native_exports_and_does_not_replace_yszlb() -> Result<()> {
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let root = Temp(std::env::temp_dir().join(format!(
+            "vnlens-yuris-codec-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(std::io::Error::other)?
+                .as_nanos()
+        )));
+    std::fs::create_dir_all(root.0.join("pac"))?;
+    std::fs::write(root.0.join("yscfg.dat"), [])?;
+    std::fs::write(root.0.join("pac/bn.ypf"), b"YPF\0")?;
+    let mut dll = executable(0x10000000);
+    dll[0x200..0x247].fill(0);
+    BinaryWriter::u32_le(16, &mut dll[0xf4..]);
+    BinaryWriter::u32_le(0x1300, &mut dll[0xf8..]);
+    BinaryWriter::u32_le(0x40, &mut dll[0xfc..]);
+    for (at, value) in [
+        (0x510, 1),
+        (0x514, 1),
+        (0x518, 1),
+        (0x51c, 0x1340),
+        (0x520, 0x1344),
+        (0x524, 0x1348),
+        (0x540, 0x1000),
+        (0x544, 0x1360),
+    ] {
+        BinaryWriter::u32_le(value, &mut dll[at..]);
+    }
+    dll[0x560..0x571].copy_from_slice(b"YSSnp_Uncompress\0");
+    let marker = b".?AVByteArraySource@snappy@@\0";
+    dll[0x580..0x580 + marker.len()].copy_from_slice(marker);
+    std::fs::write(root.0.join("YSSnp.dll"), &dll)?;
+    let cancel = AtomicBool::new(false);
+    let identify = || crate::identify(&root.0, &cancel)?.ok_or(Error::InvalidFormat);
+    assert_eq!(
+        identify()?.resource_options().numbers.get("ypf_snappy"),
+        Some(&1)
+    );
+    std::fs::write(root.0.join("YSZLB.DLL"), [])?;
+    assert!(
+        !identify()?
+            .resource_options()
+            .numbers
+            .contains_key("ypf_snappy")
+    );
+    std::fs::remove_file(root.0.join("YSZLB.DLL"))?;
+    let mut exe = executable(0x400000);
+    let evidence = b"ysbin\\yst%05d.ybn\0ysbin\\yst_list.ybn\0YSZLB.DLL\0";
+    exe[0x500..0x500 + evidence.len()].copy_from_slice(evidence);
+    std::fs::write(root.0.join("game.exe"), exe)?;
+    assert!(
+        !identify()?
+            .resource_options()
+            .numbers
+            .contains_key("ypf_snappy")
+    );
+    std::fs::remove_file(root.0.join("game.exe"))?;
+    dll[0x560] = b'X';
+    std::fs::write(root.0.join("YSSnp.dll"), dll)?;
+    assert!(
+        !identify()?
+            .resource_options()
+            .numbers
+            .contains_key("ypf_snappy")
+    );
+    Ok(())
+}
+
 fn from_pe(bytes: &[u8], cancel: &AtomicBool) -> Result<Option<Secret>> {
     let Some(mut pe) = PeImage::parse(bytes)? else {
         return Ok(None);
     };
     vnlens_unpack::steamstub::unpack(&mut pe, cancel)?;
     from_image(&pe, cancel)
-}
-
-#[test]
-#[ignore = "Requires the licensed local Garudoma installation; set VNLENS_SOFTDENCHI_SAMPLE to girldorm.exe and run cargo test -p vnlens-engine softdenchi_local -- --ignored"]
-fn softdenchi_local_host_identification_and_native_keys() -> Result<()> {
-    let path = std::env::var_os("VNLENS_SOFTDENCHI_SAMPLE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from("E:/VN/_Engine/yuris/Garudoma -Joshiryou no Kanrinin-/girldorm.exe")
-        });
-    let view = vnlens_io::ArcView::open(&path)?;
-    let original = PeImage::parse(view.slice(0, view.len())?)?.ok_or(Error::InvalidFormat)?;
-    assert!(!super::super::pe(&original)?);
-    let context = Context {
-        root: path.parent().ok_or(Error::InvalidFormat)?.to_path_buf(),
-        files: Default::default(),
-        sections: Default::default(),
-    };
-    let cancel = AtomicBool::new(false);
-    let image = context.image(&view, &cancel)?.ok_or(Error::InvalidFormat)?;
-    assert_eq!(
-        original.file_bytes().len() - image.file_bytes().len(),
-        0x60000
-    );
-    assert!(super::super::pe(&image)?);
-    let key = match from_image(&image, &cancel)? {
-        Some(key) => key,
-        None => super::super::license::from_image(&image, &cancel)?.ok_or(Error::InvalidFormat)?,
-    };
-    let name = super::super::name::from_image(&image, &cancel)?.ok_or(Error::InvalidFormat)?;
-    let identified = crate::identify(&path, &cancel)?.ok_or(Error::InvalidFormat)?;
-    assert_eq!(identified.engine, crate::Engine::Yuris);
-    assert!(identified.evidence.starts_with("PE features in "));
-    assert_eq!(identified.resource_options().keys["ystb"], key);
-    assert_eq!(identified.resource_options().keys["ypf_name"], name);
-    Ok(())
 }
 
 fn executable(base: u32) -> Vec<u8> {
@@ -167,10 +207,52 @@ fn unreadable_pe_resources_require_independent_engine_evidence() {
     assert!(
         matches!(crate::identify(&root.0, &cancel), Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
     );
-    for name in ["yscfg.dat", "yssfs.dat"] {
-        std::fs::write(root.0.join(name), []).unwrap();
-    }
+    std::fs::write(root.0.join("yscfg.dat"), []).unwrap();
     let identified = crate::identify(&root.0, &cancel).unwrap().unwrap();
     assert_eq!(identified.engine, crate::Engine::Yuris);
+    assert_eq!(identified.evidence, "Game directory layout");
     assert!(identified.resource_options().keys.is_empty());
+    assert!(!root.0.join("yssfs.dat").exists());
+    // Directory evidence never requires parsing the archive to identify a host.
+    std::fs::write(root.0.join("pac/bn.ypf"), b"broken").unwrap();
+    assert_eq!(
+        crate::identify(&root.0, &cancel).unwrap().unwrap().engine,
+        crate::Engine::Yuris
+    );
+    std::fs::remove_file(root.0.join("pac/bn.ypf")).unwrap();
+    assert!(
+        matches!(crate::identify(&root.0, &cancel), Err(Error::Io(error))
+        if error.kind() == std::io::ErrorKind::UnexpectedEof)
+    );
+}
+
+#[test]
+fn identified_yuris_pe_without_a_key_defers_to_resource_recovery() {
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = Temp(std::env::temp_dir().join(format!(
+        "vnlens-yuris-key-order-{}-{timestamp}",
+        std::process::id()
+    )));
+    std::fs::create_dir(&root.0).unwrap();
+    let mut bytes = executable(0x400000);
+    bytes[0x200..0x247].fill(0);
+    let markers = b"ysbin\\yst%05d.ybn\0ysbin\\yst_list.ybn\0";
+    bytes[0x500..0x500 + markers.len()].copy_from_slice(markers);
+    std::fs::write(root.0.join("game.exe"), bytes).unwrap();
+    let identified = crate::identify(&root.0, &AtomicBool::new(false))
+        .unwrap()
+        .unwrap();
+    assert_eq!(identified.engine, crate::Engine::Yuris);
+    assert!(identified.resource_options().keys.is_empty());
+    assert!(identified.evidence.starts_with("PE features"));
+    assert!(!root.0.join("yscfg.dat").exists());
 }
