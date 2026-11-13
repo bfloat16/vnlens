@@ -6,7 +6,7 @@
 
 use super::expression::{argument, call, field, integer, string};
 use crate::resources::check;
-use crate::resources::{Resources, normalized};
+use crate::resources::normalized;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 use vnlens_core::{Error, ResourceResolver, Result};
@@ -16,7 +16,6 @@ use vnlens_script::ir::{ArgName, Instruction, Script, Value};
 struct VoiceRule {
     prefix: String,
     folder: String,
-    character: i64,
 }
 
 #[derive(Debug, Default)]
@@ -26,12 +25,28 @@ pub(crate) struct Config {
     voice_root: String,
     voice_rules: Vec<VoiceRule>,
     other_folder: String,
+    legacy_voice_lookup: bool,
+    identities: BTreeMap<String, Option<String>>,
+    pub(super) entry_points: BTreeMap<String, BTreeSet<u64>>,
 }
 
 impl Config {
-    pub fn load(resources: &Resources, cancel: &AtomicBool) -> Result<Self> {
+    pub fn load(resources: &dyn ResourceResolver, cancel: &AtomicBool) -> Result<Self> {
         let labels = script(resources, "ysbin/ysl.ybn")?;
         let mut config = Self::default();
+        for label in &labels.instructions {
+            check(cancel)?;
+            if let (Some(id), Some(Value::InstructionTarget(target))) = (
+                field(&label.args, ArgName::ScriptId).and_then(integer),
+                field(&label.args, ArgName::Instruction),
+            ) {
+                config
+                    .entry_points
+                    .entry(format!("ysbin/yst{id:05}.ybn"))
+                    .or_default()
+                    .insert(*target);
+            }
+        }
         let folders = definition(resources, &labels, "ES.FOLDER.DEFINE", cancel)?;
         let mut root = None;
         for instruction in &folders {
@@ -68,6 +83,17 @@ impl Config {
             match call(&instruction).as_deref() {
                 Some("es.CHAR.NAME") => {
                     if let Some(name) = argument(&instruction, "PSTR").and_then(string) {
+                        let display = argument(&instruction, "PSTR2").and_then(string);
+                        let identity = character_identity(&name, display.as_deref());
+                        config
+                            .identities
+                            .entry(character_key(&name).to_owned())
+                            .and_modify(|previous| {
+                                if *previous != identity {
+                                    *previous = None;
+                                }
+                            })
+                            .or_insert(identity);
                         config.names.insert(name);
                     }
                 }
@@ -84,7 +110,20 @@ impl Config {
         }
         let mut prefixes = Vec::new();
         let mut folder = String::new();
-        for instruction in definition(resources, &labels, "ES.VOICE.DEFINE", cancel)? {
+        // Earlier ERIS projects register the same startup definition with this
+        // Japanese label. Select its declared entry, never a guessed script ID.
+        let voice_definition = if labels.instructions.iter().any(|instruction| {
+            field(&instruction.args, ArgName::Name)
+                .and_then(string)
+                .as_deref()
+                == Some("ES.VOICE.DEFINE")
+        }) {
+            "ES.VOICE.DEFINE"
+        } else {
+            "ボイス定義"
+        };
+        config.legacy_voice_lookup = voice_definition == "ボイス定義";
+        for instruction in definition(resources, &labels, voice_definition, cancel)? {
             check(cancel)?;
             match call(&instruction).as_deref() {
                 Some("es.VO.PATH.STR.SET") => {
@@ -104,14 +143,10 @@ impl Config {
                         .ok_or_else(|| Error::Unsupported("Dynamic ERIS voice folder".into()))?;
                 }
                 Some("es.VO.PATHDEF") => {
-                    let character = argument(&instruction, "PINT")
-                        .and_then(integer)
-                        .ok_or_else(|| Error::Unsupported("Dynamic ERIS voice character".into()))?;
                     for prefix in prefixes.drain(..) {
                         config.voice_rules.push(VoiceRule {
                             prefix,
                             folder: folder.clone(),
-                            character,
                         });
                     }
                     folder.clear();
@@ -129,76 +164,13 @@ impl Config {
         Ok(config)
     }
 
-    /// A voice group can contain several characters. Resolve only identity
-    /// components explicitly present in the speaker key and backed by another
-    /// message or character definition. A bare unknown name remains unknown.
-    pub fn speakers(
-        &self,
-        dialogues: &[super::Dialogue],
-        cancel: &AtomicBool,
-    ) -> Result<Vec<Option<String>>> {
-        let group = |reference: &str| {
-            let reference = normalized(reference);
-            self.voice_rules
-                .iter()
-                .find(|rule| reference.starts_with(&rule.prefix))
-                .map(|r| r.character)
-        };
-        let mut identities: BTreeMap<i64, BTreeSet<&str>> = BTreeMap::new();
-        let mut known = BTreeSet::new();
-        for name in &self.names {
-            check(cancel)?;
-            let name = name
-                .strip_prefix('【')
-                .and_then(|s| s.strip_suffix('】'))
-                .unwrap_or(name);
-            if super::text::identity(name) {
-                known.insert(name);
-            }
-        }
-        for dialogue in dialogues {
-            check(cancel)?;
-            if super::text::identity(&dialogue.speaker) {
-                known.insert(dialogue.speaker.as_str());
-                if let Some(id) = group(&dialogue.voice) {
-                    identities.entry(id).or_default().insert(&dialogue.speaker);
-                }
-            }
-        }
-        let mut result = Vec::with_capacity(dialogues.len());
-        for speaker in dialogues.iter().map(|dialogue| {
-            if dialogue.speaker.contains(['＆', '&']) {
-                return None;
-            }
-            if super::text::identity(&dialogue.speaker) {
-                return Some(dialogue.speaker.clone());
-            }
-            if let Some(names) = group(&dialogue.voice).and_then(|id| identities.get(&id)) {
-                let candidates = dialogue
-                    .speaker
-                    .split(['＠', '／'])
-                    .map(str::trim)
-                    .filter(|part| names.contains(part))
-                    .collect::<BTreeSet<_>>();
-                if candidates.len() == 1 {
-                    return candidates.first().map(|s| (*s).to_owned());
-                }
-            }
-            let candidates = dialogue
-                .speaker
-                .split(['＠', '／'])
-                .map(str::trim)
-                .filter(|part| known.contains(part))
-                .collect::<BTreeSet<_>>();
-            if candidates.len() == 1 {
-                return candidates.first().map(|s| (*s).to_owned());
-            }
-            None
-        }) {
-            check(cancel)?;
-            result.push(speaker);
-        }
-        Ok(result)
+    /// Character declarations retain the source key and its display replacement
+    /// separately. Voice groups and other dialogue cannot establish an identity.
+    pub fn speaker(&self, speaker: &str) -> Option<String> {
+        self.identities
+            .get(speaker)
+            .cloned()
+            .unwrap_or_else(|| super::text::identity(speaker).then(|| speaker.to_owned()))
     }
 
     pub fn voice_path(&self, reference: &str) -> Option<String> {
@@ -209,22 +181,77 @@ impl Config {
             .find(|rule| reference.starts_with(&rule.prefix))
             .map_or(self.other_folder.as_str(), |rule| rule.folder.as_str());
         let path = format!("{}{folder}{reference}", self.voice_root);
-        let mut parts = Vec::new();
-        let path = normalized(&path);
-        for part in path.split('/') {
-            match part {
-                "" | "." => {}
-                ".." => {
-                    parts.pop()?;
-                }
-                _ => parts.push(part),
-            }
+        virtual_path(&path)
+    }
+
+    /// Earlier VoiceSet references omit the chapter directories beneath the
+    /// declared voice root. Keep exact paths first; aliases require uniqueness.
+    pub fn voice_resource_alias(&self, name: &str) -> Option<String> {
+        if !self.legacy_voice_lookup {
+            return None;
         }
-        (!parts.is_empty()).then(|| parts.join("/"))
+        let root = format!("{}/", virtual_path(&self.voice_root)?);
+        let name = virtual_path(name)?;
+        let relative = name.strip_prefix(&root)?;
+        let (_, leaf) = relative.rsplit_once('/')?;
+        Some(format!("{root}{leaf}"))
     }
 }
 
-fn script(resources: &Resources, name: &str) -> Result<Script> {
+fn virtual_path(path: &str) -> Option<String> {
+    let path = normalized(path);
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+fn character_key(name: &str) -> &str {
+    let name = name.trim();
+    name.strip_prefix('【')
+        .and_then(|s| s.strip_suffix('】'))
+        .unwrap_or(name)
+        .trim()
+}
+
+/// Composite project keys carry an identity and an explicit display alias.
+/// es.CHAR.NAME PSTR is the key; PSTR2 is the replacement display (es_text).
+/// For example, D＠A displayed as A belongs to D, even when A is also a character.
+/// Resolve only the unique identity component remaining after that replacement;
+/// absent, dynamic or conflicting display definitions leave the key ambiguous.
+fn character_identity(name: &str, display: Option<&str>) -> Option<String> {
+    let key = character_key(name);
+    if super::text::identity(key) {
+        return Some(key.to_owned());
+    }
+    if key.contains(['＆', '&']) {
+        return None;
+    }
+    // Delimited shorthand tokens (e.g. @x@) do not name an identity component.
+    if key.split(['＠', '／']).any(|part| part.trim().is_empty()) {
+        return None;
+    }
+    let display = character_key(display?);
+    let candidates = key
+        .split(['＠', '／'])
+        .map(str::trim)
+        .filter(|part| *part != display && super::text::identity(part))
+        .collect::<BTreeSet<_>>();
+    if candidates.len() == 1 {
+        candidates.first().map(|s| (*s).to_owned())
+    } else {
+        None
+    }
+}
+
+fn script(resources: &dyn ResourceResolver, name: &str) -> Result<Script> {
     let bytes = resources
         .read_resource(name)?
         .ok_or_else(|| Error::Unsupported(format!("Missing YU-RIS companion: {name}")))?;
@@ -233,7 +260,7 @@ fn script(resources: &Resources, name: &str) -> Result<Script> {
 }
 
 fn definition(
-    resources: &Resources,
+    resources: &dyn ResourceResolver,
     labels: &Script,
     name: &str,
     cancel: &AtomicBool,
@@ -255,12 +282,12 @@ fn definition(
     let id = field(&target.args, ArgName::ScriptId)
         .and_then(integer)
         .ok_or(Error::InvalidFormat)?;
-    let start = field(&target.args, ArgName::Instruction)
-        .and_then(integer)
-        .ok_or(Error::InvalidFormat)?;
+    let Some(Value::InstructionTarget(start)) = field(&target.args, ArgName::Instruction) else {
+        return Err(Error::InvalidFormat);
+    };
     let script = script(resources, &format!("ysbin/yst{id:05}.ybn"))?;
-    let start = usize::try_from(start).map_err(|_| Error::InvalidFormat)?;
-    if start > script.instructions.len() {
+    let start = usize::try_from(*start).map_err(|_| Error::InvalidFormat)?;
+    if start >= script.instructions.len() {
         return Err(Error::InvalidFormat);
     }
     let instructions = script.instructions.into_iter().skip(start);
@@ -269,10 +296,14 @@ fn definition(
     // themselves cannot be flattened without knowing the runtime state.
     let mut result = Vec::new();
     let mut depth = 0usize;
+    let mut terminated = false;
     for instruction in instructions {
         check(cancel)?;
         match instruction.opcode.native_mnemonic.as_deref() {
-            Some("RETURN" | "END") if depth == 0 => break,
+            Some("RETURN" | "END") if depth == 0 => {
+                terminated = true;
+                break;
+            }
             Some("GO" | "RETURN" | "END") => {
                 return Err(Error::Unsupported(format!(
                     "Dynamic ERIS definition: {name}"
@@ -296,5 +327,12 @@ fn definition(
             }
         }
     }
+    if !terminated || depth != 0 {
+        return Err(Error::InvalidFormat);
+    }
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "../../tests/yuris/config.rs"]
+mod tests;

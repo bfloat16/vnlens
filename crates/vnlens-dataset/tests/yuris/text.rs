@@ -21,4 +21,12 @@ fn splits_speaker_preserves_ruby_base_and_rejects_unparsed_commands() {
     assert!(identity("アリス"));
     assert!(!identity("？？？"));
     assert!(!identity("アリス＆ボブ"));
+    assert_eq!(
+        split("【アリス】  「テスト」  ", &config),
+        Some(("アリス".into(), "  「テスト」  ".into()))
+    );
+    config.names.insert("A".into());
+    config.names.insert("AB".into());
+    config.markers.insert("B".into());
+    assert_eq!(split("AB「ambiguous」", &config), None);
 }

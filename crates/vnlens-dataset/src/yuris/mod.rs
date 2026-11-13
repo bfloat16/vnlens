@@ -23,6 +23,25 @@ pub(crate) struct Dialogue {
     pub text: String,
 }
 
+/// YPF discovery defers update1..9, then inserts them in ascending order;
+/// each patch invalidates the previous index record with the same name.
+/// Verified in the 0x1E1 loader at 0x45F7D0 and 0x45EE30.
+pub(crate) fn archive_priority(name: &str) -> u8 {
+    let name = crate::resources::normalized(name);
+    match name.rsplit('/').next().unwrap_or(&name) {
+        "update1.ypf" => 1,
+        "update2.ypf" => 2,
+        "update3.ypf" => 3,
+        "update4.ypf" => 4,
+        "update5.ypf" => 5,
+        "update6.ypf" => 6,
+        "update7.ypf" => 7,
+        "update8.ypf" => 8,
+        "update9.ypf" => 9,
+        _ => 0,
+    }
+}
+
 pub(crate) fn collect(
     resources: &Resources,
     config: &Config,
@@ -36,10 +55,11 @@ pub(crate) fn collect(
         .iter()
         .enumerate()
         .filter_map(|(id, item)| {
-            matches!(
-                item.route,
-                ResourceRoute::Script("ybn/yuris" | "scenario/yuris")
-            )
+            (resources.find(&item.name) == Some(id)
+                && matches!(
+                    item.route,
+                    ResourceRoute::Script("ybn/yuris" | "scenario/yuris")
+                ))
             .then_some(id)
         })
         .collect::<Vec<_>>();
@@ -59,6 +79,7 @@ pub(crate) fn collect(
                     {
                         bytecode::collect(
                             &script,
+                            &crate::resources::normalized(&item.name),
                             config,
                             cancel,
                             &mut dialogues,
@@ -94,3 +115,7 @@ pub(crate) fn collect(
     }
     Ok(dialogues)
 }
+
+#[cfg(test)]
+#[path = "../../tests/yuris/mod.rs"]
+mod tests;

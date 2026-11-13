@@ -43,3 +43,19 @@ fn collects_single_voice_lines_and_clears_on_chorus_or_unknown_macros() -> Resul
     ));
     Ok(())
 }
+
+#[test]
+fn an_unknown_control_macro_cannot_restore_a_voice_on_the_same_line() -> Result<()> {
+    let mut output = Vec::new();
+    let mut skipped = 0;
+    collect(
+        "\\UNKNOWN(target)\\VO(v001)【Alice】Hello\n",
+        &Config::default(),
+        &AtomicBool::new(false),
+        &mut output,
+        &mut skipped,
+    )?;
+    assert!(output.is_empty());
+    assert_eq!(skipped, 1);
+    Ok(())
+}

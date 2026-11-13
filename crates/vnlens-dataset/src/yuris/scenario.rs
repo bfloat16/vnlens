@@ -1,5 +1,5 @@
 //! Runtime ERIS scenario syntax verified against es_scenario_lexer.yst,
-//! es_scenario_macro_サウンド系.yst and es_scenario_text.yst: comments, VO/VO1..10,
+//! the es_scenario_macro sound script and es_scenario_text.yst: comments, VO/VO1..10,
 //! optional (ID:...) markers and inline message text. Pending voices are consumed
 //! once and cleared by control commands, dialogue boundaries and unknown macros.
 
@@ -20,7 +20,7 @@ pub(super) fn collect(
     let mut comment = false;
     for line in source.lines() {
         check(cancel)?;
-        let mut remaining = line.trim();
+        let mut remaining = line.trim_start();
         loop {
             if comment {
                 let Some((_, after)) = remaining.split_once("*/") else {
@@ -67,6 +67,10 @@ pub(super) fn collect(
                     }
                 } else {
                     voices.clear();
+                    // An unknown macro can transfer control past subsequent
+                    // VO/text on this line; none of it is safe to associate.
+                    *skipped += 1;
+                    break;
                 }
                 remaining = after;
                 continue;
@@ -80,7 +84,7 @@ pub(super) fn collect(
                     voices.clear();
                     break;
                 };
-                if !id.bytes().all(|b| b.is_ascii_digit()) {
+                if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
                     voices.clear();
                     break;
                 }

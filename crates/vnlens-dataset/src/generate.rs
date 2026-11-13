@@ -49,61 +49,65 @@ pub fn generate(
     let config = yuris::Config::load(&resources, &cancel)?;
     let dialogues = yuris::collect(&resources, &config, &cancel, &mut progress, &mut report)?;
     let mut voices: BTreeMap<String, Option<usize>> = BTreeMap::new();
+    let mut voice_aliases: BTreeMap<String, Option<usize>> = BTreeMap::new();
     for (id, item) in resources.items.iter().enumerate() {
         check(&cancel)?;
+        if resources.find(&item.name) != Some(id) {
+            continue;
+        }
         if !matches!(
             item.route,
             ResourceRoute::Audio(_) | ResourceRoute::Media { .. }
         ) {
             continue;
         }
-        let name = normalized(&item.name);
-        for key in [
-            name.clone(),
-            name.rsplit_once('.')
-                .map_or(name.as_str(), |(stem, _)| stem)
-                .to_owned(),
-        ] {
-            voices
-                .entry(key)
-                .and_modify(|value| {
-                    if *value != Some(id) {
-                        *value = None;
-                    }
-                })
-                .or_insert(Some(id));
+        for (name, index) in std::iter::once((normalized(&item.name), &mut voices)).chain(
+            config
+                .voice_resource_alias(&item.name)
+                .map(|name| (name, &mut voice_aliases)),
+        ) {
+            for key in [
+                name.clone(),
+                name.rsplit_once('.')
+                    .map_or(name.as_str(), |(stem, _)| stem)
+                    .to_owned(),
+            ] {
+                index
+                    .entry(key)
+                    .and_modify(|value| {
+                        if *value != Some(id) {
+                            *value = None;
+                        }
+                    })
+                    .or_insert(Some(id));
+            }
         }
     }
     let mut resolved = Vec::new();
     for dialogue in dialogues {
         check(&cancel)?;
-        if config
-            .voice_path(&dialogue.voice)
-            .and_then(|p| voices.get(&p).copied().flatten())
-            .is_some()
-        {
-            resolved.push(dialogue);
+        if let Some(id) = config.voice_path(&dialogue.voice).and_then(|p| {
+            voices
+                .get(&p)
+                .or_else(|| voice_aliases.get(&p))
+                .copied()
+                .flatten()
+        }) {
+            resolved.push((dialogue, id));
         } else {
             progress.skipped += 1;
         }
     }
-    let dialogues = resolved;
-    let speakers = config.speakers(&dialogues, &cancel)?;
     let mut records = Vec::new();
     let mut written: HashMap<usize, Option<String>> = HashMap::new();
     let mut destinations = HashSet::from([String::from("index.json")]);
     let mut unique = HashSet::new();
     progress.stage = Stage::Writing;
     progress.completed = 0;
-    progress.total = dialogues.len();
-    for (dialogue, speaker) in dialogues.into_iter().zip(speakers) {
+    progress.total = resolved.len();
+    for (dialogue, id) in resolved {
         check(&cancel)?;
-        let candidate = speaker.zip(
-            config
-                .voice_path(&dialogue.voice)
-                .and_then(|p| voices.get(&p).copied().flatten()),
-        );
-        if let Some((speaker, id)) = candidate {
+        if let Some(speaker) = config.speaker(&dialogue.speaker) {
             if let std::collections::hash_map::Entry::Vacant(slot) = written.entry(id) {
                 let name = resources.items[id].name.replace('\\', "/");
                 let leaf = name.rsplit('/').next().unwrap_or(&name);

@@ -5,30 +5,29 @@
 use super::Config;
 
 pub(super) fn split(raw: &str, config: &Config) -> Option<(String, String)> {
-    let raw = raw.trim();
+    let raw = raw.trim_start();
     let (speaker, body) = if let Some(rest) = raw.strip_prefix('【') {
         let (name, body) = rest.split_once('】')?;
         (name, body)
     } else {
-        let (name, body) = config
-            .names
-            .iter()
-            .filter_map(|name| {
-                let body = raw.strip_prefix(name)?;
-                config
-                    .markers
-                    .iter()
-                    .any(|mark| body.starts_with(mark))
-                    .then_some((name.as_str(), body))
-            })
-            .max_by_key(|(name, _)| name.len())?;
+        let mut matches = config.names.iter().filter_map(|name| {
+            let body = raw.strip_prefix(name)?;
+            config
+                .markers
+                .iter()
+                .any(|mark| body.starts_with(mark))
+                .then_some((name.as_str(), body))
+        });
+        let (name, body) = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
         (name, body)
     };
     let speaker = speaker.trim();
     if speaker.is_empty() {
         return None;
     }
-    let body = body.trim();
     let mut text = String::new();
     let mut remaining = body;
     while let Some((before, after)) = remaining.split_once('≪') {

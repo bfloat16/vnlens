@@ -1,10 +1,11 @@
 //! Index-only collection within one game instance. Payloads are opened on demand;
-//! duplicate logical names remain ambiguous instead of choosing a patch by guess.
+//! Verified engine patch priority selects overrides; equal-priority duplicate
+//! logical names remain ambiguous. Requested companions cache decoded bytes.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use vnlens_core::{
@@ -20,11 +21,25 @@ enum Source {
     Entry { archive: usize, index: usize },
 }
 
-#[derive(Debug)]
 pub(crate) struct Resource {
     pub name: String,
     pub route: ResourceRoute,
     source: Source,
+    companion: OnceLock<Vec<u8>>,
+    priority: u8,
+}
+
+impl std::fmt::Debug for Resource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Resource")
+            .field("name", &self.name)
+            .field("route", &self.route)
+            .field("source", &self.source)
+            .field("priority", &self.priority)
+            .field("companion_cached", &self.companion.get().is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -32,7 +47,7 @@ pub(crate) struct Resources {
     game: Arc<Identification>,
     archives: Vec<Opened>,
     pub items: Vec<Resource>,
-    names: BTreeMap<String, Option<usize>>,
+    names: BTreeMap<String, (u8, Option<usize>)>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -65,7 +80,6 @@ impl Resources {
         };
         let mut pending = vec![resources.game.root.clone()];
         let mut visited = HashSet::new();
-        let output = output.canonicalize()?;
         let catalog = Catalog::load();
         while let Some(directory) = pending.pop() {
             check(&resources.cancel)?;
@@ -110,8 +124,15 @@ impl Resources {
             resources
                 .names
                 .entry(normalized(&item.name))
-                .and_modify(|v| *v = None)
-                .or_insert(Some(index));
+                .and_modify(|(priority, selected)| {
+                    if item.priority > *priority {
+                        *priority = item.priority;
+                        *selected = Some(index);
+                    } else if item.priority == *priority {
+                        *selected = None;
+                    }
+                })
+                .or_insert((item.priority, Some(index)));
         }
         Ok(resources)
     }
@@ -144,6 +165,8 @@ impl Resources {
                         name: entry.name.clone(),
                         route,
                         source: Source::Entry { archive, index },
+                        companion: OnceLock::new(),
+                        priority: crate::yuris::archive_priority(&name),
                     });
                 }
             }
@@ -156,13 +179,15 @@ impl Resources {
                 name,
                 route,
                 source: Source::File(path.to_owned()),
+                companion: OnceLock::new(),
+                priority: 0,
             });
         }
         Ok(())
     }
 
     pub fn find(&self, name: &str) -> Option<usize> {
-        self.names.get(&normalized(name)).copied().flatten()
+        self.names.get(&normalized(name)).and_then(|(_, id)| *id)
     }
 
     pub fn read(&self, index: usize) -> Result<Vec<u8>> {
@@ -172,10 +197,14 @@ impl Resources {
             Source::File(path) => {
                 let bytes = self.game.files.read(path)?;
                 if let ResourceRoute::Script(tag) = item.route {
-                    Ok(
-                        vnlens_script::decode_as(tag, &bytes, self.game.resource_options())?
-                            .into_owned(),
-                    )
+                    Ok(vnlens_script::decode_with_resources_as(
+                        tag,
+                        &bytes,
+                        Some(self),
+                        self.game.resource_options(),
+                        &self.cancel,
+                    )?
+                    .into_owned())
                 } else {
                     Ok(bytes)
                 }
@@ -189,6 +218,20 @@ impl Resources {
 
     pub fn write(&self, index: usize, output: &Path, name: &str) -> Result<PathBuf> {
         check(&self.cancel)?;
+        // A multiplexed container is only a voice when the selected audio
+        // reader finds an audio stream. Keep its original bytes after validation.
+        if let ResourceRoute::Media { audio, .. } = self.items[index].route {
+            let bytes = self.read(index)?;
+            if vnlens_audio::metadata_as(audio, &bytes)?.is_none() {
+                return Err(Error::Unsupported(
+                    "Voice container has no audio stream".into(),
+                ));
+            }
+            check(&self.cancel)?;
+            let path = vnlens_io::filesystem::write_under(output, name, &bytes)?;
+            check(&self.cancel)?;
+            return Ok(path);
+        }
         let source = match &self.items[index].source {
             Source::File(path) => Some(self.game.files.source(path)?),
             Source::Entry { archive, index } => {
@@ -240,6 +283,25 @@ impl Resources {
 
 impl ResourceResolver for Resources {
     fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        self.find(name).map(|index| self.read(index)).transpose()
+        check(&self.cancel)?;
+        let Some(index) = self.find(name) else {
+            if self.names.contains_key(&normalized(name)) {
+                return Err(Error::Unsupported(format!(
+                    "Ambiguous dataset resource: {name}"
+                )));
+            }
+            return Ok(None);
+        };
+        let cache = &self.items[index].companion;
+        if let Some(bytes) = cache.get() {
+            return Ok(Some(bytes.clone()));
+        }
+        let bytes = self.read(index)?;
+        let _ = cache.set(bytes.clone());
+        Ok(Some(bytes))
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/resources.rs"]
+mod tests;
