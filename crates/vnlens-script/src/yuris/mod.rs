@@ -8,7 +8,9 @@ mod ybn;
 mod ystb;
 
 pub use tables::{Argument, Command, commands, script_paths};
-pub use ystb::{decrypt as decrypt_ystb, recover_key as recover_ystb_key};
+pub use ystb::{
+    decrypt as decrypt_ystb, recover_key as recover_ystb_key, validate_key as validate_ystb_key,
+};
 
 use crate::{ScriptFormat, ScriptRegistration, ir::*};
 use vnlens_core::{Error, Format, ResourceResolver, Result};
@@ -42,6 +44,56 @@ impl Format for YbnScript {
     }
 }
 impl ScriptFormat for YbnScript {
+    fn decode<'a>(
+        &self,
+        data: &'a [u8],
+        options: &vnlens_core::ArchiveOptions,
+    ) -> Result<std::borrow::Cow<'a, [u8]>> {
+        if data.starts_with(b"YSTB")
+            && let Some(key) = options.keys.get("ystb")
+        {
+            let key = <[u8; 4]>::try_from(key.bytes())
+                .map_err(|_| Error::UnknownScheme(Some("Invalid identified YSTB key".into())))?;
+            let mut decoded = data.to_vec();
+            decrypt_ystb(&mut decoded, &key)?;
+            return Ok(std::borrow::Cow::Owned(decoded));
+        }
+        Ok(std::borrow::Cow::Borrowed(data))
+    }
+
+    fn decode_with_resources<'a>(
+        &self,
+        data: &'a [u8],
+        resources: Option<&dyn ResourceResolver>,
+        options: &vnlens_core::ArchiveOptions,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<std::borrow::Cow<'a, [u8]>> {
+        if !data.starts_with(b"YSTB") || options.keys.contains_key("ystb") {
+            return self.decode(data, options);
+        }
+        let (_, ranges) = ystb::sections(data)?;
+        if ranges.iter().all(std::ops::Range::is_empty) {
+            return Ok(std::borrow::Cow::Borrowed(data));
+        }
+        let commands = resources
+            .ok_or_else(|| {
+                Error::UnknownScheme(Some("YSTB key recovery requires ysbin/ysc.ybn".into()))
+            })?
+            .read_resource("ysbin/ysc.ybn")?
+            .ok_or_else(|| {
+                Error::UnknownScheme(Some("YSTB key recovery requires ysbin/ysc.ybn".into()))
+            })?;
+        let (commands, _) = tables::commands(&commands, Some(cancelled))?;
+        let key = recover_ystb_key(data, &commands, cancelled)?.ok_or_else(|| {
+            Error::UnknownScheme(Some("YSTB key could not be uniquely recovered".into()))
+        })?;
+        let key = <[u8; 4]>::try_from(key.bytes())
+            .map_err(|_| Error::UnknownScheme(Some("Invalid recovered YSTB key".into())))?;
+        let mut decoded = data.to_vec();
+        decrypt_ystb(&mut decoded, &key)?;
+        Ok(std::borrow::Cow::Owned(decoded))
+    }
+
     fn disassemble(
         &self,
         data: &[u8],
@@ -54,6 +106,10 @@ impl ScriptFormat for YbnScript {
     }
 }
 vnlens_core::inventory::submit! {ScriptRegistration(||Box::new(YbnScript))}
+
+#[cfg(test)]
+#[path = "../../tests/yuris/mod.rs"]
+mod tests;
 
 pub(super) fn corrupt(offset: usize, reason: &str) -> Error {
     Error::Corrupt {

@@ -1,6 +1,8 @@
-//! YSTB 0x1DF..=0x1E0 and 0x1E6..=0x22B disassembly. The four-section layout is shared by
+//! YSTB 0x12C..=0x1E1 and 0x1E6..=0x22B disassembly. The four-section layout is shared by
+//! loaders 0x43A1BD (0x12C), 0x4417A5 (0x1C6), 0x442705 (0x1D0),
+//! 0x4495BD (0x1DA), 0x449AC9 (0x1DC), and
 //! loaders 0x44A601 (0x1DF), 0x4503F5 (0x1E0), 0x45071D (0x1E6),
-//! 0x451715 (0x1ED), 0x452299 (0x1EE), and 0x45124D (0x22B).
+//! 0x451E8D (0x1E1), 0x451715 (0x1ED), 0x452299 (0x1EE), and 0x45124D (0x22B).
 //! 0x429E7D (12-byte args), 0x446044 (conditional targets), and 0x45D83C
 //! (0x1EE command definitions). The 0x22B command table is loaded at
 //! 0x463550. Integers are little-endian; the four XOR sections restart
@@ -17,7 +19,7 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
     let mut header = BinaryReader::new(data);
     let magic = header.read_bytes(4)?;
     let version = header.read_u32_le()?;
-    if !matches!(version, 0x1df..=0x1e0 | 0x1e6..=0x22b) {
+    if !matches!(version, 0x12c..=0x1e1 | 0x1e6..=0x22b) {
         return Err(Error::Unsupported(format!("YBN version 0x{version:X}")));
     }
     let mut script = Script {
@@ -172,7 +174,7 @@ pub(super) fn disassemble(data: &[u8], resources: Option<&dyn ResourceResolver>)
                 let raw = &values[offset as usize..end];
                 let address = (ranges[2].start + offset as usize) as u64;
                 if ty == 0 && matches!(semantic_op, Some(106 | 110)) {
-                    Value::Text(expression::text(raw, address)?)
+                    expression::text_value(raw)
                 } else if ty <= 4 {
                     Value::Expression(expression::decode(raw, address)?)
                 } else {

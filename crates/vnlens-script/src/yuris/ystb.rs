@@ -1,4 +1,4 @@
-//! YSTB 0x1DF..=0x1E0 and 0x1E6..=0x22B, little-endian 32-byte header
+//! YSTB 0x12C..=0x1E1 and 0x1E6..=0x22B, little-endian 32-byte header
 //! followed by instruction, argument, value and source-line sections. Each
 //! section restarts the same four-byte XOR key independently (0x452299).
 
@@ -18,7 +18,7 @@ pub(super) fn sections(data: &[u8]) -> Result<(usize, Vec<Range<usize>>)> {
         return Err(Error::InvalidFormat);
     }
     let version = reader.read_u32_le()?;
-    if !matches!(version, 0x1df..=0x1e0 | 0x1e6..=0x22b) {
+    if !matches!(version, 0x12c..=0x1e1 | 0x1e6..=0x22b) {
         return Err(Error::Unsupported(format!("YSTB version 0x{version:X}")));
     }
     let count = reader.read_u32_le()? as usize;
@@ -56,6 +56,22 @@ pub fn decrypt(data: &mut [u8], key: &[u8; 4]) -> Result<()> {
         vnlens_crypto::cipher::xor::apply_u32_key(&mut data[range], key);
     }
     Ok(())
+}
+
+/// Checks a candidate against the complete framing and native command/operand
+/// layout without modifying ciphertext. False supplies no usable key evidence;
+/// malformed framing and cancellation retain their errors.
+pub fn validate_key(
+    data: &[u8],
+    commands: &[Command],
+    key: &[u8; 4],
+    cancelled: &AtomicBool,
+) -> Result<bool> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
+    let (_, ranges) = sections(data)?;
+    validate(data, &ranges, commands, key, cancelled)
 }
 
 /// Candidate keys use a zero data offset, as in YSTB_Coder::GetXorKey, but

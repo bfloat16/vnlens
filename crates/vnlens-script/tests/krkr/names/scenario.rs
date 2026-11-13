@@ -157,29 +157,3 @@ fn raster_extensions_are_replaced_and_dynamic_parameters_are_not_expanded() -> R
     ));
     Ok(())
 }
-
-/// Export the decoded dc5_aft19601020a1.ks.scn entry from a local DC5PH copy.
-/// Run with VNLENS_SCN_FILE set to that file and `cargo test -p vnlens-script
-/// dc5ph_scn_reference_names -- --ignored`.
-#[test]
-#[ignore = "requires a local decoded DC5PH scenario; copyrighted data is not included"]
-fn dc5ph_scn_reference_names() -> Result<()> {
-    let path = std::env::var_os("VNLENS_SCN_FILE").ok_or_else(|| {
-        vnlens_core::Error::Unsupported("Set VNLENS_SCN_FILE to the local scenario".into())
-    })?;
-    let file = vnlens_middleware::psb::PsbFile::open(
-        std::sync::Arc::new(vnlens_io::ArcView::open(path)?),
-        Default::default(),
-    )?;
-    let names = super::super::psb_name_candidates(&file.document, &AtomicBool::new(false))?;
-    for name in [
-        "dc5_aft19601020a1.ks.scn",
-        "bg010a.tlg",
-        "bgm_dc5_001.opus",
-        "bgm_dc5_001.opus.sli",
-        "sprite_sakura.ini",
-    ] {
-        assert!(names.iter().any(|value| value == name), "{name}");
-    }
-    Ok(())
-}

@@ -6,6 +6,7 @@
 mod ages_mk2;
 mod bgi;
 mod csystem;
+mod entisgls;
 pub mod escude;
 mod exhibit;
 mod format;
@@ -22,8 +23,10 @@ pub mod softpal;
 mod systemnnn;
 mod will;
 pub mod yuris;
-pub use format::disassemble_with_options_as;
-pub use format::{ScriptFormat, ScriptRegistration, decode_as, decode_text_as, disassemble_as};
+pub use format::{
+    ScriptFormat, ScriptRegistration, decode_as, decode_text_as, decode_with_resources_as,
+    disassemble_as, disassemble_cancellable_as,
+};
 
 pub use ages_mk2::epk;
 

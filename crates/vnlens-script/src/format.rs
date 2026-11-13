@@ -13,6 +13,17 @@ pub trait ScriptFormat: Format {
     ) -> Result<std::borrow::Cow<'a, [u8]>> {
         Ok(std::borrow::Cow::Borrowed(data))
     }
+    /// Resolves resource-backed encryption evidence on demand. PE parameters
+    /// remain available to the selected decoder before requesting companions.
+    fn decode_with_resources<'a>(
+        &self,
+        data: &'a [u8],
+        _resources: Option<&dyn ResourceResolver>,
+        options: &vnlens_core::ArchiveOptions,
+        _cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<std::borrow::Cow<'a, [u8]>> {
+        self.decode(data, options)
+    }
     /// Decodes recognized text or presents structured data as text. Bytecode and
     /// unrelated bytes return None; the source resource remains unchanged.
     fn decode_text(&self, _data: &[u8]) -> Result<Option<String>> {
@@ -32,11 +43,40 @@ pub trait ScriptFormat: Format {
     ) -> Result<Option<Script>> {
         self.disassemble(data, resources)
     }
+    /// Allows long bytecode readers to respond at instruction/table boundaries.
+    fn disassemble_cancellable(
+        &self,
+        data: &[u8],
+        resources: Option<&dyn ResourceResolver>,
+        options: &vnlens_core::ArchiveOptions,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<Script>> {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(vnlens_core::Error::Cancelled);
+        }
+        let result = self.disassemble_with_options(data, resources, options)?;
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(vnlens_core::Error::Cancelled);
+        }
+        Ok(result)
+    }
 }
 
 #[derive(Debug)]
 pub struct ScriptRegistration(pub fn() -> Box<dyn ScriptFormat>);
 vnlens_core::inventory::collect!(ScriptRegistration);
+
+fn selected(tag: &str) -> Result<Box<dyn ScriptFormat>> {
+    for registration in vnlens_core::inventory::iter::<ScriptRegistration>() {
+        let format = (registration.0)();
+        if format.tag() == tag {
+            return Ok(format);
+        }
+    }
+    Err(vnlens_core::Error::Unsupported(format!(
+        "Script route is not registered: {tag}"
+    )))
+}
 
 /// Decodes only the selected engine's resource envelope, before IR parsing.
 pub fn decode_as<'a>(
@@ -44,28 +84,32 @@ pub fn decode_as<'a>(
     data: &'a [u8],
     options: &vnlens_core::ArchiveOptions,
 ) -> Result<std::borrow::Cow<'a, [u8]>> {
-    for registration in vnlens_core::inventory::iter::<ScriptRegistration>() {
-        let format = (registration.0)();
-        if format.tag() == tag {
-            return format.decode(data, options);
-        }
+    selected(tag)?.decode(data, options)
+}
+
+/// Decodes the selected resource envelope with on-demand companion access.
+/// Cancellation is checked before and after the decoder and during supported
+/// recovery algorithms. Borrowed resources retain their original ownership.
+pub fn decode_with_resources_as<'a>(
+    tag: &str,
+    data: &'a [u8],
+    resources: Option<&dyn ResourceResolver>,
+    options: &vnlens_core::ArchiveOptions,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<std::borrow::Cow<'a, [u8]>> {
+    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(vnlens_core::Error::Cancelled);
     }
-    Err(vnlens_core::Error::Unsupported(format!(
-        "Script route is not registered: {tag}"
-    )))
+    let decoded = selected(tag)?.decode_with_resources(data, resources, options, cancelled)?;
+    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(vnlens_core::Error::Cancelled);
+    }
+    Ok(decoded)
 }
 
 /// Selects text decoding using the identified engine's script route.
 pub fn decode_text_as(tag: &str, data: &[u8]) -> Result<Option<String>> {
-    for registration in vnlens_core::inventory::iter::<ScriptRegistration>() {
-        let format = (registration.0)();
-        if format.tag() == tag {
-            return format.decode_text(data);
-        }
-    }
-    Err(vnlens_core::Error::Unsupported(format!(
-        "Script route is not registered: {tag}"
-    )))
+    selected(tag)?.decode_text(data)
 }
 
 /// Dispatches only to the bytecode reader selected by the game context.
@@ -74,28 +118,16 @@ pub fn disassemble_as(
     data: &[u8],
     resources: Option<&dyn ResourceResolver>,
 ) -> Result<Option<Script>> {
-    disassemble_with_options_as(
-        tag,
-        data,
-        resources,
-        &vnlens_core::ArchiveOptions::default(),
-    )
+    selected(tag)?.disassemble(data, resources)
 }
 
-/// Dispatches with the identified game's bytecode parameters.
-pub fn disassemble_with_options_as(
+/// Selects one script format and passes the host's cancellation token through.
+pub fn disassemble_cancellable_as(
     tag: &str,
     data: &[u8],
     resources: Option<&dyn ResourceResolver>,
     options: &vnlens_core::ArchiveOptions,
+    cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<Option<Script>> {
-    for registration in vnlens_core::inventory::iter::<ScriptRegistration>() {
-        let format = (registration.0)();
-        if format.tag() == tag {
-            return format.disassemble_with_options(data, resources, options);
-        }
-    }
-    Err(vnlens_core::Error::Unsupported(format!(
-        "Script route is not registered: {tag}"
-    )))
+    selected(tag)?.disassemble_cancellable(data, resources, options, cancelled)
 }

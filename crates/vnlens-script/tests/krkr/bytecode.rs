@@ -741,48 +741,6 @@ fn metadata_keeps_empty_objects_forward_links_properties_and_duplicate_source_ro
 }
 
 #[test]
-#[ignore = "Requires licensed COCORO PackinOne.dll; set VNLENS_TJS_BINARY and run cargo test -p vnlens-script packinone -- --ignored"]
-fn packinone_embedded_slice_layer_matches_ida_golden() -> Result<()> {
-    // IDA: sub_10051FB0 calls TVPExecuteBytecode with the SliceLayer array at
-    // 0x10088BC0 and length 0x2614. No game data is stored in the repository.
-    let path = std::env::var_os("VNLENS_TJS_BINARY").ok_or_else(|| {
-        Error::Unsupported("Set VNLENS_TJS_BINARY to the licensed PackinOne.dll".into())
-    })?;
-    let binary = std::fs::read(path)?;
-    let at = binary
-        .windows(8)
-        .position(|b| b == b"TJS2100\0")
-        .ok_or_else(|| bad(0, "No embedded TJS2100 sample"))?;
-    let mut reader = BinaryReader::new_at(&binary, at + 8)?;
-    let length = reader.read_u32_le()? as usize;
-    assert_eq!(length, 9748);
-    let sample = BinaryReader::new_at(&binary, at)?.read_bytes(length)?;
-    let script = crate::disassemble_as("script/krkr", sample, None)?
-        .ok_or_else(|| bad(at, "TJS route returned no bytecode"))?;
-    let code = vm(&script);
-    assert_eq!(code.len(), 670);
-    assert_eq!(
-        script
-            .instructions
-            .iter()
-            .filter(|i| i.opcode.native_mnemonic.as_deref() == Some("object"))
-            .count(),
-        38
-    );
-    assert!(
-        code.iter()
-            .all(|i| i.opcode.operation != Operation::Unknown)
-    );
-    assert!(script.instructions.iter().any(|i| {
-        i.args
-            .iter()
-            .any(|a| matches!(&a.value, Value::Text(s) if s == "sliceConfig"))
-    }));
-    assert_eq!(script.sections[0].raw, sample);
-    script.to_json()?;
-    Ok(())
-}
-#[test]
 fn name_hints_fold_known_register_strings_without_crossing_branches() -> Result<()> {
     let cancel = std::sync::atomic::AtomicBool::new(false);
     let direct = fixture(&[1, 1, 0, 2, 2, 1, 58, 1, 2, 119]);

@@ -20,11 +20,11 @@ fn decodes_vm_strings_without_confusing_cp932_trail_bytes() {
     );
     assert_eq!(tokens[0].raw, raw);
     assert_eq!(tokens[0].span.offset, 0x100);
-    assert_eq!(string(b"'quote: \"'", 0).unwrap(), "quote: \"");
+    assert!(matches!(string(b"'quote: \"'", 0).unwrap(), Value::Text(text) if text == "quote: \""));
     // 0x426930 drops an unrecognized escape's slash and reprocesses its
     // following byte, including a closing delimiter.
-    assert_eq!(string(b"\"a\\qb\"", 0).unwrap(), "aqb");
-    assert_eq!(string(b"\"a\\\"", 0).unwrap(), "a");
+    assert!(matches!(string(b"\"a\\qb\"", 0).unwrap(), Value::Text(text) if text == "aqb"));
+    assert!(matches!(string(b"\"a\\\"", 0).unwrap(), Value::Text(text) if text == "a"));
     assert!(string(b"\"a\\", 0).is_err());
     assert!(string(b"\"unclosed", 0).is_err());
     assert!(string(b"\"closed\"extra", 0).is_err());
@@ -32,6 +32,15 @@ fn decodes_vm_strings_without_confusing_cp932_trail_bytes() {
     for end in 1..bytes.len() {
         assert!(decode(&bytes[..end], 0).is_err());
     }
+}
+
+#[test]
+fn project_font_codes_remain_bytes_without_discarding_the_script() {
+    let raw = b"\"a\xef\xf0b\"";
+    let tokens = decode(&token(b'M', raw), 0).unwrap();
+    assert!(matches!(&tokens[0].args[0].value,Value::Bytes(bytes) if bytes==b"a\xef\xf0b"));
+    assert_eq!(tokens[0].raw, raw);
+    assert!(string(b"\"a\xef\xf0b", 0).is_err());
 }
 
 #[test]

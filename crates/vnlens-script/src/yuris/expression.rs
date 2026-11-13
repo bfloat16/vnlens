@@ -68,7 +68,7 @@ pub(super) fn decode(data: &[u8], offset: u64) -> Result<Vec<Token>> {
             (b'M', _) => (
                 Operation::Storage(StorageOperation::Push),
                 Some(Qualifier::Text),
-                Some(Value::Text(string(raw, address)?)),
+                Some(string(raw, address)?),
             ),
             (b'H' | b'V' | b'v', 3) => {
                 let operation = match code {
@@ -154,7 +154,7 @@ pub(super) fn decode(data: &[u8], offset: u64) -> Result<Vec<Token>> {
 }
 
 /// Decode the quoted byte string exactly as the VM's 0x426930 handler does.
-fn string(raw: &[u8], offset: u64) -> Result<String> {
+fn string(raw: &[u8], offset: u64) -> Result<Value> {
     let Some(&quote) = raw.first() else {
         return Err(Error::Corrupt {
             offset,
@@ -171,7 +171,7 @@ fn string(raw: &[u8], offset: u64) -> Result<String> {
                     reason: "Bytes after string delimiter".into(),
                 });
             }
-            return text(&result, offset + 1);
+            return Ok(text_value(&result));
         }
         if byte == b'\\' {
             index += 1;
@@ -208,6 +208,15 @@ pub(super) fn text(bytes: &[u8], offset: u64) -> Result<String> {
             offset,
             reason: "Invalid CP932 text".into(),
         })
+}
+
+/// Runtime messages can contain project font codes outside Unicode CP932
+/// (e.g. EF F0). Preserve those bytes without inventing a replacement glyph.
+pub(super) fn text_value(bytes: &[u8]) -> Value {
+    match encoding_rs::SHIFT_JIS.decode_without_bom_handling_and_without_replacement(bytes) {
+        Some(text) => Value::Text(text.into_owned()),
+        None => Value::Bytes(bytes.to_vec()),
+    }
 }
 
 #[cfg(test)]

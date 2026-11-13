@@ -129,3 +129,49 @@ fn control_descriptors_are_not_data_slices_and_targets_are_checked() {
     BinaryWriter::u32_le(3, &mut bytes[56..]);
     assert!(disassemble(&bytes, None).is_err());
 }
+
+#[test]
+fn earlier_revisions_use_their_companion_command_ids_and_section_transform() {
+    struct Resources(Vec<u8>);
+    impl ResourceResolver for Resources {
+        fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>> {
+            Ok((name == "ysbin/ysc.ybn").then(|| self.0.clone()))
+        }
+    }
+    let mut table = vec![0; 16];
+    table[..4].copy_from_slice(b"YSCM");
+    BinaryWriter::u32_le(1, &mut table[8..]);
+    table.extend_from_slice(b"WORD\0\x01TEXT\0\x01\x02");
+    let mut resources = Resources(table);
+    let mut bytes = fixture();
+    bytes[32] = 0;
+    for version in [0x12c, 0x1c6, 0x1d0, 0x1da, 0x1dc, 0x1e1] {
+        BinaryWriter::u32_le(version, &mut resources.0[4..]);
+        BinaryWriter::u32_le(version, &mut bytes[4..]);
+        assert!(disassemble(&bytes, None).is_err());
+        let key = [1, 2, 3, 4];
+        let mut encrypted = bytes.clone();
+        decrypt_ystb(&mut encrypted, &key).unwrap();
+        decrypt_ystb(&mut encrypted, &key).unwrap();
+        assert_eq!(bytes, encrypted);
+        let ir = disassemble(&encrypted, Some(&resources)).unwrap();
+        assert_eq!(ir.format_version, version);
+        assert_eq!(ir.instructions[0].opcode.code, 0);
+        assert_eq!(
+            ir.instructions[0].opcode.native_mnemonic.as_deref(),
+            Some("WORD")
+        );
+        assert_eq!(
+            ir.instructions[0].args[0].native_name.as_deref(),
+            Some("TEXT")
+        );
+        assert!(
+            matches!(&ir.instructions[0].args[0].value, Value::Text(text) if text == "Example!")
+        );
+    }
+    BinaryWriter::u32_le(0x12b, &mut bytes[4..]);
+    assert!(matches!(
+        disassemble(&bytes, Some(&resources)),
+        Err(Error::Unsupported(_))
+    ));
+}

@@ -67,7 +67,8 @@ fn legacy_buttons_have_no_extension_and_nine_final_settings() -> Result<()> {
     let bytes = words(&values);
     let mut options = vnlens_core::ArchiveOptions::default();
     options.numbers.insert("csystem_legacy", 1);
-    let script = crate::disassemble_with_options_as("e0/csystem", &bytes, None, &options)?
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let script = crate::disassemble_cancellable_as("e0/csystem", &bytes, None, &options, &cancel)?
         .ok_or(Error::InvalidFormat)?;
     assert_eq!(script.instructions.len(), 3);
     assert_eq!(script.instructions[1].span.size, 68);
@@ -75,7 +76,7 @@ fn legacy_buttons_have_no_extension_and_nine_final_settings() -> Result<()> {
     assert!(crate::disassemble_as("e0/csystem", &bytes, None).is_err());
     for end in 0..bytes.len() {
         assert!(
-            crate::disassemble_with_options_as("e0/csystem", &bytes[..end], None, &options)
+            crate::disassemble_cancellable_as("e0/csystem", &bytes[..end], None, &options, &cancel)
                 .is_err()
         );
     }

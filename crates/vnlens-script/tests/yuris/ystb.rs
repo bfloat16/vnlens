@@ -52,6 +52,26 @@ fn recovers_section_keys_including_zero_without_assuming_first_argument_offset()
 }
 
 #[test]
+fn earlier_section_versions_recover_and_validate_native_keys() {
+    let cancel = AtomicBool::new(false);
+    for version in [0x12c, 0x1c6, 0x1d0, 0x1da, 0x1dc] {
+        let mut bytes = fixture(4);
+        BinaryWriter::u32_le(version, &mut bytes[4..]);
+        let key = [0x12, 0x34, 0x56, 0x78];
+        decrypt(&mut bytes, &key).unwrap();
+        assert_eq!(
+            recover_key(&bytes, &commands(), &cancel)
+                .unwrap()
+                .unwrap()
+                .bytes(),
+            key
+        );
+        assert!(validate_key(&bytes, &commands(), &key, &cancel).unwrap());
+        assert!(!validate_key(&bytes, &commands(), &[0; 4], &cancel).unwrap());
+    }
+}
+
+#[test]
 fn candidates_require_native_command_and_argument_consistency() {
     let mut bytes = fixture(4);
     // A zero-offset ciphertext hint alone is insufficient: argc no longer
@@ -68,6 +88,30 @@ fn candidates_require_native_command_and_argument_consistency() {
     for end in 0..plain.len() {
         assert!(sections(&plain[..end]).is_err());
     }
+}
+
+#[test]
+fn supplied_keys_are_checked_without_mutating_ciphertext() {
+    let mut bytes = fixture(4);
+    let key = [0x12, 0x34, 0x56, 0x78];
+    decrypt(&mut bytes, &key).unwrap();
+    let ciphertext = bytes.clone();
+    let cancel = AtomicBool::new(false);
+    assert!(validate_key(&bytes, &commands(), &key, &cancel).unwrap());
+    assert!(!validate_key(&bytes, &commands(), &[0xff; 4], &cancel).unwrap());
+    assert_eq!(bytes, ciphertext);
+    assert!(matches!(
+        validate_key(&bytes, &commands(), &key, &AtomicBool::new(true)),
+        Err(Error::Cancelled)
+    ));
+    assert!(validate_key(&bytes[..31], &commands(), &key, &cancel).is_err());
+    let mut empty = vec![0; 32];
+    empty[..4].copy_from_slice(b"YSTB");
+    BinaryWriter::u32_le(0x1e1, &mut empty[4..]);
+    assert!(matches!(
+        validate_key(&empty, &commands(), &key, &AtomicBool::new(true)),
+        Err(Error::Cancelled)
+    ));
 }
 
 #[test]

@@ -5,9 +5,26 @@
 //! 0x463C08, 0x463CCC, 0x463E2C, 0x464170, and 0x451798 respectively.
 //! The earlier 0x1DF readers 0x455090 (YSCM), 0x45599C (YSTL), and
 //! 0x4561BC (YSLB) retain these record layouts but use different command IDs.
+//! YSCM readers 0x447A34 (0x12C), 0x44CFCC (0x1C6), 0x44E2A4
+//! (0x1D0), 0x4544AC (0x1DA), and 0x4549DC (0x1DC) retain the command
+//! strings, argument kind/rule bytes, 37 errors, and 256-byte key map.
 //! YSVR 0x1DF/0x1E0 readers 0x44AC6C/0x450A98 have seven-byte variable
 //! headers; the 0x1E6 reader 0x450DC0 adds a storage byte after the scope.
-//! Revisions between 0x1E0 and 0x1E6 are not assumed to share either layout.
+//! The 0x1E1 reader 0x45253C already includes that storage byte; its YSCM
+//! loader uses the same definitions, 37 error strings and 256-byte key map.
+//! YSVR 0x226..=0x22A uses seven-byte records without storage; 0x22B
+//! adds that field, independently of the YSTL and YSCF transitions below.
+//! Other revisions between 0x1E1 and 0x1E6 are not assumed to share either layout.
+//! YSLB names use IEEE CRC32 or MurmurHash2 with seed zero (label lookup
+//! sub_45126C). All records in a table must agree on the hash algorithm.
+//! YSTL 0x226..=0x227 records retain four source metadata words without runtime flags;
+//! their complete record coverage differs from the five-word layouts above.
+//! Earlier YSTL 0x12C..=0x1DE also has four metadata words (0x4483E0, 0x44D928,
+//! 0x454E08, 0x455338); the 0x1DF branch adds runtime flags.
+//! YSCF 0x226..=0x228 has six option words and no reserved word before its title length,
+//! placing the length at 0x40 rather than 0x4C in the later layout.
+//! The earlier 0x12C..=0x1DE configuration uses the same compact framing
+//! (0x448534, 0x44DA7C, 0x454F5C, 0x45548C).
 //! Table headers differ; record boundaries are not inferred from a shared header.
 
 use super::{attribute, c_string, corrupt, expression, opcode, operand, section};
@@ -40,7 +57,7 @@ pub fn commands(data: &[u8], cancelled: Option<&AtomicBool>) -> Result<(Vec<Comm
         return Err(corrupt(0, "Companion command table is not YSCM"));
     }
     let version = r.read_u32_le()?;
-    if !matches!(version, 0x1df..=0x1e0 | 0x1e6..=0x22b) {
+    if !matches!(version, 0x12c..=0x1e1 | 0x1e6..=0x22b) {
         return Err(Error::Unsupported(format!("YSCM version 0x{version:X}")));
     }
     let count = r.read_u32_le()? as usize;
@@ -305,7 +322,8 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
         b"YSTL" => {
             let count = r.unsigned(ArgName::ScriptCount, 4)? as usize;
             r.finish(&mut script, 0, Qualifier::ScriptTable);
-            r.count(count, 28)?;
+            let has_runtime_flags = !matches!(script.format_version, 0x12c..=0x1de | 0x226..=0x227);
+            r.count(count, if has_runtime_flags { 28 } else { 24 })?;
             for _ in 0..count {
                 let id = r.unsigned(ArgName::ScriptId, 4)? as u32;
                 let size = r.unsigned(ArgName::PathLength, 4)? as usize;
@@ -316,9 +334,11 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
                     ArgName::SourceStamp(1),
                     ArgName::SourceField(0),
                     ArgName::SourceField(1),
-                    ArgName::RuntimeFlags,
                 ] {
                     r.unsigned(name, 4)?;
+                }
+                if has_runtime_flags {
+                    r.unsigned(ArgName::RuntimeFlags, 4)?;
                 }
                 r.finish(&mut script, id, Qualifier::ScriptFile);
             }
@@ -334,6 +354,8 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
                 r.finish(&mut script, id, Qualifier::HashBucket);
             }
             r.count(count, 13)?;
+            let mut crc32 = true;
+            let mut murmur2 = true;
             for id in 0..count {
                 let size = r.unsigned(ArgName::NameLength, 1)? as usize;
                 let start = r.reader.position();
@@ -344,7 +366,9 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
                     Value::Text(expression::text(raw, start as u64)?),
                 );
                 let hash = r.unsigned(ArgName::NameHash, 4)?;
-                if hash != u64::from(vnlens_crypto::checksum::crc32::ieee(0, raw)) {
+                crc32 &= hash == u64::from(vnlens_crypto::checksum::crc32::ieee(0, raw));
+                murmur2 &= hash == u64::from(vnlens_crypto::hash::murmur2::hash(raw, 0));
+                if !crc32 && !murmur2 {
                     return Err(corrupt(start, "Label name hash mismatch"));
                 }
                 let start = r.reader.position();
@@ -363,7 +387,8 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
         b"YSVR" => {
             let count = r.unsigned(ArgName::VariableCount, 2)? as usize;
             r.finish(&mut script, 0, Qualifier::VariableTable);
-            let has_storage = script.format_version >= 0x1e6;
+            let has_storage =
+                script.format_version >= 0x1e1 && !matches!(script.format_version, 0x226..=0x22a);
             r.count(count, if has_storage { 8 } else { 7 })?;
             for _ in 0..count {
                 r.unsigned(ArgName::Scope, 1)?;
@@ -408,10 +433,13 @@ pub(super) fn disassemble(data: &[u8], mut script: Script) -> Result<Script> {
             r.unsigned(ArgName::WindowOption, 4)?;
             r.bytes(ArgName::ResourcePriority(0), 8)?;
             r.bytes(ArgName::ResourcePriority(1), 4)?;
-            for i in 0..8 {
+            let compact = matches!(script.format_version, 0x12c..=0x1de | 0x226..=0x228);
+            for i in 0..if compact { 6 } else { 8 } {
                 r.unsigned(ArgName::Option(i as u64), 4)?;
             }
-            r.unsigned(ArgName::ReservedAt(2), 4)?;
+            if !compact {
+                r.unsigned(ArgName::ReservedAt(2), 4)?;
+            }
             let size = r.unsigned(ArgName::TitleLength, 2)? as usize;
             r.text(ArgName::Title, size)?;
             r.finish(&mut script, 0, Qualifier::Configuration);
