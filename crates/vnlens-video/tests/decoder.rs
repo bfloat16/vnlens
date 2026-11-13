@@ -118,7 +118,8 @@ fn seek_lands_on_the_requested_picture_in_both_directions() -> Result<()> {
 
 #[test]
 fn audio_is_interleaved_f32_at_the_source_rate() -> Result<()> {
-    let mut decoder = AudioDecoder::open(
+    let mut decoder = AudioDecoder::open_source_as(
+        "ffmpeg",
         Arc::new(wav()),
         Some("test.wav"),
         Arc::new(AtomicBool::new(false)),
@@ -151,7 +152,8 @@ fn audio_only_container_has_no_video_and_video_has_no_audio() -> Result<()> {
         .is_none()
     );
     assert!(
-        AudioDecoder::open(
+        AudioDecoder::open_source_as(
+            "ffmpeg",
             Arc::new(y4m()),
             Some("test.y4m"),
             Arc::new(AtomicBool::new(false)),
@@ -164,7 +166,8 @@ fn audio_only_container_has_no_video_and_video_has_no_audio() -> Result<()> {
 #[test]
 fn cancelled_audio_decode_stops() {
     assert!(matches!(
-        AudioDecoder::open(
+        AudioDecoder::open_source_as(
+            "ffmpeg",
             Arc::new(wav()),
             Some("test.wav"),
             Arc::new(AtomicBool::new(true)),

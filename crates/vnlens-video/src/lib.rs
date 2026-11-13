@@ -5,6 +5,7 @@
 
 mod audio;
 mod decoder;
+mod entisgls;
 mod input;
 mod kaleido;
 mod model;

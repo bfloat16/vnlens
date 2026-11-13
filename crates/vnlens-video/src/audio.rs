@@ -19,7 +19,7 @@ use std::{
 use vnlens_core::{Error, Result};
 use vnlens_io::ReadAt;
 
-pub struct AudioDecoder {
+struct FfmpegAudioDecoder {
     input: Input,
     io: crate::input::IoState,
     decoder: decoder::Audio,
@@ -33,14 +33,14 @@ pub struct AudioDecoder {
     last: f64,
     ended: bool,
 }
-impl fmt::Debug for AudioDecoder {
+impl fmt::Debug for FfmpegAudioDecoder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AudioDecoder")
             .field("meta", &self.meta)
             .finish_non_exhaustive()
     }
 }
-impl AudioDecoder {
+impl FfmpegAudioDecoder {
     /// Opens a fresh input cursor. No complete audio track is materialized.
     pub fn open(
         source: Arc<dyn ReadAt>,
@@ -93,13 +93,6 @@ impl AudioDecoder {
 
     /// Seeks and discards PCM before the exact target, including codec preroll.
     pub fn seek(&mut self, seconds: f64) -> Result<()> {
-        if !seconds.is_finite() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Audio seek time must be finite",
-            )
-            .into());
-        }
         let seconds = seconds.max(0.);
         let mut lead = 0.;
         loop {
@@ -136,22 +129,12 @@ impl AudioDecoder {
                 Some(frame) => Some(frame),
                 None => self.decode()?,
             };
-            let Some(mut frame) = frame else {
+            let Some(frame) = frame else {
                 return Ok(None);
             };
-            let channels = usize::from(frame.channels);
-            let frames = frame.samples.len() / channels;
-            let skip =
-                ((self.target - frame.time).max(0.) * f64::from(frame.sample_rate)).ceil() as usize;
-            let skip = skip.min(frames);
-            if skip == frames {
-                continue;
+            if let Some(frame) = trim_frame(frame, self.target) {
+                return Ok(Some(frame));
             }
-            if skip != 0 {
-                frame.samples.drain(..skip * channels);
-                frame.time += skip as f64 / f64::from(frame.sample_rate);
-            }
-            return Ok(Some(frame));
         }
     }
     fn output(&mut self, time: f64) -> AudioFrame {
@@ -217,4 +200,156 @@ impl AudioDecoder {
             }
         }
     }
+}
+
+/// An independent audio cursor selected by the movie's explicit format route.
+#[derive(Debug)]
+pub struct AudioDecoder {
+    kind: AudioKind,
+}
+#[derive(Debug)]
+enum AudioKind {
+    Ffmpeg(Box<FfmpegAudioDecoder>),
+    Erisa(Box<ErisaAudio>),
+}
+struct ErisaAudio {
+    source: Arc<dyn ReadAt>,
+    decoder: vnlens_middleware::erisa::SoundDecoder,
+    meta: AudioStream,
+    sections: Vec<vnlens_middleware::erisa::SoundChunk>,
+    cursor: usize,
+    samples: u64,
+    target: f64,
+    cancel: Arc<AtomicBool>,
+}
+impl std::fmt::Debug for ErisaAudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ErisaAudio")
+            .field("meta", &self.meta)
+            .field("cursor", &self.cursor)
+            .finish_non_exhaustive()
+    }
+}
+impl AudioDecoder {
+    pub fn open_source_as(
+        tag: &str,
+        source: Arc<dyn ReadAt>,
+        name: Option<&str>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Option<Self>> {
+        if tag != "mei/entisgls" {
+            if tag != "ffmpeg"
+                && !vnlens_core::inventory::iter::<crate::VideoRegistration>()
+                    .any(|r| (r.0)().tag() == tag)
+            {
+                return Err(Error::Unsupported(format!(
+                    "Video audio route is not registered: {tag}"
+                )));
+            }
+            return FfmpegAudioDecoder::open(source, name, cancel).map(|s| {
+                s.map(|s| Self {
+                    kind: AudioKind::Ffmpeg(Box::new(s)),
+                })
+            });
+        }
+        let file = vnlens_middleware::erisa::MediaFile::open(source.as_ref())?;
+        let Some(info) = vnlens_middleware::erisa::SoundInfo::read(&file, source.as_ref())? else {
+            return Ok(None);
+        };
+        let meta = AudioStream {
+            codec: "mio",
+            channels: info.channels,
+            sample_rate: info.sample_rate,
+        };
+        let sections = vnlens_middleware::erisa::sound_chunks(&file, source.as_ref())?;
+        let decoder = vnlens_middleware::erisa::SoundDecoder::new(info)?;
+        Ok(Some(Self {
+            kind: AudioKind::Erisa(Box::new(ErisaAudio {
+                source,
+                decoder,
+                meta,
+                sections,
+                cursor: 0,
+                samples: 0,
+                target: 0.0,
+                cancel,
+            })),
+        }))
+    }
+    #[must_use]
+    pub fn meta(&self) -> &AudioStream {
+        match &self.kind {
+            AudioKind::Ffmpeg(s) => s.meta(),
+            AudioKind::Erisa(s) => &s.meta,
+        }
+    }
+    pub fn seek(&mut self, seconds: f64) -> Result<()> {
+        if !seconds.is_finite() {
+            return Err(
+                vnlens_io::BinaryIo::invalid_input("Audio seek time must be finite").into(),
+            );
+        }
+        match &mut self.kind {
+            AudioKind::Ffmpeg(s) => s.seek(seconds),
+            AudioKind::Erisa(s) => {
+                s.target = seconds.max(0.0);
+                let target = (s.target * f64::from(s.meta.sample_rate)) as u64;
+                s.cursor = s
+                    .sections
+                    .partition_point(|c| c.first_sample <= target)
+                    .saturating_sub(1);
+                while s.cursor > 0 && s.sections[s.cursor].flags & 1 == 0 {
+                    s.cursor -= 1;
+                }
+                s.samples = s.sections.get(s.cursor).map_or(0, |c| c.first_sample);
+                s.decoder = vnlens_middleware::erisa::SoundDecoder::new(s.decoder.info.clone())?;
+                Ok(())
+            }
+        }
+    }
+    pub fn next_frame(&mut self) -> Result<Option<AudioFrame>> {
+        match &mut self.kind {
+            AudioKind::Ffmpeg(s) => s.next_frame(),
+            AudioKind::Erisa(s) => loop {
+                if s.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(Error::Cancelled);
+                }
+                let Some(chunk) = s.sections.get(s.cursor) else {
+                    return Ok(None);
+                };
+                let samples = s
+                    .decoder
+                    .decode(s.source.as_ref(), &chunk.section, &s.cancel)?;
+                s.cursor += 1;
+                let count = samples.len() / usize::from(s.meta.channels);
+                let time = s.samples as f64 / f64::from(s.meta.sample_rate);
+                s.samples += count as u64;
+                if let Some(frame) = trim_frame(
+                    AudioFrame {
+                        time,
+                        channels: s.meta.channels,
+                        sample_rate: s.meta.sample_rate,
+                        samples,
+                    },
+                    s.target,
+                ) {
+                    return Ok(Some(frame));
+                }
+            },
+        }
+    }
+}
+
+fn trim_frame(mut frame: AudioFrame, target: f64) -> Option<AudioFrame> {
+    let channels = usize::from(frame.channels);
+    let frames = frame.samples.len() / channels;
+    let skip = ((target - frame.time).max(0.0) * f64::from(frame.sample_rate)).ceil() as usize;
+    if skip >= frames {
+        return None;
+    }
+    if skip != 0 {
+        frame.samples.drain(..skip * channels);
+        frame.time += skip as f64 / f64::from(frame.sample_rate);
+    }
+    Some(frame)
 }
