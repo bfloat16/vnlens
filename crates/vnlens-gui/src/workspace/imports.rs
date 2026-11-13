@@ -72,15 +72,15 @@ impl Workspace {
                     self.start_names(game.clone(), cx);
                 }
                 let root = &mut self.columns[0];
-                let row = root
+                if !root
                     .folder
                     .items
                     .iter()
-                    .position(|old| old.target.same(&item.target))
-                    .unwrap_or_else(|| {
-                        root.folder.items.push(item);
-                        root.folder.items.len() - 1
-                    });
+                    .any(|old| old.target.same(&item.target))
+                {
+                    root.selected = None;
+                }
+                let row = root.folder.insert(item);
                 self.select(0, row, cx);
             }
             Err(error) => self.error(format!("Opening {}: {error:#}", path.display())),

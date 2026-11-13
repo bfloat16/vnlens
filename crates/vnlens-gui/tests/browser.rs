@@ -481,92 +481,6 @@ fn nested_psb_navigation_preserves_context_and_defers_child_errors() -> Result<(
     Ok(())
 }
 
-/// Uses a local game's first PSB scene without copying restricted assets into
-/// the repository. Run with VNLENS_GAME_DIR and `cargo test -p vnlens-gui
-/// local_psb_scenario_mount -- --ignored --nocapture`. VNLENS_SCN_ENTRY can
-/// select an entry by index or by its stored-name suffix.
-#[test]
-#[ignore = "requires a local KiriKiri game; set VNLENS_GAME_DIR"]
-fn local_psb_scenario_mount() -> Result<()> {
-    vnlens_archive::init();
-    let path = std::env::var_os("VNLENS_GAME_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("Set VNLENS_GAME_DIR to the local game directory"))?;
-    let cancel = Arc::new(AtomicBool::new(false));
-    let game = Arc::new(
-        vnlens_engine::identify(&path, &cancel)?
-            .ok_or_else(|| anyhow!("Unidentified local game"))?,
-    );
-    let archive = Arc::new(
-        MountedArchive::open(path.join("data.xp3"), false, game.clone())?
-            .ok_or_else(|| anyhow!("Missing local data archive"))?,
-    );
-    let selected = std::env::var("VNLENS_SCN_ENTRY").ok();
-    for (index, entry) in archive.entries.iter().enumerate() {
-        if selected.as_ref().is_some_and(|name| {
-            name.parse::<usize>().map_or_else(
-                |_| !entry.name.ends_with(name),
-                |selected| selected != index,
-            )
-        }) {
-            continue;
-        }
-        let source = {
-            let opened = archive.source.lock().unwrap();
-            opened.archive.open_entry_source(entry)?.unwrap()
-        };
-        let header = source.read_at(0, usize::try_from(source.len().min(4))?)?;
-        if !header.starts_with(b"PSB\0") && !vnlens_middleware::mdf::is_mdf(&header) {
-            continue;
-        }
-        let target = Target::Entry {
-            archive: archive.clone(),
-            index,
-        };
-        eprintln!("Mounting local PSB entry {index}, {} bytes", source.len());
-        let bytes: Arc<[u8]> = target.read(false, &cancel)?.into();
-        let start = std::time::Instant::now();
-        let expected = vnlens_middleware::psb::PsbFile::open_configured(
-            Arc::new(bytes),
-            &target.name(),
-            game.resource_options(),
-            Some(&cancel),
-        )?;
-        eprintln!(
-            "Mapped PSB parsed in {:?}, {} decoded bytes, {} nodes, {} strings",
-            start.elapsed(),
-            expected.document.data_len,
-            expected.document.nodes.len(),
-            expected.document.strings.len(),
-        );
-        if !expected
-            .document
-            .root
-            .as_object()
-            .is_some_and(|root| root.contains_key("scenes"))
-        {
-            continue;
-        }
-        let start = std::time::Instant::now();
-        let folder = open(&target, &cancel, false)?.ok_or_else(|| anyhow!("Missing PSB folder"))?;
-        let Target::ArchiveDirectory { archive, .. } = &folder.target else {
-            return Err(anyhow!("Missing PSB mount"));
-        };
-        assert!(
-            archive
-                .entries
-                .iter()
-                .map(|entry| (&entry.name, entry.kind, entry.offset, entry.size))
-                .eq(vnlens_core::Archive::entries(&expected)
-                    .iter()
-                    .map(|entry| (&entry.name, entry.kind, entry.offset, entry.size)))
-        );
-        eprintln!("Streaming PSB mounted in {:?}", start.elapsed());
-        return Ok(());
-    }
-    Err(anyhow!("No PSB scenario in the local data archive"))
-}
-
 #[test]
 fn foreign_headerless_prefix_is_not_sent_to_global_decoders() -> Result<()> {
     let dir = temp();
@@ -663,4 +577,34 @@ fn disk_export_continues_after_failure_and_honors_cancellation() {
     assert!(result.cancelled);
     assert_eq!(result.progress.completed, 0);
     assert!(!dir.0.join("cancelled").exists());
+}
+
+#[test]
+fn root_folder_insert_sorts_alphabetically_and_deduplicates() -> Result<()> {
+    let dir = temp();
+    let cancel = AtomicBool::new(false);
+    let game = Arc::new(
+        vnlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?,
+    );
+    let mut root = Folder::empty(Target::Opened);
+    let file_b = Item::from_target(Target::File(dir.0.join("b.txt"), game.clone()), Some(1));
+    let dir_c = Item::from_target(Target::Directory(dir.0.join("Charlie"), game.clone()), None);
+    let dir_a = Item::from_target(Target::Directory(dir.0.join("alpha"), game.clone()), None);
+    let dir_b = Item::from_target(Target::Directory(dir.0.join("Bravo"), game.clone()), None);
+    let file_a = Item::from_target(Target::File(dir.0.join("a.txt"), game), Some(1));
+
+    assert_eq!(root.insert(file_b), 0);
+    assert_eq!(root.insert(dir_c.clone()), 0);
+    assert_eq!(root.insert(dir_a), 0);
+    assert_eq!(root.insert(dir_b), 1);
+    assert_eq!(root.insert(file_a), 3);
+    assert_eq!(root.insert(dir_c), 2);
+    assert_eq!(
+        root.items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "Bravo", "Charlie", "a.txt", "b.txt"]
+    );
+    Ok(())
 }

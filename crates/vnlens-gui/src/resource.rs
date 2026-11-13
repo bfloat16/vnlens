@@ -67,7 +67,10 @@ impl ResourceResolver for Resources<'_> {
     }
 }
 
-struct FileResources<'a>(&'a std::path::Path, &'a Arc<vnlens_io::FileSystem>);
+pub(crate) struct FileResources<'a>(
+    pub(crate) &'a std::path::Path,
+    pub(crate) &'a Arc<vnlens_io::FileSystem>,
+);
 impl ResourceResolver for FileResources<'_> {
     fn resource_name(&self) -> Option<&str> {
         self.0.file_name()?.to_str()
@@ -201,7 +204,7 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
                         .source
                         .lock()
                         .map_err(|_| anyhow!("Archive reader is unavailable"))?;
-                    vnlens_script::disassemble_with_options_as(
+                    vnlens_script::disassemble_cancellable_as(
                         tag,
                         &resource.bytes,
                         Some(&Resources(
@@ -210,13 +213,15 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
                             &archive.paths[*index],
                         )),
                         archive.game.resource_options(),
+                        cancel,
                     )?
                 }
-                Target::File(path, game) => vnlens_script::disassemble_with_options_as(
+                Target::File(path, game) => vnlens_script::disassemble_cancellable_as(
                     tag,
                     &resource.bytes,
                     Some(&FileResources(path, &game.files)),
                     game.resource_options(),
+                    cancel,
                 )?,
                 _ => None,
             };

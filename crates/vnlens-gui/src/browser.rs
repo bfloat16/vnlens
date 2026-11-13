@@ -186,7 +186,13 @@ impl Target {
                 if !raw
                     && let ResourceRoute::Script(tag) = self.resource_route(&bytes)?
                     && let std::borrow::Cow::Owned(decoded) =
-                        vnlens_script::decode_as(tag, &bytes, game.resource_options())?
+                        vnlens_script::decode_with_resources_as(
+                            tag,
+                            &bytes,
+                            Some(&crate::resource::FileResources(path, &game.files)),
+                            game.resource_options(),
+                            cancel,
+                        )?
                 {
                     return Ok(decoded);
                 }
@@ -367,6 +373,22 @@ impl Folder {
         };
         folder.sort();
         folder
+    }
+    pub fn insert(&mut self, item: Item) -> usize {
+        if let Some(row) = self
+            .items
+            .iter()
+            .position(|old| old.target.same(&item.target))
+        {
+            return row;
+        }
+        let target = item.target.clone();
+        self.items.push(item);
+        self.sort();
+        self.items
+            .iter()
+            .position(|entry| entry.target.same(&target))
+            .unwrap_or(0)
     }
     fn sort(&mut self) {
         self.items.sort_by(|a, b| {

@@ -132,7 +132,12 @@ impl Drop for AudioOutput {
 fn decode(input: crate::resource::VideoInput, shared: Arc<Shared>) {
     // Retain a nested archive until the audio input has been destroyed.
     let _archive = input.archive;
-    let opened = AudioDecoder::open(input.source, Some(&input.name), shared.cancelled.clone());
+    let opened = AudioDecoder::open_source_as(
+        input.tag,
+        input.source,
+        Some(&input.name),
+        shared.cancelled.clone(),
+    );
     let mut decoder = match opened {
         Ok(Some(decoder)) => decoder,
         result => {
