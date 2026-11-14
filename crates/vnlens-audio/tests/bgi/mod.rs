@@ -9,6 +9,7 @@ fn wave_box_preserves_ogg_payload_and_checks_header_bounds() -> Result<()> {
     BinaryWriter::u32_le(3, &mut bytes[48..]);
     bytes.extend(b"OggS");
     assert_eq!(ogg_payload(&bytes)?, Some(b"OggS".as_slice()));
+    assert_eq!(ogg_payload(b"OggS")?, Some(b"OggS".as_slice()));
     for length in [8, 47, 63, 67] {
         assert!(ogg_payload(&bytes[..length]).is_err());
     }

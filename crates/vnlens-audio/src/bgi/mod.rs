@@ -43,8 +43,12 @@ impl Header {
 }
 
 /// Returns the original Ogg payload without transcoding. Called on demand by
-/// archive extraction and by this decoder. Non-BW data is left to the caller.
+/// archive extraction and by this decoder. Already unwrapped Ogg bytes retain
+/// the same registered BW route. Other data is left to the caller.
 pub fn ogg_payload(data: &[u8]) -> Result<Option<&[u8]>> {
+    if data.starts_with(b"OggS") {
+        return Ok(Some(data));
+    }
     if !matches!(data.get(4..8), Some(b"bw  " | b"hw  ")) {
         return Ok(None);
     }
