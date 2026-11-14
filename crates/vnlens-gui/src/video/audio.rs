@@ -21,6 +21,7 @@ const PCM_START_SECONDS: f64 = 0.1;
 
 struct Buffer {
     target: f64,
+    seek_cancel: Arc<AtomicBool>,
     frames: VecDeque<AudioFrame>,
     seconds: f64,
     ended: bool,
@@ -56,6 +57,7 @@ impl AudioOutput {
         let shared = Arc::new(Shared {
             buffer: Mutex::new(Buffer {
                 target: position,
+                seek_cancel: Arc::new(AtomicBool::new(false)),
                 frames: VecDeque::new(),
                 seconds: 0.,
                 ended: false,
@@ -92,6 +94,8 @@ impl AudioOutput {
     }
     pub fn seek(&self, position: f64) {
         if let Ok(mut buffer) = self.shared.buffer.lock() {
+            buffer.seek_cancel.store(true, Ordering::Release);
+            buffer.seek_cancel = Arc::new(AtomicBool::new(false));
             buffer.target = position;
             buffer.frames.clear();
             buffer.seconds = 0.;
@@ -158,12 +162,12 @@ fn decode(input: crate::resource::VideoInput, shared: Arc<Shared>) {
         }
         let current = shared.generation.load(Ordering::Acquire);
         if current != generation {
-            let target = match shared.buffer.lock() {
-                Ok(buffer) => buffer.target,
+            let (target, interrupt) = match shared.buffer.lock() {
+                Ok(buffer) => (buffer.target, buffer.seek_cancel.clone()),
                 Err(_) => return,
             };
             if generation != u64::MAX || target > 0. {
-                let result = decoder.seek(target);
+                let result = decoder.seek_cancellable(target, &interrupt);
                 let mut buffer = match shared.buffer.lock() {
                     Ok(buffer) => buffer,
                     Err(_) => return,

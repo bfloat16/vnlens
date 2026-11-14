@@ -5,6 +5,7 @@ fn stream(rate: u32) -> Result<PcmStream> {
         shared: Arc::new(Shared {
             buffer: Mutex::new(Buffer {
                 target: 0.,
+                seek_cancel: Arc::new(AtomicBool::new(false)),
                 frames: VecDeque::new(),
                 seconds: 0.,
                 ended: false,

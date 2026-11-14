@@ -85,7 +85,59 @@ impl VideoPreview {
         {
             self.clock = Clock::Playing(Instant::now(), output.position());
         }
+        if self.awaiting
+            && self.output.is_none()
+            && let Clock::Playing(_, from) = self.clock
+        {
+            return self.clamp(from);
+        }
         self.clamp(self.clock.position())
+    }
+
+    /// Presentation is separate from decoding: paused playback never drains
+    /// overdue/duplicate timestamps. Opening and each seek publish one picture.
+    fn poll_picture(&mut self, position: f64) -> anyhow::Result<Option<vnlens_video::Picture>> {
+        if !self.awaiting && !self.playing() {
+            return Ok(None);
+        }
+        let mut shown = None;
+        loop {
+            if self.next.is_none() {
+                match self.decoder.poll() {
+                    Some(Output::Picture(picture)) => self.next = Some(picture),
+                    Some(Output::End) => {
+                        self.ended = true;
+                        if self.awaiting {
+                            self.awaiting = false;
+                            self.clock = Clock::Paused(self.clamp(position));
+                        }
+                    }
+                    Some(Output::Error(message)) => {
+                        self.ended = true;
+                        self.awaiting = false;
+                        self.clock = Clock::Paused(self.clamp(position));
+                        return Err(anyhow::anyhow!(message));
+                    }
+                    None => {}
+                }
+            }
+            let Some(next) = &self.next else {
+                break;
+            };
+            if !self.awaiting && next.time > position {
+                break;
+            }
+            let awaited = self.awaiting;
+            self.awaiting = false;
+            shown = self.next.take();
+            if awaited {
+                if self.playing() {
+                    self.clock = Clock::Playing(Instant::now(), position);
+                }
+                break;
+            }
+        }
+        Ok(shown)
     }
 
     fn seek(&mut self, position: f64) {
@@ -123,32 +175,17 @@ impl Workspace {
         let Some(video) = self.video_mut() else {
             return;
         };
+        let was_playing = video.playing();
         let position = video.position();
-        let mut shown = None;
         let mut error = None;
-        loop {
-            if video.next.is_none() {
-                match video.decoder.poll() {
-                    Some(Output::Picture(picture)) => video.next = Some(picture),
-                    Some(Output::End) => video.ended = true,
-                    Some(Output::Error(message)) => {
-                        video.ended = true;
-                        error = Some(message);
-                    }
-                    None => {}
-                }
+        let shown = match video.poll_picture(position) {
+            Ok(picture) => picture,
+            Err(cause) => {
+                error = Some(cause.to_string());
+                None
             }
-            let Some(next) = &video.next else {
-                break;
-            };
-            if !video.awaiting && next.time > position {
-                break;
-            }
-            video.awaiting = false;
-            // Late pictures are skipped; only the newest due one is uploaded.
-            shown = video.next.take();
-        }
-        let mut changed = false;
+        };
+        let mut changed = was_playing != video.playing();
         if let Some(output) = &video.output
             && let Some(message) = output.error()
         {
@@ -480,3 +517,7 @@ impl Workspace {
             )
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/workspace/video_view.rs"]
+mod tests;

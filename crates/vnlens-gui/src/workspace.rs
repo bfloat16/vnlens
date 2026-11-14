@@ -43,6 +43,7 @@ const ACCENT_TEXT: u32 = 0x9dcaff;
 const CONTROL: u32 = 0x363639;
 const CONTROL_HOVER: u32 = 0x46464b;
 const DANGER: u32 = 0xff8a82;
+const WARNING: u32 = 0xffd60a;
 const SUCCESS: u32 = 0x30d158;
 const UI_FONT: &str = "Segoe UI";
 const MONO_FONT: &str = "Cascadia Mono";
@@ -176,6 +177,10 @@ impl Preview {
         };
         let mut widest_line = 0;
         let lines = (resource.script.is_none()
+            && !matches!(
+                resource.route,
+                vnlens_core::ResourceRoute::Other(vnlens_core::ResourceKind::Unknown)
+            )
             && resource.psb.is_none()
             && resource.image.is_none()
             && !resource.audio
@@ -1296,3 +1301,7 @@ impl Drop for Workspace {
         self.request.store(true, Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/workspace/mod.rs"]
+mod tests;

@@ -54,5 +54,15 @@ fn paused_picture_queue_stays_bounded_and_seek_replaces_queued_frames() -> Resul
         return Err(anyhow!("Missing picture after seek"));
     };
     assert!((picture.time - 5.).abs() < 1e-6);
+    decoder.seek(8.);
+    let superseded = decoder.seek_cancel.clone();
+    decoder.seek(0.25);
+    assert!(superseded.load(Ordering::Acquire));
+    assert!(!decoder.seek_cancel.load(Ordering::Acquire));
+    assert_eq!(wait_for_queue(&decoder, 3)?, PICTURE_QUEUE_CAPACITY);
+    let Some(Output::Picture(picture)) = decoder.poll() else {
+        return Err(anyhow!("Missing latest seek picture"));
+    };
+    assert!((picture.time - 0.25).abs() < 1e-6);
     Ok(())
 }

@@ -26,6 +26,8 @@ pub struct MountedArchive {
     pub source: Arc<Mutex<Opened>>,
     pub directories: Vec<Directory>,
     pub game: Arc<vnlens_engine::Identification>,
+    /// Filesystem wrappers are folders, not proprietary game archives.
+    pub filesystem: bool,
     // Keep temporary nested sources alive until all mapped readers are dropped.
     _backing: Option<Arc<TemporaryArchive>>,
 }
@@ -53,11 +55,69 @@ impl MountedArchive {
         virtual_paths: bool,
         game: Arc<vnlens_engine::Identification>,
     ) -> Result<Self> {
-        let opened = Catalog::load()
-            .open_view(Arc::new(game.files.open(&path)?), route)
+        let catalog = Catalog::load();
+        let opened =
+            catalog.open_source(game.files.source(&path)?, &path.to_string_lossy(), route)?;
+        let opened = opened
+            .map(Ok)
+            .unwrap_or_else(|| catalog.open_view(Arc::new(game.files.open(&path)?), route))
             .with_context(|| format!("Opening {} with {:?}", path.display(), game.engine))?;
         let source_path = game.files.canonicalize(&path)?;
         Self::from_opened(path, source_path, opened, virtual_paths, game)
+    }
+
+    /// NS partition and RomFS indices are ordinary game directories. Register
+    /// their streaming file sources without reading payloads or creating disk
+    /// copies, then run the directory identification rules over those names.
+    pub fn filesystem_target(&self, cancel: &AtomicBool) -> Result<Option<crate::browser::Target>> {
+        let opened = self
+            .source
+            .lock()
+            .map_err(|_| anyhow!("Archive reader is unavailable"))?;
+        if !matches!(opened.format_tag, "ns/pfs0" | "ns/romfs") {
+            return Ok(None);
+        }
+        // An NSP/PFS containing other NS filesystems is a transport directory.
+        // Its children retain their original index origins (e.g. XCI's secure
+        // partition), and each entered filesystem establishes its own context.
+        // The game directory is identified once actual files become visible.
+        let nested_filesystem = |entry: &Entry| {
+            matches!(self.game.resource_route(&entry.name, vnlens_core::ResourceOrigin::Entry(entry.kind), &[]),
+                    ResourceRoute::Archive(route) if route.tag.starts_with("ns/"))
+        };
+        if opened.format_tag == "ns/pfs0"
+            && opened.archive.entries().iter().any(nested_filesystem)
+            && opened.archive.entries().iter().all(|entry| {
+                nested_filesystem(entry)
+                    || Path::new(&entry.name).extension().is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("tik")
+                            || ext.eq_ignore_ascii_case("cert")
+                            || entry.name.to_ascii_lowercase().ends_with(".cnmt.xml")
+                    })
+            })
+        {
+            return Ok(None);
+        }
+        let root = self.source_path.clone();
+        let mut files = vnlens_io::FileSystem::isolated(root.clone());
+        for entry in opened.archive.entries() {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(vnlens_core::Error::Cancelled.into());
+            }
+            let source = opened
+                .archive
+                .open_entry_source_cancellable(entry, cancel)?
+                .ok_or_else(|| anyhow!("NS filesystem entry has no streaming source"))?;
+            files.insert(root.join(entry.name.replace('\\', "/")), source)?;
+        }
+        drop(opened);
+        let game = self
+            .game
+            .for_filesystem(root.clone(), Arc::new(files), cancel)?;
+        Ok(Some(crate::browser::Target::Directory(
+            root,
+            Arc::new(game),
+        )))
     }
 
     fn from_opened(
@@ -82,6 +142,7 @@ impl MountedArchive {
             }
         }
         Ok(Self {
+            filesystem: opened.format_tag.starts_with("ns/"),
             source_path,
             path,
             directories: directories(&paths),
@@ -204,6 +265,7 @@ impl MountedArchive {
             }
         }
         let mounted = Arc::new(Self {
+            filesystem: self.filesystem,
             path: PathBuf::from(&entry.name),
             source_path: self.source_path.clone(),
             entries: archive.entries().into(),
@@ -234,6 +296,7 @@ impl MountedArchive {
             bail!("Recovered path count differs from archive index");
         }
         Ok(Self {
+            filesystem: self.filesystem,
             path: self.path.clone(),
             source_path: self.source_path.clone(),
             entries: self.entries.clone(),

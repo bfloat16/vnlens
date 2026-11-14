@@ -5,6 +5,58 @@ use std::fs;
 use std::sync::atomic::AtomicU64;
 use vnlens_io::BinaryWriter;
 
+#[test]
+#[ignore = "Requires user-owned base/update packages and keys; set VNLENS_NS_BASE and VNLENS_NS_PATCH"]
+fn ns_local_associated_application() -> Result<()> {
+    vnlens_archive::init();
+    let base = PathBuf::from(
+        std::env::var_os("VNLENS_NS_BASE").ok_or_else(|| anyhow!("Set VNLENS_NS_BASE"))?,
+    );
+    let patch = PathBuf::from(
+        std::env::var_os("VNLENS_NS_PATCH").ok_or_else(|| anyhow!("Set VNLENS_NS_PATCH"))?,
+    );
+    let cancel = AtomicBool::new(false);
+    let base_item = Item::from_path(base.clone())?;
+    let patch_item = Item::from_path(patch)?;
+    assert!(base_item.target.same(&patch_item.target));
+    assert_eq!(base_item.name, base.file_name().unwrap().to_string_lossy());
+    let mut selected = Folder::empty(Target::Opened);
+    selected.insert(base_item);
+    selected.insert(patch_item);
+    assert_eq!(selected.items.len(), 1);
+    let mut pending = vec![selected.items[0].target.clone()];
+    let mut banks = 0;
+    let mut files = 0;
+    while let Some(target) = pending.pop() {
+        let folder = open(&target, &cancel, false)?
+            .ok_or_else(|| anyhow!("Expected folder {}", target.name()))?;
+        for item in folder.items {
+            if item.name.ends_with(".cpk") {
+                assert_eq!(
+                    item.target.game().map(|game| game.engine),
+                    Some(vnlens_engine::Engine::Otomate)
+                );
+                assert!(item.target.warning().is_none());
+                let bank =
+                    open(&item.target, &cancel, false)?.ok_or_else(|| anyhow!("Missing CPK"))?;
+                println!("{}: {} indexed items", item.name, bank.items.len());
+                banks += 1;
+            } else if item.target.is_directory()
+                && !matches!(item.name.as_str(), "update" | "normal" | "logo")
+            {
+                pending.push(item.target);
+            } else if let Target::File(path, game) = item.target {
+                let source = game.files.source(&path)?;
+                source.read_at(0, source.len().min(16) as usize)?;
+                files += 1;
+            }
+        }
+    }
+    assert!(files > 0 || banks > 0);
+    println!("one base entry, {files} file prefixes verified, {banks} CPK banks");
+    Ok(())
+}
+
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
@@ -42,6 +94,226 @@ fn fixture(name: &str, payload: &[u8]) -> Vec<u8> {
     bytes.extend(index);
     bytes.extend_from_slice(payload);
     bytes
+}
+
+fn pfs_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut names = Vec::new();
+    let mut records = Vec::new();
+    let mut payloads = Vec::new();
+    for (name, payload) in entries {
+        let mut record = [0; 24];
+        BinaryWriter::u64_le(payloads.len() as u64, &mut record);
+        BinaryWriter::u64_le(payload.len() as u64, &mut record[8..]);
+        BinaryWriter::u32_le(names.len() as u32, &mut record[16..]);
+        records.extend(record);
+        names.extend(name.as_bytes());
+        names.push(0);
+        payloads.extend_from_slice(payload);
+    }
+    let mut bytes = vec![0; 16];
+    bytes[..4].copy_from_slice(b"PFS0");
+    BinaryWriter::u32_le(entries.len() as u32, &mut bytes[4..]);
+    BinaryWriter::u32_le(names.len() as u32, &mut bytes[8..]);
+    bytes.extend(records);
+    bytes.extend(names);
+    bytes.extend(payloads);
+    bytes
+}
+
+#[test]
+fn ns_transport_folders_identify_each_inner_game_without_reading_resource_bodies() -> Result<()> {
+    vnlens_archive::init();
+    let dir = temp();
+    let cancel = AtomicBool::new(false);
+    let game = pfs_fixture(&[
+        ("CONTENTS/SYSTEM.cpk", b"unrequested"),
+        ("CONTENTS/STORY.cpk", b"unrequested"),
+        ("CONTENTS/GAME.cpk", b"unrequested"),
+        ("CONTENTS/MOVIE.cpk", b"unrequested"),
+        ("CONTENTS/SOUND.cpk", b"unrequested"),
+        ("scene.dat", b"unrequested"),
+    ]);
+    let unknown = pfs_fixture(&[("scene.dat", b"unknown"), ("info.txt", b"info")]);
+    let path = dir.0.join("package.nsp");
+    fs::write(
+        &path,
+        pfs_fixture(&[
+            ("title.pfs0", &game),
+            ("other.pfs0", &unknown),
+            ("broken.nca", b"unrequested"),
+        ]),
+    )?;
+    let item = Item::from_path(path)?;
+    assert!(item.target.is_directory());
+    assert!(item.target.warning().is_none());
+    assert!(!item.can_preview());
+    let package =
+        open(&item.target, &cancel, false)?.ok_or_else(|| anyhow!("Missing NSP folder"))?;
+    assert!(package.target.is_directory());
+    assert!(package.target.warning().is_none());
+    assert!(package.items.iter().all(|item| item.target.is_directory()));
+    let title = package
+        .items
+        .iter()
+        .find(|item| item.name == "title.pfs0")
+        .unwrap();
+    let title =
+        open(&title.target, &cancel, false)?.ok_or_else(|| anyhow!("Missing title folder"))?;
+    let Target::Directory(_, game) = &title.target else {
+        return Err(anyhow!(
+            "Game files were not mounted as a virtual directory"
+        ));
+    };
+    assert_eq!(game.engine, vnlens_engine::Engine::Otomate);
+    assert!(title.target.warning().is_none());
+    let script = title
+        .items
+        .iter()
+        .find(|item| item.name == "scene.dat")
+        .unwrap();
+    assert_eq!(
+        script.target.resource_route(&[])?,
+        ResourceRoute::Script("stcm2/otomate")
+    );
+    let contents = title
+        .items
+        .iter()
+        .find(|item| item.name == "CONTENTS")
+        .unwrap();
+    let contents = open(&contents.target, &cancel, false)?.unwrap();
+    assert!(contents.target.warning().is_none());
+    assert_eq!(contents.items.len(), 5);
+    let other = package
+        .items
+        .iter()
+        .find(|item| item.name == "other.pfs0")
+        .unwrap();
+    let other = open(&other.target, &cancel, false)?.unwrap();
+    assert!(other.target.warning().is_some());
+    let script = other
+        .items
+        .iter()
+        .find(|item| item.name == "scene.dat")
+        .unwrap();
+    assert_eq!(
+        script.target.resource_route(&[])?,
+        ResourceRoute::Other(ResourceKind::Unknown)
+    );
+    assert!(package.target.warning().is_none());
+    assert!(
+        open(
+            &package
+                .items
+                .iter()
+                .find(|item| item.name == "broken.nca")
+                .unwrap()
+                .target,
+            &cancel,
+            false
+        )
+        .is_err()
+    );
+    assert!(matches!(
+        open(&item.target, &AtomicBool::new(true), false)
+            .unwrap_err()
+            .downcast_ref(),
+        Some(vnlens_core::Error::Cancelled)
+    ));
+    Ok(())
+}
+
+#[test]
+fn ns_folders_export_their_virtual_files_instead_of_transport_bytes() -> Result<()> {
+    vnlens_archive::init();
+    let dir = temp();
+    let cancel = AtomicBool::new(false);
+    let inner = pfs_fixture(&[("folder/leaf.txt", b"leaf")]);
+    let path = dir.0.join("package.nsp");
+    fs::write(&path, pfs_fixture(&[("child.pfs0", &inner)]))?;
+    let item = Item::from_path(path)?;
+    let output = dir.0.join("output");
+    let result = export(
+        std::slice::from_ref(&item),
+        &output,
+        false,
+        &cancel,
+        |_, _| {},
+    )?;
+    assert_eq!(result.progress.succeeded, 1);
+    assert_eq!(
+        fs::read(output.join("package.nsp/child.pfs0/folder/leaf.txt"))?,
+        b"leaf"
+    );
+    let folder = open(&item.target, &cancel, false)?.unwrap();
+    let output = dir.0.join("entry-output");
+    // The common-archive export shortcut must also expand an NS directory.
+    let result = export(&folder.items, &output, true, &cancel, |_, _| {})?;
+    assert_eq!(result.progress.succeeded, 1);
+    assert_eq!(
+        fs::read(output.join("child.pfs0/folder/leaf.txt"))?,
+        b"leaf"
+    );
+    Ok(())
+}
+
+#[test]
+fn ns_filesystems_browse_as_isolated_folders_with_safe_unknown_previews() -> Result<()> {
+    vnlens_archive::init();
+    let dir = temp();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let inner = pfs_fixture(&[("leaf.txt", b"leaf")]);
+    let path = dir.0.join("game.nsp");
+    fs::write(
+        &path,
+        pfs_fixture(&[
+            ("GAME.cpk", b"broken CPK"),
+            ("unknown.g00", b"plain text with unknown suffix"),
+            ("child.nsp", &inner),
+            ("folder/info.txt", b"info"),
+        ]),
+    )?;
+    let item = Item::from_path(path)?;
+    let folder = open(&item.target, &cancel, false)?.unwrap();
+    assert!(matches!(folder.target, Target::Directory(..)));
+    assert!(folder.target.warning().is_some());
+    assert_eq!(folder.items.len(), 4);
+    let cpk = folder
+        .items
+        .iter()
+        .find(|item| item.name == "GAME.cpk")
+        .unwrap();
+    assert!(cpk.container);
+    assert!(open(&cpk.target, &cancel, false).is_err());
+    let unknown = folder
+        .items
+        .iter()
+        .find(|item| item.name == "unknown.g00")
+        .unwrap();
+    let resource = crate::resource::read(&unknown.target, false, &cancel)?;
+    assert_eq!(resource.route, ResourceRoute::Other(ResourceKind::Unknown));
+    assert!(
+        resource.image.is_none()
+            && resource.script.is_none()
+            && !resource.audio
+            && resource.video.is_none()
+    );
+    assert_eq!(&*resource.bytes, b"plain text with unknown suffix");
+    let child = folder
+        .items
+        .iter()
+        .find(|item| item.name == "child.nsp")
+        .unwrap();
+    let child = open(&child.target, &cancel, false)?.unwrap();
+    assert!(matches!(child.target, Target::Directory(..)));
+    assert_eq!(child.items[0].target.read(false, &cancel)?, b"leaf");
+    // A sibling from the real installation cannot become an engine or key
+    // source for this independent virtual filesystem.
+    let Target::Directory(root, game) = &folder.target else {
+        return Err(anyhow!("Missing NS folder"));
+    };
+    assert!(!game.files.is_file(&root.join("AdvHD.exe")));
+    assert_eq!(game.engine, vnlens_engine::Engine::NintendoSwitch);
+    Ok(())
 }
 
 #[test]
@@ -144,7 +416,7 @@ fn archive_sets_open_one_logical_archive_and_export_physical_names() -> Result<(
 }
 
 #[test]
-fn propeller_mpeg_mpk_resolves_its_video_route_only_on_access() -> Result<()> {
+fn registered_archive_suffix_does_not_switch_to_video_on_access() -> Result<()> {
     let dir = temp();
     let cancel = Arc::new(AtomicBool::new(false));
     let mut game =
@@ -157,14 +429,14 @@ fn propeller_mpeg_mpk_resolves_its_video_route_only_on_access() -> Result<()> {
     let item = Item::from_target(Target::File(path, Arc::new(game)), Some(12));
     assert_eq!(item.kind, ResourceKind::Archive);
     assert!(item.container);
-    assert!(open(&item.target, &cancel, false)?.is_none());
+    assert!(open(&item.target, &cancel, false).is_err());
     let resource = crate::resource::read(&item.target, false, &cancel)?;
     assert!(resource.bytes.is_empty());
-    let input = resource
-        .video
-        .as_ref()
-        .ok_or_else(|| anyhow!("Missing video input"))?;
-    assert_eq!(&*input.source.read_at(0, header.len())?, &header);
+    assert!(
+        matches!(resource.route, ResourceRoute::Archive(route) if route.tag == "mpk/propeller")
+    );
+    assert!(resource.video.is_none());
+    assert_eq!(item.target.read(true, &cancel)?, header);
     assert!(resource.image.is_none() && resource.script.is_none() && !resource.audio);
     Ok(())
 }

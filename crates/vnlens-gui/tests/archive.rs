@@ -83,6 +83,7 @@ fn rugp_navigation_prepares_only_one_layer_and_reuses_children() {
         let entries: Vec<_> = names.iter().map(|name| entry(name)).collect();
         let paths: Vec<_> = entries.iter().map(|entry| entry.name.clone()).collect();
         Arc::new(MountedArchive {
+            filesystem: false,
             path: dir.0.join("graph"),
             source_path: dir.0.join("graph"),
             references: entries
@@ -236,6 +237,7 @@ fn reference_exports_visit_shared_cycles_once_and_honor_cancellation() {
     let dir = directory();
     let entries = vec![entry("root")];
     let archive = MountedArchive {
+        filesystem: false,
         path: dir.0.join("graph"),
         source_path: dir.0.join("graph"),
         entries: entries.clone().into(),

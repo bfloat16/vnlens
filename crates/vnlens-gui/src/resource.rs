@@ -155,11 +155,11 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
         resource.bytes = target.read(false, cancel)?.into();
         Arc::new(resource.bytes.clone()) as Arc<dyn vnlens_io::ReadAt>
     };
-    let mut header = [0; 64];
-    let size = usize::try_from(source.len().min(header.len() as u64))?;
+    let size = usize::try_from(source.len().min(target.resource_header_len() as u64))?;
+    let mut header = vec![0; size];
     let mut reader = source.clone().reader(cancel.clone())?;
-    std::io::Read::read_exact(&mut reader, &mut header[..size])?;
-    resource.route = target.resource_route(&header[..size])?;
+    std::io::Read::read_exact(&mut reader, &mut header)?;
+    resource.route = target.resource_route(&header)?;
     if let ResourceRoute::Media { audio, video } = resource.route {
         resource.route = if vnlens_video::contains_video(source.clone(), cancel.clone())? {
             ResourceRoute::Video(video)

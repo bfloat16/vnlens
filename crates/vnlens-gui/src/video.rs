@@ -39,7 +39,8 @@ struct Pictures {
 /// next queue operation.
 pub struct Decoder {
     pub meta: VideoMeta,
-    seeks: Sender<(u64, f64)>,
+    seeks: Sender<(u64, f64, Arc<AtomicBool>)>,
+    seek_cancel: Arc<AtomicBool>,
     pictures: Arc<Pictures>,
     /// Incremented per seek so pictures decoded before it are discarded.
     generation: u64,
@@ -88,6 +89,7 @@ impl Decoder {
         Ok(meta.map(|meta| Self {
             meta,
             seeks,
+            seek_cancel: Arc::new(AtomicBool::new(false)),
             pictures,
             generation: 0,
             cancelled,
@@ -95,11 +97,15 @@ impl Decoder {
     }
 
     pub fn seek(&mut self, seconds: f64) {
+        self.seek_cancel.store(true, Ordering::Release);
+        self.seek_cancel = Arc::new(AtomicBool::new(false));
         self.generation = self.generation.wrapping_add(1);
         if let Ok(mut messages) = self.pictures.messages.lock() {
             messages.clear();
         }
-        let _ = self.seeks.send((self.generation, seconds));
+        let _ = self
+            .seeks
+            .send((self.generation, seconds, self.seek_cancel.clone()));
         self.pictures.changed.notify_one();
     }
 
@@ -125,6 +131,7 @@ impl Decoder {
 }
 impl Drop for Decoder {
     fn drop(&mut self) {
+        self.seek_cancel.store(true, Ordering::Release);
         self.cancelled.store(true, Ordering::Relaxed);
         self.pictures.changed.notify_one();
     }
@@ -132,7 +139,7 @@ impl Drop for Decoder {
 
 fn run(
     video: &mut Video,
-    seeks: &Receiver<(u64, f64)>,
+    seeks: &Receiver<(u64, f64, Arc<AtomicBool>)>,
     pictures: &Pictures,
     cancelled: &AtomicBool,
 ) {
@@ -157,7 +164,10 @@ fn run(
             } else {
                 return;
             }
-            if let Err(error) = video.seek(seek.1) {
+            if let Err(error) = video.seek_cancellable(seek.1, &seek.2) {
+                if seek.2.load(Ordering::Acquire) {
+                    continue;
+                }
                 ended = true;
                 if let Ok(mut messages) = pictures.messages.lock() {
                     messages.push_back(Message::Error(generation, format!("Video seek: {error}")));

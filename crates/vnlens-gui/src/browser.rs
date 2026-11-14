@@ -31,15 +31,72 @@ pub enum Target {
 }
 
 impl Target {
-    pub fn set_compose_pimg(&self, enabled: bool) {
+    fn game(&self) -> Option<&Arc<vnlens_engine::Identification>> {
         match self {
             Self::Directory(_, game) | Self::File(_, game) | Self::ArchiveSet(_, game) => {
-                game.set_compose_pimg(enabled);
+                Some(game)
             }
             Self::ArchiveDirectory { archive, .. } | Self::Entry { archive, .. } => {
-                archive.game.set_compose_pimg(enabled);
+                Some(&archive.game)
             }
-            Self::Opened => {}
+            Self::Opened => None,
+        }
+    }
+    fn route_target(
+        &self,
+    ) -> Option<(
+        std::borrow::Cow<'_, str>,
+        ResourceOrigin,
+        &vnlens_engine::Identification,
+    )> {
+        match self {
+            Self::File(path, game) => Some((path.to_string_lossy(), ResourceOrigin::File, game)),
+            Self::Entry { archive, index } if !archive.psb_values.contains_key(index) => {
+                let entry = &archive.entries[*index];
+                let origin = ResourceOrigin::Entry(entry.kind);
+                // Choose the original or recovered name from index metadata
+                // first. A PSB header must not erase a selected PIMG image route.
+                let named = archive.game.resource_route(&entry.name, origin, &[]);
+                let name = if matches!(named, ResourceRoute::Other(_)) {
+                    &archive.paths[*index]
+                } else {
+                    &entry.name
+                };
+                Some((
+                    std::borrow::Cow::Borrowed(name.as_str()),
+                    origin,
+                    &archive.game,
+                ))
+            }
+            _ => None,
+        }
+    }
+    pub fn resource_header_len(&self) -> usize {
+        let Some((name, _, game)) = self.route_target() else {
+            return 0;
+        };
+        if name.rsplit(['/', '\\']).next().is_some_and(|leaf| {
+            leaf.rsplit_once('.')
+                .is_some_and(|(_, ext)| !ext.is_empty())
+        }) {
+            0
+        } else {
+            game.resource_header_len()
+        }
+    }
+    pub fn warning(&self) -> Option<&'static str> {
+        // Transport metadata identifies a filesystem host, not a failed game
+        // detector. Only a mounted directory's identification can warn about
+        // its actual game files; parent NSP/XCI/NCA folders stay neutral.
+        if self.is_filesystem() {
+            None
+        } else {
+            self.game().and_then(|game| game.warning())
+        }
+    }
+    pub fn set_compose_pimg(&self, enabled: bool) {
+        if let Some(game) = self.game() {
+            game.set_compose_pimg(enabled);
         }
     }
     pub fn same(&self, other: &Self) -> bool {
@@ -75,7 +132,16 @@ impl Target {
         matches!(
             self,
             Self::Opened | Self::Directory(..) | Self::ArchiveDirectory { .. }
-        )
+        ) || self.is_filesystem()
+    }
+    fn is_filesystem(&self) -> bool {
+        match self {
+            Self::ArchiveDirectory { archive, .. } => archive.filesystem,
+            Self::File(..) | Self::Entry { .. } => {
+                matches!(self.resource_route(&[]), Ok(ResourceRoute::Archive(route)) if route.tag.starts_with("ns/"))
+            }
+            _ => false,
+        }
     }
     pub fn name(&self) -> String {
         match self {
@@ -119,31 +185,15 @@ impl Target {
     /// supply a route only when the stored name has no known format.
     /// Classification never reads payloads; callers supply a prefix on access.
     pub fn resource_route(&self, header: &[u8]) -> Result<ResourceRoute> {
-        match self {
-            Self::File(path, game) => {
-                Ok(game.resource_route(&path.to_string_lossy(), ResourceOrigin::File, header))
-            }
-            Self::Entry { archive, index } => {
-                if archive.psb_values.contains_key(index) {
-                    return Ok(ResourceRoute::Other(ResourceKind::Data));
-                }
-                let entry = &archive.entries[*index];
-                let origin = ResourceOrigin::Entry(entry.kind);
-                // Choose the original or recovered name from index metadata
-                // first. A PSB header must not erase a selected PIMG image route.
-                let named = archive.game.resource_route(&entry.name, origin, &[]);
-                if matches!(named, ResourceRoute::Other(_)) && archive.paths[*index] != entry.name {
-                    Ok(archive
-                        .game
-                        .resource_route(&archive.paths[*index], origin, header))
-                } else {
-                    Ok(archive.game.resource_route(&entry.name, origin, header))
-                }
-            }
-            _ => Err(anyhow!(
-                "Resource routing requires an identified file or entry"
-            )),
+        if let Self::Entry { archive, index } = self
+            && archive.psb_values.contains_key(index)
+        {
+            return Ok(ResourceRoute::Other(ResourceKind::Data));
         }
+        let (name, origin, game) = self
+            .route_target()
+            .ok_or_else(|| anyhow!("Resource routing requires an identified file or entry"))?;
+        Ok(game.resource_route(&name, origin, header))
     }
     fn video_source(&self, raw: bool) -> Result<Option<Arc<dyn vnlens_io::ReadAt>>> {
         let Self::File(path, game) = self else {
@@ -255,10 +305,18 @@ impl Item {
         Self::from_path_cancellable(path, &AtomicBool::new(false), &|_, _| {})
     }
     pub fn from_path_cancellable(
-        path: PathBuf,
+        mut path: PathBuf,
         cancel: &AtomicBool,
         progress: &(dyn Fn(u64, u64) + Sync),
     ) -> Result<Self> {
+        if is_ns_package(&path)
+            && let Some(directory) = path.parent()
+        {
+            let applications = vnlens_archive::ns::application_paths(directory, cancel)?;
+            if let Some(base) = applications.get(&path) {
+                path = base.clone();
+            }
+        }
         let metadata =
             std::fs::metadata(&path).with_context(|| format!("Opening {}", path.display()))?;
         let game = Arc::new(
@@ -450,15 +508,30 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
                 .for_directory(path, cancel)
                 .with_context(|| format!("Identifying {}", path.display()))?;
             let mut items = Vec::new();
-            for entry in game
+            let entries = game
                 .files
                 .read_dir(path)
-                .with_context(|| format!("Listing {}", path.display()))?
+                .with_context(|| format!("Listing {}", path.display()))?;
+            let applications = if entries
+                .iter()
+                .any(|entry| !entry.metadata.directory && is_ns_package(&entry.path))
+                && path.is_dir()
             {
+                vnlens_archive::ns::application_paths(path, cancel)?
+            } else {
+                Default::default()
+            };
+            for entry in entries {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(vnlens_core::Error::Cancelled.into());
                 }
                 let metadata = entry.metadata;
+                if applications
+                    .get(&entry.path)
+                    .is_some_and(|base| base != &entry.path)
+                {
+                    continue;
+                }
                 let target = if metadata.directory {
                     Target::Directory(entry.path, game.clone())
                 } else {
@@ -505,11 +578,12 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
                     .open_references(*index, virtual_paths)?
                     .map(|archive| Folder::archive(archive, 0))
             } else {
+                let initial = target.resource_route(&[])?;
                 if archive.psb_values.contains_key(index)
-                    || (!matches!(
-                        target.resource_route(&[])?,
-                        ResourceRoute::Archive(_) | ResourceRoute::Other(_)
-                    ) && !archive.game.supports_psb())
+                    || (!matches!(initial, ResourceRoute::Archive(_))
+                        && (target.resource_header_len() == 0
+                            || (!matches!(initial, ResourceRoute::Other(_))
+                                && !archive.game.supports_psb())))
                 {
                     return Ok(None);
                 }
@@ -523,7 +597,9 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
                         .entries()
                         .get(*index)
                         .ok_or_else(|| anyhow!("Selected entry no longer exists"))?;
-                    opened.archive.open_entry_source(entry)?
+                    opened
+                        .archive
+                        .open_entry_source_cancellable(entry, cancel)?
                 };
                 let source = if let Some(source) = source {
                     source
@@ -531,25 +607,46 @@ pub fn open(target: &Target, cancel: &AtomicBool, virtual_paths: bool) -> Result
                     let bytes: Arc<[u8]> = target.read(false, cancel)?.into();
                     Arc::new(bytes) as Arc<dyn vnlens_io::ReadAt>
                 };
-                let header = source.read_at(0, usize::try_from(source.len().min(64))?)?;
+                let header = source.read_at(
+                    0,
+                    usize::try_from(source.len().min(target.resource_header_len() as u64))?,
+                )?;
                 let ResourceRoute::Archive(route) = target.resource_route(&header)? else {
                     return Ok(None);
                 };
-                let archive = MountedArchive::open_nested_source(
+                let mut nested = MountedArchive::open_nested_source(
                     &archive.paths[*index],
                     source,
                     &route,
                     virtual_paths,
                     archive.game.clone(),
                 )?;
-                Some(Folder::archive(Arc::new(archive), 0))
+                nested.source_path = archive.source_path.join(&archive.paths[*index]);
+                Some(Folder::archive(Arc::new(nested), 0))
             }
         }
     };
+    if let Some(Folder {
+        target: Target::ArchiveDirectory {
+            archive,
+            directory: 0,
+        },
+        ..
+    }) = &folder
+        && let Some(target) = archive.filesystem_target(cancel)?
+    {
+        return open(&target, cancel, virtual_paths);
+    }
     if let Some(folder) = &mut folder {
         folder.prepare_references(cancel, virtual_paths)?;
     }
     Ok(folder)
+}
+
+fn is_ns_package(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("xci") || extension.eq_ignore_ascii_case("nsp")
+    })
 }
 
 /// Expands selected folders iteratively only for an explicit export request.
@@ -582,7 +679,7 @@ pub fn export(
             }
             _ => false,
         });
-        if same_archive {
+        if same_archive && items.iter().all(|item| !item.target.is_filesystem()) {
             return archive::extract(archive, &indices, output, raw, cancel, report);
         }
     }
@@ -625,25 +722,27 @@ pub fn export(
                 };
                 Step::Visit(Target::File(path.clone(), game.clone()), relative)
             }));
-        } else if let Target::Directory(path, game) = &target {
-            let canonical = match game.files.canonicalize(path) {
-                Ok(path) => path,
-                Err(error) => {
+        } else if matches!(target, Target::Directory(..)) || target.is_filesystem() {
+            if let Target::Directory(path, game) = &target {
+                let canonical = match game.files.canonicalize(path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        progress.failed += 1;
+                        progress.completed += 1;
+                        progress.total += 1;
+                        report(progress, Some(format!("{name}: {error}")));
+                        continue;
+                    }
+                };
+                if !seen.insert(canonical.clone()) {
                     progress.failed += 1;
                     progress.completed += 1;
                     progress.total += 1;
-                    report(progress, Some(format!("{name}: {error}")));
+                    report(progress, Some(format!("{name}: directory link cycle")));
                     continue;
                 }
-            };
-            if !seen.insert(canonical.clone()) {
-                progress.failed += 1;
-                progress.completed += 1;
-                progress.total += 1;
-                report(progress, Some(format!("{name}: directory link cycle")));
-                continue;
+                pending.push(Step::Leave(canonical));
             }
-            pending.push(Step::Leave(canonical));
             match open(&target, cancel, false) {
                 Ok(Some(folder)) => pending.extend(
                     folder

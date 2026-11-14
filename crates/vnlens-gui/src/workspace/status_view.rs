@@ -6,6 +6,18 @@ use super::*;
 use crate::icons::glyph;
 
 impl Workspace {
+    fn routing_warning(&self) -> Option<&'static str> {
+        self.columns
+            .iter()
+            .rev()
+            .find(|column| {
+                !column.loading && !column.failed && !matches!(column.folder.target, Target::Opened)
+            })
+            .map(|column| &column.folder.target)
+            .or_else(|| self.selected_item().map(|item| &item.target))
+            .and_then(Target::warning)
+    }
+
     pub(super) fn status_dock(
         &self,
         inset: Pixels,
@@ -20,6 +32,7 @@ impl Workspace {
             || self.converting
             || self.columns.iter().any(|column| column.loading);
         let failed = !self.errors.is_empty();
+        let warning = self.routing_warning();
         let progress = self.activity_progress();
         div()
             .absolute()
@@ -58,10 +71,12 @@ impl Workspace {
                                 }
                             } else if failed {
                                 glyph("icons/alert.svg", 16., DANGER).into_any_element()
+                            } else if warning.is_some() {
+                                glyph("icons/alert.svg", 16., WARNING).into_any_element()
                             } else {
                                 glyph("icons/check.svg", 16., SUCCESS).into_any_element()
                             })
-                            .when(busy && failed, |tile| {
+                            .when(busy && (failed || warning.is_some()), |tile| {
                                 tile.child(
                                     div()
                                         .absolute()
@@ -69,7 +84,7 @@ impl Workspace {
                                         .right(px(4.))
                                         .size(px(5.))
                                         .rounded_full()
-                                        .bg(rgb(DANGER)),
+                                        .bg(rgb(if failed { DANGER } else { WARNING })),
                                 )
                             }),
                     )
@@ -111,6 +126,9 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(6.))
+            .when_some(self.routing_warning(), |view, warning| {
+                view.child(status_line(warning.into(), WARNING))
+            })
             .font_family(UI_FONT)
             .text_size(px(11.))
             .text_color(rgb(SECONDARY))
