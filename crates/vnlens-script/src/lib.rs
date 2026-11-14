@@ -15,6 +15,7 @@ mod kaleido;
 pub mod krkr;
 mod mages;
 mod middleware;
+mod otomate;
 mod propeller;
 mod reallive;
 pub mod rugp;
