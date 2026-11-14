@@ -9,6 +9,7 @@ mod emote;
 mod entisgls;
 mod escude;
 mod exhibit;
+mod gss;
 pub mod krkr;
 mod mages;
 pub mod ns;
