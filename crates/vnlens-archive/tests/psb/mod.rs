@@ -22,7 +22,7 @@ fn catalog_opens_standalone_psb_resources() {
         )
         .unwrap();
     assert_eq!(opened.format_tag, PsbContainer.tag());
-    assert_eq!(opened.archive.entries()[0].name, "resources/0000.bin");
+    assert_eq!(opened.archive.entries()[0].name, "resources/0000");
     assert_eq!(
         opened
             .archive

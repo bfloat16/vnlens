@@ -124,8 +124,15 @@ impl PsbFile {
                     } else {
                         "resources"
                     };
-                    let extension = encoding.as_ref().map_or("bin", media::Encoding::extension);
-                    let mut name = format!("{prefix}/{:04}.{extension}", resource.index);
+                    // Unnamed, untyped resources have no native suffix. A
+                    // fabricated .bin would hide their logical header from
+                    // suffix-first routing. Typed derived media keeps its
+                    // encoding's declared extension; native aliases stay exact.
+                    let mut name = format!("{prefix}/{:04}", resource.index);
+                    if let Some(encoding) = &encoding {
+                        name.push('.');
+                        name.push_str(encoding.extension());
+                    }
                     while !used.insert(name.clone()) {
                         name = format!("resources/{name}");
                     }
