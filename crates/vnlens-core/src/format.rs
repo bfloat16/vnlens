@@ -79,6 +79,23 @@ pub trait Archive: Send {
         Ok(None)
     }
 
+    /// Opens a logical source while allowing metadata discovery and patch
+    /// indexing to respond to cancellation before a streaming cursor exists.
+    fn open_entry_source_cancellable(
+        &self,
+        entry: &Entry,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<Arc<dyn vnlens_io::ReadAt>>> {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(crate::Error::Cancelled);
+        }
+        let source = self.open_entry_source(entry)?;
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(crate::Error::Cancelled);
+        }
+        Ok(source)
+    }
+
     /// Opens an entry's raw stored content when a format can expose it.
     ///
     /// The default preserves compatibility for formats without a distinct raw
