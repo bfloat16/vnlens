@@ -25,18 +25,27 @@ impl Format for Pna {
 }
 impl ImageFormat for Pna {
     fn metadata(&self, data: &[u8]) -> Result<Option<ImageMeta>> {
+        if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return crate::standard::Raster.metadata(data);
+        }
         if !(data.starts_with(b"PNAP") || data.starts_with(b"PNAS")) {
             return Ok(None);
         }
         Ok(Some(layer(data, 0)?.0))
     }
     fn frame_count(&self, data: &[u8]) -> Result<usize> {
+        if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return crate::standard::Raster.frame_count(data);
+        }
         Ok(layers(data)?.len())
     }
     fn decode(&self, data: &[u8]) -> Result<Image> {
         self.decode_frame(data, 0)
     }
     fn decode_frame(&self, data: &[u8], frame: usize) -> Result<Image> {
+        if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return crate::standard::Raster.decode_frame(data, frame);
+        }
         let (meta, payload) = layer(data, frame)?;
         if !payload.starts_with(b"\x89PNG\r\n\x1a\n") {
             return Err(Error::InvalidFormat);

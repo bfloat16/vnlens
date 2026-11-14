@@ -48,3 +48,16 @@ fn skips_group_records_preserves_offsets_and_unpremultiplies_selected_layer() {
     let straight = Pna.decode(&fixture(b"PNAS")).unwrap();
     assert!(matches!(straight.pixels, PixelBuffer::Rgba8(p) if p == [30,20,10,128]));
 }
+
+#[test]
+fn ordinary_png_mos_uses_the_registered_will_reader() -> Result<()> {
+    let container = fixture(b"PNAS");
+    let (_, png) = layer(&container, 0)?;
+    assert_eq!(Pna.frame_count(png)?, 1);
+    let image = Pna.decode(png)?;
+    assert_eq!(Pna.metadata(png)?, Some(image.meta));
+    assert!(matches!(image.pixels, PixelBuffer::Rgba8(p) if p == [30, 20, 10, 128]));
+    assert!(Pna.decode_frame(png, 1).is_err());
+    assert!(Pna.decode(&png[..8]).is_err());
+    Ok(())
+}
