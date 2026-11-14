@@ -64,9 +64,9 @@
 
 | 类型 | 格式 |
 | --- | --- |
-| 封包 | `.psb`、`.m`、`.bin`、`.mdf`、`.mzs`、`.psz` |
-| 音频 | `.xwma` |
-| 图片 | `.dds` |
+| 封包 | `<PSB / E-mote / M2>` |
+| 音频 | `<PSB / E-mote / M2>` |
+| 图片 | `<PSB / E-mote / M2>` |
 | 脚本 | `.nut`、`.scn`、`.ks` |
 | 视频 | `.webm`、`<ffmpeg>` |
 
@@ -74,7 +74,7 @@
 
 | 类型 | 格式 |
 | --- | --- |
-| 封包 | `.xp3`、`.psb`、`.m`、`.mdf`、`.mzs`、`.psz`、`.scn` |
+| 封包 | `.xp3`、`.scn`、`<PSB / E-mote / M2>` |
 | 音频 | `.ogg`、`.opus` |
 | 图片 | `.png`、`.tlg`、`.tlg5`、`.tlg6`、`.pimg` |
 | 脚本 | `.tjs`、`.ks`、`.asd` |
@@ -84,7 +84,7 @@
 
 | 类型 | 格式 |
 | --- | --- |
-| 封包 | `.xp3`、`.psb`、`.m`、`.mdf`、`.mzs`、`.psz`、`.scn` |
+| 封包 | `.xp3`、`.scn`、`<PSB / E-mote / M2>` |
 | 音频 | `.ogg`、`.opus` |
 | 图片 | `.png`、`.tlg`、`.tlg5`、`.tlg6`、`.pimg` |
 | 脚本 | `.tjs`、`.ks` |
@@ -100,6 +100,26 @@
 | 脚本 | `.scx`、`.msb` |
 | 视频 | `<ffmpeg>` |
 
+## Nintendo Switch Filesystem
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.xci`、`.nsp`、`.nca`、`.pfs0`、`.hfs0`、`.romfs`、`head("PFS0")`、`head("HFS0")` |
+| 音频 | — |
+| 图片 | — |
+| 脚本 | — |
+| 视频 | — |
+
+## Otomate
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.cl3`、`head("CL3L")`、`head("CL3B")`、`<CRIWARE>` |
+| 音频 | `<CRIWARE>` |
+| 图片 | `.tid`、`head("TID")` |
+| 脚本 | `.dat`、`.stcm2`、`head("STCM2")` |
+| 视频 | `<CRIWARE>`、`<ffmpeg>` |
+
 ## Propeller
 
 | 类型 | 格式 |
@@ -108,7 +128,7 @@
 | 音频 | `.ogv`、`.wav` |
 | 图片 | `.mgr` |
 | 脚本 | `.msc` |
-| 视频 | `.mpk` |
+| 视频 | `<ffmpeg>` |
 
 ## RealLive
 
@@ -181,6 +201,16 @@
 | 视频 | `.ymv`、`<ffmpeg>` |
 
 # 中间件
+
+## CRIWARE
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.cpk`、`.pck`、`.acb`、`.awb`、`.afs2`、`.utf`、`head("CPK ")`、`head("AFS2")`、`head("@UTF")` |
+| 音频 | `.hca`、`.adx` |
+| 图片 | — |
+| 脚本 | — |
+| 视频 | `.usm` |
 
 ## PSB / E-mote / M2
 
