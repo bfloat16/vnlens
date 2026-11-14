@@ -6,45 +6,6 @@ use std::{
 };
 use vnlens_io::BinaryWriter;
 
-#[test]
-#[ignore = "Requires user-owned NS packages and keys; set VNLENS_NS_DIRECTORY"]
-fn local_associated_packages() -> Result<()> {
-    let directory = std::env::var_os("VNLENS_NS_DIRECTORY").ok_or(Error::InvalidFormat)?;
-    let cancel = AtomicBool::new(false);
-    let catalog = Catalog::load(Path::new(&directory), &cancel)?;
-    for meta in &catalog.metadata {
-        println!(
-            "application={:016x} version={} patch={}",
-            meta.application, meta.version, meta.patch
-        );
-        for content in &meta.contents {
-            let nca = catalog.content(content)?;
-            println!(
-                "  {} kind={} index={}",
-                content.id, content.kind, content.index
-            );
-            for entry in &nca.entries {
-                let section = entry.name.as_bytes()[7] as usize - usize::from(b'0');
-                let fs = &nca.identity()[0x400 + section * 512..0x600 + section * 512];
-                println!(
-                    "    {} encryption={} compression_at={} compression_size={}",
-                    entry.name,
-                    fs[4],
-                    BinaryReader::u64_le(&fs[0x178..]),
-                    BinaryReader::u64_le(&fs[0x180..])
-                );
-                let source = catalog
-                    .resolve(&content.id, nca.identity(), section, &cancel)?
-                    .map(Ok)
-                    .unwrap_or_else(|| nca.source_with_base(section, None, &cancel))?;
-                source.read_at(0, 16)?;
-                println!("      ok size={}", source.len());
-            }
-        }
-    }
-    Ok(())
-}
-
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {

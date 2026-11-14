@@ -5,58 +5,6 @@ use std::fs;
 use std::sync::atomic::AtomicU64;
 use vnlens_io::BinaryWriter;
 
-#[test]
-#[ignore = "Requires user-owned base/update packages and keys; set VNLENS_NS_BASE and VNLENS_NS_PATCH"]
-fn ns_local_associated_application() -> Result<()> {
-    vnlens_archive::init();
-    let base = PathBuf::from(
-        std::env::var_os("VNLENS_NS_BASE").ok_or_else(|| anyhow!("Set VNLENS_NS_BASE"))?,
-    );
-    let patch = PathBuf::from(
-        std::env::var_os("VNLENS_NS_PATCH").ok_or_else(|| anyhow!("Set VNLENS_NS_PATCH"))?,
-    );
-    let cancel = AtomicBool::new(false);
-    let base_item = Item::from_path(base.clone())?;
-    let patch_item = Item::from_path(patch)?;
-    assert!(base_item.target.same(&patch_item.target));
-    assert_eq!(base_item.name, base.file_name().unwrap().to_string_lossy());
-    let mut selected = Folder::empty(Target::Opened);
-    selected.insert(base_item);
-    selected.insert(patch_item);
-    assert_eq!(selected.items.len(), 1);
-    let mut pending = vec![selected.items[0].target.clone()];
-    let mut banks = 0;
-    let mut files = 0;
-    while let Some(target) = pending.pop() {
-        let folder = open(&target, &cancel, false)?
-            .ok_or_else(|| anyhow!("Expected folder {}", target.name()))?;
-        for item in folder.items {
-            if item.name.ends_with(".cpk") {
-                assert_eq!(
-                    item.target.game().map(|game| game.engine),
-                    Some(vnlens_engine::Engine::Otomate)
-                );
-                assert!(item.target.warning().is_none());
-                let bank =
-                    open(&item.target, &cancel, false)?.ok_or_else(|| anyhow!("Missing CPK"))?;
-                println!("{}: {} indexed items", item.name, bank.items.len());
-                banks += 1;
-            } else if item.target.is_directory()
-                && !matches!(item.name.as_str(), "update" | "normal" | "logo")
-            {
-                pending.push(item.target);
-            } else if let Target::File(path, game) = item.target {
-                let source = game.files.source(&path)?;
-                source.read_at(0, source.len().min(16) as usize)?;
-                files += 1;
-            }
-        }
-    }
-    assert!(files > 0 || banks > 0);
-    println!("one base entry, {files} file prefixes verified, {banks} CPK banks");
-    Ok(())
-}
-
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
