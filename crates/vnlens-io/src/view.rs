@@ -75,6 +75,15 @@ impl ArcView {
         }
     }
 
+    /// Opens a companion lazily through this view's filesystem. Unlike a
+    /// mapped view, a transformed virtual source does not materialize its body.
+    pub fn related_source(&self, path: &Path) -> Result<Arc<dyn crate::ReadAt>> {
+        match &self.files {
+            Some(files) => files.source(path),
+            None => Ok(Arc::new(Self::open(path)?)),
+        }
+    }
+
     /// Checks companion metadata without reading its contents.
     pub fn related_len(&self, path: &Path) -> Result<u64> {
         match &self.files {
