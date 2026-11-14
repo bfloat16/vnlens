@@ -2,6 +2,7 @@
 
 pub mod aes;
 pub mod blowfish;
+pub mod criware;
 pub mod csystem;
 pub mod enigma;
 pub mod escude;
