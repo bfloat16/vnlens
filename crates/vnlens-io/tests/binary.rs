@@ -3,6 +3,24 @@
 use super::*;
 
 #[test]
+fn msb_fields_and_variable_prefix_lookahead_keep_the_bit_cursor() -> std::io::Result<()> {
+    let mut writer = BitWriter::new(BitOrder::Msb);
+    writer.write_bits(0b101, 3)?;
+    writer.write_bits(0x12345678, 32)?;
+    let bytes = writer.into_bytes();
+    let mut reader = BitReader::new(&bytes, BitOrder::Msb);
+    assert_eq!(reader.peek_bits(3)?, 0b101);
+    assert_eq!(reader.peek_bits(2)?, 0b10);
+    assert_eq!(reader.read_bits(3)?, 0b101);
+    assert_eq!(reader.peek_bits(32)?, 0x12345678);
+    assert_eq!(reader.read_bits(32)?, 0x12345678);
+    assert_eq!(reader.peek_bits(0)?, 0);
+    assert!(reader.peek_bits(33).is_err());
+    assert!(reader.read_bits(6).is_err());
+    Ok(())
+}
+
+#[test]
 fn mfc_strings_and_bit_writes_keep_extended_widths() -> std::io::Result<()> {
     let mut bytes = vec![255, 255, 255, 0, 0, 0, 0];
     BinaryWriter::u32_le(3, &mut bytes[3..]);

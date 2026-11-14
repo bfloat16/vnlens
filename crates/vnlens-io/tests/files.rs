@@ -4,6 +4,41 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[test]
+fn isolated_filesystem_is_lazy_case_sensitive_and_never_reads_host_files() -> io::Result<()> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut files = FileSystem::isolated(root.clone());
+    assert!(files.read_dir(&root)?.is_empty());
+    assert!(files.metadata(&root)?.directory);
+    for name in ["A.bin", "a.bin", "folder/bad.bin"] {
+        files.insert(
+            root.join(name),
+            Arc::new(Counted {
+                bytes: vec![1],
+                calls: reads.clone(),
+                broken: true,
+            }),
+        )?;
+    }
+    let files = Arc::new(files);
+    assert_eq!(files.read_dir(&root)?.len(), 3);
+    assert_eq!(files.read_dir(&root.join("folder"))?.len(), 1);
+    for path in [
+        root.join("Cargo.toml"),
+        root.parent().unwrap_or(&root).join("Cargo.toml"),
+    ] {
+        assert!(!files.is_file(&path));
+        assert!(files.source(&path).is_err());
+        assert!(files.open(&path).is_err());
+        assert!(files.canonicalize(&path).is_err());
+    }
+    assert_eq!(reads.load(Ordering::Relaxed), 0);
+    assert!(files.read(&root.join("A.bin")).is_err());
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+
 struct Counted {
     bytes: Vec<u8>,
     calls: Arc<AtomicUsize>,

@@ -136,6 +136,16 @@ impl BitWriter {
         }
         Ok(())
     }
+    /// Writes a field most significant bit first in the selected byte bit order.
+    pub fn write_bits(&mut self, value: u32, count: u8) -> std::io::Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        if count > 32 {
+            return Err(BinaryIo::invalid_input("Bit field exceeds u32"));
+        }
+        self.write_bits_le(value.reverse_bits() >> (32 - count), count)
+    }
     #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         self.data
@@ -248,8 +258,9 @@ impl<'a> BitReader<'a> {
     pub fn read_bit(&mut self) -> std::io::Result<u8> {
         Ok(self.read_bits(1)? as u8)
     }
-    #[inline]
-    pub fn read_bits(&mut self, count: u8) -> std::io::Result<u32> {
+    /// Peeks a bounded field without consuming bits, including codec prefixes
+    /// whose actual code length is determined by the returned lookahead.
+    pub fn peek_bits(&mut self, count: u8) -> std::io::Result<u32> {
         if count > 32 {
             return Err(BinaryIo::invalid_input("Bit field exceeds u32"));
         }
@@ -258,8 +269,12 @@ impl<'a> BitReader<'a> {
                 return Err(BinaryIo::unexpected_eof("Truncated bitstream"));
             }
         }
+        Ok(((self.cache >> (self.available - count)) & ((1u64 << count) - 1)) as u32)
+    }
+    #[inline]
+    pub fn read_bits(&mut self, count: u8) -> std::io::Result<u32> {
+        let value = self.peek_bits(count)?;
         self.available -= count;
-        let value = (self.cache >> self.available) as u32;
         self.cache &= (1u64 << self.available) - 1;
         Ok(value)
     }
@@ -695,6 +710,11 @@ impl BinaryWriter {
     /// Writes a little-endian `u16` into the first two bytes of `out`.
     pub fn u16_le(value: u16, out: &mut [u8]) {
         out[..2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// Writes a big-endian 16-bit field into the first two output bytes.
+    pub fn u16_be(value: u16, out: &mut [u8]) {
+        out[..2].copy_from_slice(&value.to_be_bytes());
     }
 
     /// Writes a little-endian `u32` into the first four bytes of `out`.

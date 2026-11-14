@@ -26,11 +26,13 @@ struct Embedded {
 #[derive(Clone, Default)]
 pub struct FileSystem {
     embedded: BTreeMap<String, Arc<Embedded>>,
+    root: Option<PathBuf>,
 }
 impl std::fmt::Debug for FileSystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileSystem")
             .field("embedded_files", &self.embedded.len())
+            .field("virtual_root", &self.root)
             .finish()
     }
 }
@@ -42,10 +44,31 @@ fn key(path: &Path) -> String {
         .to_lowercase()
 }
 impl FileSystem {
+    /// Creates a case-sensitive virtual filesystem with no host-disk fallback.
+    /// Its root exists even when empty. Sources and metadata stay lazy.
+    #[must_use]
+    pub fn isolated(root: PathBuf) -> Self {
+        Self {
+            root: Some(root),
+            embedded: BTreeMap::new(),
+        }
+    }
+
+    fn key(&self, path: &Path) -> String {
+        if self.root.is_some() {
+            path.to_string_lossy()
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_owned()
+        } else {
+            key(path)
+        }
+    }
+
     /// Adds a virtual file using its original path. Duplicate virtual sources
     /// are ambiguous; a virtual file takes precedence over a disk copy.
     pub fn insert(&mut self, path: PathBuf, source: Arc<dyn ReadAt>) -> io::Result<()> {
-        let name = key(&path);
+        let name = self.key(&path);
         if self.embedded.contains_key(&name) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -63,7 +86,7 @@ impl FileSystem {
         Ok(())
     }
     pub fn metadata(&self, path: &Path) -> io::Result<FileMetadata> {
-        let name = key(path);
+        let name = self.key(path);
         if let Some(file) = self.embedded.get(&name) {
             return Ok(FileMetadata {
                 len: file.source.len(),
@@ -71,14 +94,24 @@ impl FileSystem {
             });
         }
         if self
-            .embedded
-            .keys()
-            .any(|file| file.starts_with(&format!("{name}/")))
+            .root
+            .as_ref()
+            .is_some_and(|root| self.key(root) == name)
+            || self
+                .embedded
+                .keys()
+                .any(|file| file.starts_with(&format!("{name}/")))
         {
             return Ok(FileMetadata {
                 len: 0,
                 directory: true,
             });
+        }
+        if self.root.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "File is absent from virtual filesystem",
+            ));
         }
         std::fs::metadata(path).map(|m| FileMetadata {
             len: m.len(),
@@ -97,8 +130,19 @@ impl FileSystem {
     /// Merges physical and virtual immediate children without reading payloads.
     pub fn read_dir(&self, path: &Path) -> io::Result<Vec<DirectoryEntry>> {
         let mut entries = BTreeMap::new();
-        match std::fs::read_dir(path) {
-            Ok(directory) => {
+        let physical = if self.root.is_some() {
+            if !self.is_dir(path) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Virtual directory does not exist",
+                ));
+            }
+            None
+        } else {
+            Some(std::fs::read_dir(path))
+        };
+        match physical {
+            Some(Ok(directory)) => {
                 for item in directory {
                     let item = item?;
                     let metadata = item.metadata()?;
@@ -114,10 +158,11 @@ impl FileSystem {
                     );
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound && self.is_dir(path) => {}
-            Err(e) => return Err(e),
+            Some(Err(e)) if e.kind() == io::ErrorKind::NotFound && self.is_dir(path) => {}
+            Some(Err(e)) => return Err(e),
+            None => {}
         }
-        let prefix = format!("{}/", key(path));
+        let prefix = format!("{}/", self.key(path));
         for (name, file) in &self.embedded {
             let Some(relative) = name.strip_prefix(&prefix) else {
                 continue;
@@ -134,15 +179,15 @@ impl FileSystem {
                 child = path.join(name);
             }
             let directory = depth > 1;
-            let normalized = key(&child);
+            let normalized = self.key(&child);
             if directory
                 && entries
                     .iter()
-                    .any(|(path, entry)| key(path) == normalized && entry.metadata.directory)
+                    .any(|(path, entry)| self.key(path) == normalized && entry.metadata.directory)
             {
                 continue;
             }
-            entries.retain(|path, _| key(path) != normalized);
+            entries.retain(|path, _| self.key(path) != normalized);
             entries.insert(
                 child.clone(),
                 DirectoryEntry {
@@ -158,15 +203,21 @@ impl FileSystem {
     }
     /// Opens a random-access source, preserving lazy transforms for video.
     pub fn source(self: &Arc<Self>, path: &Path) -> io::Result<Arc<dyn ReadAt>> {
-        if let Some(file) = self.embedded.get(&key(path)) {
+        if let Some(file) = self.embedded.get(&self.key(path)) {
             return Ok(file.source.clone());
+        }
+        if self.root.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "File is absent from virtual filesystem",
+            ));
         }
         Ok(Arc::new(ArcView::open(path)?.with_files(self.clone())))
     }
     /// Opens a contiguous view for archive and PE parsers. An embedded file's
     /// immutable bytes are retained only after this explicit access.
     pub fn open(self: &Arc<Self>, path: &Path) -> io::Result<ArcView> {
-        if let Some(file) = self.embedded.get(&key(path)) {
+        if let Some(file) = self.embedded.get(&self.key(path)) {
             let mut cached = file
                 .bytes
                 .lock()
@@ -181,6 +232,12 @@ impl FileSystem {
             };
             return Ok(ArcView::from_bytes(file.path.clone(), bytes).with_files(self.clone()));
         }
+        if self.root.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "File is absent from virtual filesystem",
+            ));
+        }
         Ok(ArcView::open(path)?.with_files(self.clone()))
     }
     pub fn read(self: &Arc<Self>, path: &Path) -> io::Result<Vec<u8>> {
@@ -191,11 +248,17 @@ impl FileSystem {
     }
     /// Virtual paths retain their installed name; physical paths resolve links.
     pub fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        if let Some(file) = self.embedded.get(&key(path)) {
+        if let Some(file) = self.embedded.get(&self.key(path)) {
             return Ok(file.path.clone());
         }
-        if self.is_dir(path) && !path.is_dir() {
+        if self.is_dir(path) && (self.root.is_some() || !path.is_dir()) {
             return Ok(path.to_path_buf());
+        }
+        if self.root.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Path is absent from virtual filesystem",
+            ));
         }
         path.canonicalize()
     }
