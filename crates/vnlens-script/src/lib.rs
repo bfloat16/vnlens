@@ -10,6 +10,7 @@ mod entisgls;
 pub mod escude;
 mod exhibit;
 mod format;
+mod gss;
 pub use vnlens_core::ir;
 mod kaleido;
 pub mod krkr;
