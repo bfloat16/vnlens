@@ -60,6 +60,16 @@
 | 脚本 | `.rld`、`.rnf`、`.ini` |
 | 视频 | `<ffmpeg>` |
 
+## GSS
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.bin`、`.arc` |
+| 音频 | `.opu`、`hex("01000080")` |
+| 图片 | `.png`、`hex("89504e470d0a1a0a")` |
+| 脚本 | `.obj`、`head("SCR 3.00")` |
+| 视频 | `<ffmpeg>` |
+
 ## Kaleido ADV Workshop
 
 | 类型 | 格式 |
