@@ -31,7 +31,7 @@ fn native_names_and_accessed_headers() {
             ResourceOrigin::Entry(ResourceKind::Unknown),
             b"\x89PNG\r\n\x1a\n"
         ),
-        ResourceRoute::Image("image/standard")
+        ResourceRoute::Image("pna/will")
     );
     assert_eq!(
         game.resource_route("arc", ResourceOrigin::File, &[]),

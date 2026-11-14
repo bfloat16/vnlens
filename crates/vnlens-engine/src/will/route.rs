@@ -3,16 +3,11 @@ use crate::routing::{Route, Router};
 use vnlens_core::{ArchiveRoute, ResourceRoute};
 
 pub(super) const ROUTER: Router = Router {
-    headerless,
     header,
     archive,
     extension,
     ..Router::NONE
 };
-
-fn headerless(route: &Route<'_>) -> Option<ResourceRoute> {
-    (route.ext == "ws2").then_some(ResourceRoute::Script("ws2/will"))
-}
 
 fn header(route: &Route<'_>) -> Option<ResourceRoute> {
     (route.header.starts_with(b"PNAP") || route.header.starts_with(b"PNAS"))
@@ -26,6 +21,7 @@ fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
 fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
     use ResourceRoute::{Image, Script};
     match route.ext {
+        "ws2" => Some(Script("ws2/will")),
         "pna" | "mos" => Some(Image("pna/will")),
         "json" => Some(Script("json/will")),
         _ => None,

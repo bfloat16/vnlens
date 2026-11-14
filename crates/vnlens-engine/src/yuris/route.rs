@@ -3,19 +3,18 @@ use crate::routing::{Route, Router};
 use vnlens_core::{ArchiveRoute, ResourceRoute};
 
 pub(super) const ROUTER: Router = Router {
-    headerless,
     header,
     archive,
     extension,
     ..Router::NONE
 };
 
-fn headerless(route: &Route<'_>) -> Option<ResourceRoute> {
-    (route.ext == "txt" && route.name.split('/').any(|part| part == "scenario"))
-        .then_some(ResourceRoute::Script("scenario/yuris"))
-}
-
 fn header(route: &Route<'_>) -> Option<ResourceRoute> {
+    if route.header.starts_with(b"YPF\0") {
+        return Some(ResourceRoute::Archive(Box::new(
+            route.archive_with("ypf/yuris"),
+        )));
+    }
     use ResourceRoute::{Image, Script, Video};
     match route.header.get(..4) {
         Some(b"YCG\0") => Some(Image("ycg/yuris")),
@@ -34,6 +33,9 @@ fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
 fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
     use ResourceRoute::{Image, Script, Video};
     match route.ext {
+        "txt" if route.name.split('/').any(|part| part == "scenario") => {
+            Some(Script("scenario/yuris"))
+        }
         "ycg" => Some(Image("ycg/yuris")),
         "ybn" => Some(Script("ybn/yuris")),
         "ymv" => Some(Video("ymv/yuris")),

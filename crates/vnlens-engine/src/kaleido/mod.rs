@@ -27,6 +27,7 @@ fn layout(context: &crate::context::Context) -> bool {
 
 vnlens_core::inventory::submit! {
     Detector {
+        file: crate::detect::no_container,
         engine: Engine::Kaleido,
         supersedes: None,
         subdirs: &["wind3d11data/movie", "wind3d11data"],

@@ -7,22 +7,12 @@ use std::{
 use vnlens_core::{ArchiveRoute, ResourceRoute};
 
 pub(super) const ROUTER: Router = Router {
-    headerless,
     header,
     archive,
     extension,
     archive_set,
     ..Router::NONE
 };
-
-fn headerless(route: &Route<'_>) -> Option<ResourceRoute> {
-    use ResourceRoute::Script;
-    match route.ext {
-        "spt" => Some(Script("spt/systemnnn")),
-        "fxf" => Some(Script("fxf/systemnnn")),
-        _ => None,
-    }
-}
 
 fn header(route: &Route<'_>) -> Option<ResourceRoute> {
     use ResourceRoute::{Audio, Image};
@@ -55,6 +45,8 @@ fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
 fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
     use ResourceRoute::{Audio, Image, Script};
     match route.ext {
+        "spt" => Some(Script("spt/systemnnn")),
+        "fxf" => Some(Script("fxf/systemnnn")),
         "dwq" => Some(Image("dwq/systemnnn")),
         "vaw" | "wgq" => Some(Audio("vaw/systemnnn")),
         "xtx" | "mml" => Some(Script("text/systemnnn")),

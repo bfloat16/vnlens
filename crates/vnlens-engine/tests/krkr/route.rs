@@ -97,10 +97,10 @@ fn compiled_scenarios_are_psb_containers_during_listing_and_access() {
                 game.resource_route("chapter.ks", origin, &[]),
                 ResourceRoute::Script("script/krkr")
             );
-            assert_eq!(
+            assert!(matches!(
                 game.resource_route("chapter.scn", origin, b"TJS2"),
-                ResourceRoute::Script("script/krkr")
-            );
+                ResourceRoute::Archive(route) if route.tag == "psb"
+            ));
         }
     }
     let mut unrelated = identified();

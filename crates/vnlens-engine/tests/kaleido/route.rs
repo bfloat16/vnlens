@@ -94,7 +94,7 @@ fn kaleido_encrypted_movies_and_plain_containers_use_distinct_routes() {
             ResourceOrigin::File,
             &[0x1a, 0x45, 0xdf, 0xa3]
         ),
-        ResourceRoute::Video("ffmpeg")
+        ResourceRoute::Video("webm/kaleido")
     );
     assert_eq!(
         game.resource_route("steinsgate_live_en.mp4", ResourceOrigin::File, &[]),

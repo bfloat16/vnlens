@@ -1,6 +1,6 @@
 use super::*;
 use crate::{Engine, Identification};
-use vnlens_core::{ArchiveOptions, ResourceKind, ResourceOrigin};
+use vnlens_core::{ArchiveOptions, ResourceOrigin};
 
 fn identified() -> Identification {
     Identification {
@@ -20,10 +20,10 @@ fn mages_routes_archives_scripts_and_excludes_mcf_containers() {
     assert!(
         matches!(game.resource_route("script.mpk", ResourceOrigin::File, &[]), ResourceRoute::Archive(route) if route.tag == "mpk/mages")
     );
-    assert_eq!(
+    assert!(matches!(
         game.resource_route("bonus.mpk", ResourceOrigin::File, b"mcfa"),
-        ResourceRoute::Other(ResourceKind::Archive)
-    );
+        ResourceRoute::Archive(route) if route.tag == "mpk/mages"
+    ));
     assert_eq!(
         game.resource_route("scene.scx", ResourceOrigin::File, &[]),
         ResourceRoute::Script("scx/mages")

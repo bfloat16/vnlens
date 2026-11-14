@@ -70,7 +70,7 @@ fn pe_strings_precede_layout_and_archive_bytes_are_not_evidence() {
         game.resource_route("Scripts.ypf", ResourceOrigin::File, &[]),
         ResourceRoute::Archive(_)
     ));
-    let movie = dir.0.join("op.dat");
+    let movie = dir.0.join("op");
     fs::write(
         &movie,
         b"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c",

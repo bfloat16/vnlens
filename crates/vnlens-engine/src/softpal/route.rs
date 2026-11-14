@@ -3,20 +3,20 @@ use crate::routing::{Route, Router};
 use vnlens_core::{ArchiveRoute, ResourceRoute};
 
 pub(super) const ROUTER: Router = Router {
-    headerless,
     header,
     archive,
     extension,
     ..Router::NONE
 };
 
-fn headerless(route: &Route<'_>) -> Option<ResourceRoute> {
-    (route.ext == "tga").then_some(ResourceRoute::Image("tga"))
-}
-
 fn header(route: &Route<'_>) -> Option<ResourceRoute> {
     use ResourceRoute::{Image, Script};
     let bytes = route.header;
+    if bytes.starts_with(b"PAC ") {
+        return Some(ResourceRoute::Archive(Box::new(
+            route.archive_with("pac/softpal"),
+        )));
+    }
     if bytes.starts_with(b"GE ") || bytes.starts_with(b"PGD3") {
         Some(Image("pgd/softpal"))
     } else if bytes.starts_with(b"Sv20")
@@ -39,6 +39,7 @@ fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
 fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
     use ResourceRoute::{Image, Script};
     match route.ext {
+        "tga" => Some(Image("tga")),
         "pgd" => Some(Image("pgd/softpal")),
         "src" | "csv" | "txt" | "ini" => Some(Script("script/softpal")),
         "dat"

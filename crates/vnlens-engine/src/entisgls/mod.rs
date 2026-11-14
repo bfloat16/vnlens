@@ -21,6 +21,7 @@ fn pe(image: &PeImage<'_>) -> Result<bool> {
 
 vnlens_core::inventory::submit! {
     Detector {
+        file: crate::detect::no_container,
         engine: Engine::EntisGls,
         supersedes: None,
         subdirs: &["system"],

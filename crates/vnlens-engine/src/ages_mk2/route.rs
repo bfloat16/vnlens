@@ -1,16 +1,29 @@
 //! AGES-MK2 archive routing and per-archive scramble key selection.
 use crate::routing::{Route, Router};
-use vnlens_core::ArchiveRoute;
+use vnlens_core::{ArchiveRoute, ResourceRoute};
 
 pub(super) const ROUTER: Router = Router {
+    header,
     archive,
     ..Router::NONE
 };
 
+fn header(route: &Route<'_>) -> Option<ResourceRoute> {
+    route
+        .header
+        .starts_with(b"FPD\0")
+        .then(|| fpd(route))
+        .flatten()
+        .map(|route| ResourceRoute::Archive(Box::new(route)))
+}
+
 fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
-    if !matches!(route.ext, "fpd" | "dat") {
-        return None;
-    }
+    matches!(route.ext, "fpd" | "dat")
+        .then(|| fpd(route))
+        .flatten()
+}
+
+fn fpd(route: &Route<'_>) -> Option<ArchiveRoute> {
     let key = if route
         .name
         .split('/')

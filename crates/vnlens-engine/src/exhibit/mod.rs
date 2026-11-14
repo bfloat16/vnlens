@@ -23,6 +23,7 @@ fn layout(context: &crate::context::Context) -> bool {
 
 vnlens_core::inventory::submit! {
     Detector {
+        file: crate::detect::no_container,
         engine: Engine::Exhibit,
         supersedes: None,
         subdirs: &["res", "rld", "dat"],

@@ -37,6 +37,10 @@ fn routes_archive_without_payload_and_rejects_foreign_formats() {
     vnlens_io::BinaryWriter::u32_le(0x03000100, &mut header[8..]);
     assert_eq!(
         game.resource_route("renamed.eri", ResourceOrigin::File, &header),
+        ResourceRoute::Image("eri/entisgls")
+    );
+    assert_eq!(
+        game.resource_route("renamed", ResourceOrigin::File, &header),
         ResourceRoute::Audio("mio/entisgls")
     );
 }

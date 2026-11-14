@@ -50,16 +50,16 @@ fn container_and_script_name_collisions_use_storage_context() {
         ),
         ResourceRoute::Script("script/escude")
     );
-    assert!(matches!(
+    assert_eq!(
         game.resource_route(
             "nested.bin",
             ResourceOrigin::Entry(ResourceKind::Unknown),
             b"ESC-ARC2"
         ),
-        ResourceRoute::Archive(_)
-    ));
-    assert_eq!(
-        game.resource_route("scene.bin", ResourceOrigin::File, b"acp\0"),
         ResourceRoute::Script("script/escude")
     );
+    assert!(matches!(
+        game.resource_route("scene.bin", ResourceOrigin::File, b"acp\0"),
+        ResourceRoute::Archive(route) if route.tag == "bin/escude"
+    ));
 }

@@ -19,7 +19,11 @@ pub(super) const ROUTER: Router = Router {
 
 fn header(route: &Route<'_>) -> Option<ResourceRoute> {
     use ResourceRoute::{Image, Script};
-    if route.header.starts_with(b"GYU\x1a") {
+    if route.header.starts_with(b"AiFS") {
+        Some(ResourceRoute::Archive(Box::new(
+            route.archive_with("grp/exhibit"),
+        )))
+    } else if route.header.starts_with(b"GYU\x1a") {
         Some(Image("gyu/exhibit"))
     } else if route.header.get(28..32) == Some(b"DLT\0") {
         Some(Image("dlt/exhibit"))

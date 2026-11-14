@@ -11,6 +11,9 @@ use vnlens_core::{ArchiveOptions, ResourceKind, ResourceOrigin, ResourceRoute};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
+    /// A recognized NS filesystem host; proprietary game formats still require
+    /// their own engine evidence and are never guessed from container payloads.
+    NintendoSwitch,
     Propeller,
     Rugp,
     Escude,
@@ -29,6 +32,7 @@ pub enum Engine {
     Krkr,
     KrkrzHxv4,
     Mages,
+    Otomate,
 }
 
 #[derive(Clone, Debug)]

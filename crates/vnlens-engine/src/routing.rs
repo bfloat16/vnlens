@@ -1,7 +1,7 @@
 //! Resource and archive routing within an already identified game. Names
 //! classify listings; only an explicitly opened resource supplies header bytes.
 //! Engine-specific rules live in each engine's `route` module; this module
-//! provides the six-stage dispatcher and generic standard format selectors.
+//! selects registered names before inspecting extensionless resource headers.
 
 use crate::Identification;
 use std::{
@@ -22,8 +22,6 @@ pub(crate) struct Route<'a> {
     pub header: &'a [u8],
     pub options: &'a ArchiveOptions,
     pub compose_pimg: bool,
-    pub(super) router: Option<&'static Router>,
-    pub(super) middleware: &'a [&'static Router],
 }
 
 impl Route<'_> {
@@ -33,13 +31,6 @@ impl Route<'_> {
             options: self.options.clone(),
         }
     }
-
-    pub(crate) fn archive(&self) -> Option<ArchiveRoute> {
-        self.middleware
-            .iter()
-            .find_map(|m| (m.archive)(self))
-            .or_else(|| self.router.and_then(|r| (r.archive)(self)))
-    }
 }
 
 pub(crate) type ArchiveSetFn =
@@ -47,7 +38,10 @@ pub(crate) type ArchiveSetFn =
 
 #[derive(Debug)]
 pub(crate) struct Router {
-    pub headerless: fn(&Route<'_>) -> Option<ResourceRoute>,
+    /// Filesystem hosts permit identity resolution in entered virtual folders.
+    pub filesystem_host: bool,
+    /// Prefix covering this router's actual signature locations.
+    pub header_size: usize,
     pub header: fn(&Route<'_>) -> Option<ResourceRoute>,
     pub entry: fn(&Route<'_>) -> Option<ResourceRoute>,
     pub archive: fn(&Route<'_>) -> Option<ArchiveRoute>,
@@ -57,7 +51,8 @@ pub(crate) struct Router {
 
 impl Router {
     pub const NONE: Self = Self {
-        headerless: |_| None,
+        filesystem_host: false,
+        header_size: 64,
         header: |_| None,
         entry: |_| None,
         archive: |_| None,
@@ -67,9 +62,22 @@ impl Router {
 }
 
 impl Identification {
+    /// Prefix length needed for extensionless resource signatures. Listings
+    /// still pass an empty header and never request these bytes.
+    #[must_use]
+    pub fn resource_header_len(&self) -> usize {
+        self.middleware
+            .iter()
+            .map(|m| m.header_size)
+            .chain(crate::detect::detector(self.engine).map(|d| d.route.header_size))
+            .max()
+            .unwrap_or(64)
+    }
+
     /// Selects one domain and format. An empty header performs metadata-only
-    /// classification. A supplied prefix is from the logical resource after
-    /// archive transformations, so an extracted Ogg/WAV retains its real route.
+    /// classification. Registered suffixes are authoritative, including when
+    /// bytes disagree. Only extensionless names use logical header bytes;
+    /// unknown suffixes stay unknown rather than probing unrelated decoders.
     #[must_use]
     pub fn resource_route(
         &self,
@@ -97,15 +105,27 @@ impl Identification {
             stored_ext,
             origin,
             hint,
-            header,
+            header: if ext.is_empty() { header } else { &[] },
             options: &self.options,
             compose_pimg: self.compose_pimg.load(std::sync::atomic::Ordering::Relaxed),
-            router,
-            middleware: &self.middleware,
         };
 
-        if let Some(matched) = router.and_then(|r| (r.headerless)(&route)) {
+        if let Some(archive) = router.and_then(|r| (r.archive)(&route)) {
+            return ResourceRoute::Archive(Box::new(archive));
+        }
+        if let Some(matched) = router.and_then(|r| (r.extension)(&route)) {
             return matched;
+        }
+        for middleware in &self.middleware {
+            if let Some(archive) = (middleware.archive)(&route) {
+                return ResourceRoute::Archive(Box::new(archive));
+            }
+            if let Some(matched) = (middleware.extension)(&route) {
+                return matched;
+            }
+        }
+        if !ext.is_empty() {
+            return standard_extension(ext, hint);
         }
         if let Some(matched) = router.and_then(|r| (r.header)(&route)) {
             return matched;
@@ -113,29 +133,34 @@ impl Identification {
         if let Some(matched) = self.middleware.iter().find_map(|m| (m.header)(&route)) {
             return matched;
         }
-        if let Some(matched) = standard_header(header) {
-            return matched;
-        }
         if let Some(matched) = router.and_then(|r| (r.entry)(&route)) {
             return matched;
         }
-        if let Some(archive) = route.archive() {
-            return ResourceRoute::Archive(Box::new(archive));
-        }
-        if let Some(matched) = router.and_then(|r| (r.extension)(&route)) {
+        if let Some(matched) = standard_header(header) {
             return matched;
         }
-        standard_extension(ext, hint)
+        ResourceRoute::Other(hint)
     }
 
     /// Opens only the selected disk file's prefix. Call on access, not while
     /// listing a directory. I/O failures are retained instead of changing routes.
     pub fn route_path(&self, path: &Path) -> Result<ResourceRoute> {
+        let name = path.to_string_lossy();
+        if path.extension().is_some_and(|ext| !ext.is_empty()) {
+            return Ok(self.resource_route(&name, ResourceOrigin::File, &[]));
+        }
         let source = self.files.source(path)?;
-        let header = source.read_at(0, source.len().min(64) as usize)?;
-        Ok(self.resource_route(&path.to_string_lossy(), ResourceOrigin::File, &header))
+        let header = source.read_at(
+            0,
+            source.len().min(self.resource_header_len() as u64) as usize,
+        )?;
+        Ok(self.resource_route(&name, ResourceOrigin::File, &header))
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/routing.rs"]
+mod tests;
 
 fn media() -> ResourceRoute {
     ResourceRoute::Media {

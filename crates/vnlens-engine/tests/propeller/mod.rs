@@ -68,7 +68,7 @@ fn propeller_requires_pe_evidence_and_routes_only_its_formats() {
     let game = identify(&dir.0, &cancel).unwrap().unwrap();
     assert_eq!(game.engine, Engine::Propeller);
     assert_eq!(archive_tag(&game, "BG.MPK"), "mpk/propeller");
-    let movie = dir.0.join("ma.mpk");
+    let movie = dir.0.join("ma");
     let mut header = [0; 12];
     BinaryWriter::u32_le(0xba01_0000, &mut header);
     fs::write(&movie, header).unwrap();

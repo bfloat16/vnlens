@@ -13,6 +13,11 @@ pub(super) const ROUTER: Router = Router {
 fn header(route: &Route<'_>) -> Option<ResourceRoute> {
     use ResourceRoute::{Audio, Image, Script};
     let bytes = route.header;
+    if bytes.starts_with(b"BURIKO ARC20") || bytes.starts_with(b"PackFile    ") {
+        return Some(ResourceRoute::Archive(Box::new(
+            route.archive_with("arc/bgi"),
+        )));
+    }
     if bytes.starts_with(b"CompressedBG___\0") || bitmap(bytes) {
         Some(Image("image/bgi"))
     } else if matches!(bytes.get(4..8), Some(b"bw  " | b"hw  ")) {

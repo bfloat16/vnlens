@@ -48,10 +48,10 @@ fn accessed_headers_resolve_extensionless_and_transformed_entries() {
         game.resource_route("000002", entry, b"BurikoCompiledScriptVer1.00\0"),
         ResourceRoute::Script("script/bgi")
     );
-    assert!(matches!(
+    assert_eq!(
         game.resource_route("voice.bw", entry, b"OggS"),
-        ResourceRoute::Media { .. }
-    ));
+        ResourceRoute::Audio("bw/bgi")
+    );
     assert_ne!(
         game.resource_route("0000", ResourceOrigin::File, b"BMP "),
         ResourceRoute::Image("dwq/systemnnn")

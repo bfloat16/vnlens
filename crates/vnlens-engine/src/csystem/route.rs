@@ -7,16 +7,19 @@ use std::{
 use vnlens_core::{ArchiveRoute, ResourceRoute};
 
 pub(super) const ROUTER: Router = Router {
-    headerless,
     archive,
     extension,
     archive_set,
     ..Router::NONE
 };
 
-/// These records have no magic. Their archive type byte is case-sensitive.
-fn headerless(route: &Route<'_>) -> Option<ResourceRoute> {
-    use ResourceRoute::{Image, Script};
+fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
+    (route.ext == "dat" && archive_name(route.name)).then(|| route.archive_with("dat/csystem"))
+}
+
+/// C,system records have no magic; their archive type byte is case-sensitive.
+fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
+    use ResourceRoute::{Audio, Image, Script, Video};
     let legacy = route.options.numbers.get("csystem_legacy") == Some(&1);
     Some(match route.stored_ext {
         "cimg" => Image("image/csystem"),
@@ -41,21 +44,12 @@ fn headerless(route: &Route<'_>) -> Option<ResourceRoute> {
         "v0" => Script("v0/csystem"),
         "c0" => Script("animation/csystem"),
         "i0" => Script("movie-path/csystem"),
-        _ => return None,
+        _ => match route.ext {
+            "j0" | "k0" | "u0" => Audio("audio/standard"),
+            "y0" => Video("ffmpeg"),
+            _ => return None,
+        },
     })
-}
-
-fn archive(route: &Route<'_>) -> Option<ArchiveRoute> {
-    (route.ext == "dat" && archive_name(route.name)).then(|| route.archive_with("dat/csystem"))
-}
-
-fn extension(route: &Route<'_>) -> Option<ResourceRoute> {
-    use ResourceRoute::{Audio, Video};
-    match route.ext {
-        "j0" | "k0" | "u0" => Some(Audio("audio/standard")),
-        "y0" => Some(Video("ffmpeg")),
-        _ => None,
-    }
 }
 
 fn archive_set(

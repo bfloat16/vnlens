@@ -33,8 +33,12 @@ fn native_names_and_headerless_priority_over_standard_magic() {
         game.resource_route("movie.mpk", ResourceOrigin::File, &[]),
         ResourceRoute::Archive(_)
     ));
-    assert_eq!(
+    assert!(matches!(
         game.resource_route("movie.mpk", ResourceOrigin::File, b"\0\0\x01\xba"),
+        ResourceRoute::Archive(route) if route.tag == "mpk/propeller"
+    ));
+    assert_eq!(
+        game.resource_route("movie", ResourceOrigin::File, b"\0\0\x01\xba"),
         ResourceRoute::Video("ffmpeg")
     );
     assert_eq!(

@@ -17,6 +17,7 @@ pub(crate) struct Detector {
     pub subdirs: &'static [&'static str],
     pub pe: fn(&PeImage<'_>) -> Result<bool>,
     pub layout: fn(&Context) -> bool,
+    pub file: fn(&vnlens_io::ArcView) -> Result<bool>,
     pub resolve: fn(&Context, &[PathBuf], &AtomicBool) -> Result<ArchiveOptions>,
     pub scope: fn(&Identification, &Path) -> Option<Identification>,
     pub route: Router,
@@ -50,6 +51,36 @@ pub fn identify_with_progress(
 ) -> Result<Option<Identification>> {
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
+    }
+    if path.is_file() {
+        let view = vnlens_io::ArcView::open(path)?;
+        let mut selected = None;
+        for item in vnlens_core::inventory::iter::<Detector>() {
+            if (item.file)(&view)? {
+                if selected.is_some() {
+                    return Err(Error::Unsupported(
+                        "Conflicting container identity evidence".into(),
+                    ));
+                }
+                selected = Some(item);
+            }
+        }
+        if let Some(item) = selected {
+            let context = Context {
+                root: path.canonicalize()?.parent().unwrap_or(path).to_path_buf(),
+                files: Default::default(),
+                sections: Default::default(),
+            };
+            return Ok(Some(Identification {
+                root: context.root.clone(),
+                engine: item.engine,
+                evidence: format!("Container identity in {}", path.display()),
+                options: (item.resolve)(&context, &[], cancelled)?,
+                files: context.files,
+                middleware: Vec::new(),
+                compose_pimg: Default::default(),
+            }));
+        }
     }
     let directory = (if path.is_dir() {
         path
@@ -89,6 +120,11 @@ impl Identification {
         if root == self.root {
             return Ok(self.clone());
         }
+        if detector(self.engine).is_some_and(|d| d.route.filesystem_host) {
+            return self
+                .for_filesystem(root, self.files.clone(), cancelled)
+                .map(std::sync::Arc::new);
+        }
         if let Some(scoped) = detector(self.engine).and_then(|d| (d.scope)(self, &root)) {
             return Ok(std::sync::Arc::new(scoped));
         }
@@ -124,7 +160,7 @@ impl Identification {
     }
 }
 
-fn identify_context(
+pub(crate) fn identify_context(
     mut context: Context,
     cancelled: &AtomicBool,
     progress: &(dyn Fn(u64, u64) + Sync),
@@ -344,6 +380,10 @@ pub(crate) fn has(pe: &PeImage<'_>, marker: &[u8]) -> Result<bool> {
 
 pub(crate) fn plain(_: &Context, _: &[PathBuf], _: &AtomicBool) -> Result<ArchiveOptions> {
     Ok(ArchiveOptions::default())
+}
+
+pub(crate) fn no_container(_: &vnlens_io::ArcView) -> Result<bool> {
+    Ok(false)
 }
 
 pub(crate) fn unscoped(_: &Identification, _: &Path) -> Option<Identification> {
