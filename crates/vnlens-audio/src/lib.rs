@@ -10,6 +10,7 @@ pub mod csystem;
 mod entisgls;
 mod ffmpeg;
 mod format;
+mod gss;
 pub mod levels;
 mod model;
 pub mod rugp;
