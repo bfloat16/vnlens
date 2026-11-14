@@ -12,6 +12,7 @@ mod emote;
 mod entisgls;
 mod escude;
 mod exhibit;
+mod gss;
 mod kaleido;
 mod krkr;
 mod krkrz_hxv4;

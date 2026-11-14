@@ -33,6 +33,7 @@ pub enum Engine {
     KrkrzHxv4,
     Mages,
     Otomate,
+    Gss,
 }
 
 #[derive(Clone, Debug)]
