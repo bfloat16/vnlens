@@ -11,6 +11,7 @@ mod exhibit;
 mod format;
 mod krkr;
 mod model;
+mod otomate;
 mod propeller;
 mod reallive;
 mod rugp;
