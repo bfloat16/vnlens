@@ -1,6 +1,7 @@
 //! Reusable middleware readers, independent of game routing and resource domains.
 #![forbid(unsafe_code)]
 
+pub mod criware;
 pub mod erisa;
 pub mod lua;
 pub mod mdf;
