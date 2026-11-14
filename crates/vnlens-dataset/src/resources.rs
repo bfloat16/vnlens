@@ -144,10 +144,7 @@ impl Resources {
             .to_string_lossy()
             .replace('\\', "/");
         let route = self.game.resource_route(&name, ResourceOrigin::File, &[]);
-        if matches!(route, ResourceRoute::Archive(_)) {
-            let ResourceRoute::Archive(route) = self.game.route_path(path)? else {
-                return Ok(());
-            };
+        if let ResourceRoute::Archive(route) = route {
             let opened = catalog.open_view(Arc::new(self.game.files.open(path)?), &route)?;
             let archive = self.archives.len();
             for (index, entry) in opened.archive.entries().iter().enumerate() {
@@ -239,32 +236,17 @@ impl Resources {
                 archive.open_entry_source(&archive.entries()[*index])?
             }
         };
-        let (logical_name, origin) = match &self.items[index].source {
-            Source::File(_) => (self.items[index].name.as_str(), ResourceOrigin::File),
-            Source::Entry { archive, index } => {
-                let entry = &self.archives[*archive].archive.entries()[*index];
-                (entry.name.as_str(), ResourceOrigin::Entry(entry.kind))
-            }
-        };
-        let validate = |bytes: &[u8]| -> Result<()> {
-            if bytes.is_empty() {
+        let validate = |empty: bool| -> Result<()> {
+            if empty {
                 return Err(Error::Corrupt {
                     offset: 0,
                     reason: "Voice resource is empty".into(),
                 });
             }
-            if !matches!(
-                self.game.resource_route(logical_name, origin, bytes),
-                ResourceRoute::Audio(_) | ResourceRoute::Media { .. }
-            ) {
-                return Err(Error::Unsupported(
-                    "Voice reference does not route to audio".into(),
-                ));
-            }
             Ok(())
         };
         let result = if let Some(source) = source {
-            validate(&source.read_at(0, source.len().min(64) as usize)?)?;
+            validate(source.is_empty())?;
             vnlens_io::filesystem::write_under_with(output, name, |file| {
                 let mut reader = source.reader(self.cancel.clone())?;
                 std::io::copy(&mut reader, file)?;
@@ -272,7 +254,7 @@ impl Resources {
             })
         } else {
             let bytes = self.read(index)?;
-            validate(&bytes)?;
+            validate(bytes.is_empty())?;
             check(&self.cancel)?;
             vnlens_io::filesystem::write_under(output, name, &bytes)
         };
