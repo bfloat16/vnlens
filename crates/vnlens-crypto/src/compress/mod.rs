@@ -9,6 +9,7 @@ pub mod csystem;
 pub mod enigma;
 pub mod erisa;
 pub mod exhibit;
+pub mod gss;
 pub mod lz4;
 pub mod lzf;
 pub mod lzss;
