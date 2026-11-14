@@ -164,7 +164,7 @@ fn fixture_scheme(version: u32, records: &[(&str, &[u8], u8)], scheme: ChecksumS
             ChecksumScheme::Crc32Adler32 => adler32::checksum(data),
         };
         BinaryWriter::u32_le(checksum, &mut record[at + 10 + width..]);
-        offset += data.len() as u64;
+        offset += data.len();
         bytes.extend(record);
     }
     for (_, data, _) in records {

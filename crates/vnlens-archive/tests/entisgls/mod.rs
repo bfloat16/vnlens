@@ -10,7 +10,7 @@ struct Reads {
 }
 impl ReadAt for Reads {
     fn len(&self) -> u64 {
-        self.bytes.len() as u64
+        self.bytes.as_ref().len() as u64
     }
     fn read_at(&self, at: u64, size: usize) -> io::Result<Cow<'_, [u8]>> {
         self.ranges

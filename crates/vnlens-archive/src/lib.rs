@@ -3,6 +3,7 @@
 
 mod ages_mk2;
 mod bgi;
+mod criware;
 mod csystem;
 mod emote;
 mod entisgls;
@@ -10,6 +11,8 @@ mod escude;
 mod exhibit;
 pub mod krkr;
 mod mages;
+pub mod ns;
+pub mod otomate;
 mod propeller;
 mod psb;
 mod reallive;
