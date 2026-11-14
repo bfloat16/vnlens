@@ -16,6 +16,18 @@ pub trait VideoDecoder: fmt::Debug {
     #[must_use]
     fn meta(&self) -> &VideoMeta;
     fn seek(&mut self, seconds: f64) -> Result<()>;
+    /// Cancels a superseded positioning operation without closing the cursor.
+    /// Formats that replay frames override this and check within that replay.
+    fn seek_cancellable(&mut self, seconds: f64, interrupt: &AtomicBool) -> Result<()> {
+        if interrupt.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        self.seek(seconds)?;
+        if interrupt.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        Ok(())
+    }
     fn next_picture(&mut self) -> Result<Option<Picture>>;
 }
 
@@ -115,14 +127,20 @@ impl Video {
     /// Repositions to the picture displayed at `seconds`. Standard containers
     /// seek through their own index; YSMV selects its independently coded frame.
     pub fn seek(&mut self, seconds: f64) -> Result<()> {
-        if self.cancelled.load(Ordering::Relaxed) {
+        self.seek_cancellable(seconds, &AtomicBool::new(false))
+    }
+
+    /// Repositions with a per-operation token, independent of whole-preview
+    /// cancellation. A newer seek may interrupt a long container replay.
+    pub fn seek_cancellable(&mut self, seconds: f64, interrupt: &AtomicBool) -> Result<()> {
+        if self.cancelled.load(Ordering::Relaxed) || interrupt.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
         if !seconds.is_finite() {
             return Err(BinaryIo::invalid_input("Video seek time must be finite").into());
         }
-        let result = self.decoder.seek(seconds);
-        if self.cancelled.load(Ordering::Relaxed) {
+        let result = self.decoder.seek_cancellable(seconds, interrupt);
+        if self.cancelled.load(Ordering::Relaxed) || interrupt.load(Ordering::Relaxed) {
             Err(Error::Cancelled)
         } else {
             result

@@ -19,7 +19,7 @@ use std::{
 use vnlens_core::{Error, Result};
 use vnlens_io::ReadAt;
 
-struct FfmpegAudioDecoder {
+pub(super) struct FfmpegAudioDecoder {
     input: Input,
     io: crate::input::IoState,
     decoder: decoder::Audio,
@@ -41,6 +41,22 @@ impl fmt::Debug for FfmpegAudioDecoder {
     }
 }
 impl FfmpegAudioDecoder {
+    /// Replays a fresh input cursor when its directed container cannot seek.
+    pub(super) fn replay_to(&mut self, seconds: f64, interrupt: &AtomicBool) -> Result<()> {
+        self.target = seconds.max(0.0);
+        loop {
+            if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            let Some(frame) = self.decode()? else {
+                return Ok(());
+            };
+            if let Some(frame) = trim_frame(frame, self.target) {
+                self.pending = Some(frame);
+                return Ok(());
+            }
+        }
+    }
     /// Opens a fresh input cursor. No complete audio track is materialized.
     pub fn open(
         source: Arc<dyn ReadAt>,
@@ -48,7 +64,11 @@ impl FfmpegAudioDecoder {
         cancelled: Arc<AtomicBool>,
     ) -> Result<Option<Self>> {
         let (input, io) = crate::input::open(source, name, cancelled)?;
-        let Some(stream) = input.streams().best(media::Type::Audio) else {
+        let Some(stream) = input
+            .streams()
+            .best(media::Type::Audio)
+            .filter(|stream| stream.parameters().id() != codec::Id::None)
+        else {
             return Ok(None);
         };
         let mut timeline = Timeline::new(&stream);
@@ -92,10 +112,16 @@ impl FfmpegAudioDecoder {
     }
 
     /// Seeks and discards PCM before the exact target, including codec preroll.
-    pub fn seek(&mut self, seconds: f64) -> Result<()> {
+    pub fn seek_cancellable(&mut self, seconds: f64, interrupt: &AtomicBool) -> Result<()> {
+        if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
         let seconds = seconds.max(0.);
         let mut lead = 0.;
         loop {
+            if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
             let start = seconds - lead;
             let timestamp = ((self.timeline.start + start) * f64::from(AV_TIME_BASE)) as i64;
             self.input
@@ -210,6 +236,7 @@ pub struct AudioDecoder {
 #[derive(Debug)]
 enum AudioKind {
     Ffmpeg(Box<FfmpegAudioDecoder>),
+    Criware(Box<crate::criware::UsmAudio>),
     Erisa(Box<ErisaAudio>),
 }
 struct ErisaAudio {
@@ -237,6 +264,13 @@ impl AudioDecoder {
         name: Option<&str>,
         cancel: Arc<AtomicBool>,
     ) -> Result<Option<Self>> {
+        if tag == "cri/usm" {
+            return crate::criware::UsmAudio::open(source, cancel).map(|audio| {
+                audio.map(|audio| Self {
+                    kind: AudioKind::Criware(Box::new(audio)),
+                })
+            });
+        }
         if tag != "mei/entisgls" {
             if tag != "ffmpeg"
                 && !vnlens_core::inventory::iter::<crate::VideoRegistration>()
@@ -280,17 +314,26 @@ impl AudioDecoder {
     pub fn meta(&self) -> &AudioStream {
         match &self.kind {
             AudioKind::Ffmpeg(s) => s.meta(),
+            AudioKind::Criware(s) => s.meta(),
             AudioKind::Erisa(s) => &s.meta,
         }
     }
     pub fn seek(&mut self, seconds: f64) -> Result<()> {
+        self.seek_cancellable(seconds, &AtomicBool::new(false))
+    }
+    /// Allows a newer transport request to interrupt a nonseekable replay.
+    pub fn seek_cancellable(&mut self, seconds: f64, interrupt: &AtomicBool) -> Result<()> {
+        if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
         if !seconds.is_finite() {
             return Err(
                 vnlens_io::BinaryIo::invalid_input("Audio seek time must be finite").into(),
             );
         }
         match &mut self.kind {
-            AudioKind::Ffmpeg(s) => s.seek(seconds),
+            AudioKind::Ffmpeg(s) => s.seek_cancellable(seconds, interrupt),
+            AudioKind::Criware(s) => s.seek_cancellable(seconds, interrupt),
             AudioKind::Erisa(s) => {
                 s.target = seconds.max(0.0);
                 let target = (s.target * f64::from(s.meta.sample_rate)) as u64;
@@ -310,6 +353,7 @@ impl AudioDecoder {
     pub fn next_frame(&mut self) -> Result<Option<AudioFrame>> {
         match &mut self.kind {
             AudioKind::Ffmpeg(s) => s.next_frame(),
+            AudioKind::Criware(s) => s.next_frame(),
             AudioKind::Erisa(s) => loop {
                 if s.cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return Err(Error::Cancelled);

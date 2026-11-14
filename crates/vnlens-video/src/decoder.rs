@@ -78,6 +78,47 @@ pub fn contains_video(source: Arc<dyn ReadAt>, cancelled: Arc<AtomicBool>) -> Re
 }
 
 impl FfmpegVideo {
+    /// Replays an explicitly clocked constant-rate format to a presentation
+    /// frame. Its owner supplies time; unreliable demuxer PTS are not used.
+    pub(super) fn replay_to_frame(&mut self, index: u64, interrupt: &AtomicBool) -> Result<()> {
+        self.held = false;
+        for _ in 0..=index {
+            if interrupt.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            if self.decode_frame()?.is_none() {
+                return Ok(());
+            }
+        }
+        self.held = true;
+        Ok(())
+    }
+
+    pub(super) fn next_picture_at(&mut self, time: f64) -> Result<Option<Picture>> {
+        if !std::mem::take(&mut self.held) && self.decode_frame()?.is_none() {
+            return Ok(None);
+        }
+        picture(&self.frame, &mut self.scaler, time)
+    }
+
+    /// Advances a freshly opened, nonseekable demuxer to the requested picture
+    /// without converting discarded frames. The retained frame is converted
+    /// only when next_picture requests it.
+    pub(super) fn replay_to(&mut self, seconds: f64, interrupt: &AtomicBool) -> Result<()> {
+        self.target = seconds.max(0.0);
+        loop {
+            if interrupt.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            match self.decode_frame()? {
+                Some(time) if time + self.period <= self.target + EPSILON => {}
+                frame => {
+                    self.held = frame.is_some();
+                    return Ok(());
+                }
+            }
+        }
+    }
     /// Opens the container and the decoders it needs. Returns `Ok(None)` when
     /// the container has no video stream, `Unsupported` when FFmpeg has no
     /// demuxer or decoder for it.
@@ -116,7 +157,7 @@ impl FfmpegVideo {
             frame_rate,
         };
         let audio = match input.streams().best(media::Type::Audio) {
-            Some(stream) => {
+            Some(stream) if stream.parameters().id() != codec::Id::None => {
                 let decoder = codec::Context::from_parameters(stream.parameters())
                     .map_err(error)?
                     .decoder()
@@ -128,7 +169,7 @@ impl FfmpegVideo {
                     sample_rate: decoder.rate(),
                 })
             }
-            None => None,
+            _ => None,
         };
         let meta = VideoMeta {
             container: input.format().name().to_owned(),

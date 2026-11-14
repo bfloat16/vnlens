@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod audio;
+mod criware;
 mod decoder;
 mod entisgls;
 mod input;
