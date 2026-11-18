@@ -10,6 +10,16 @@
 | 脚本 | `.epk` |
 | 视频 | — |
 
+## Artemis Engine
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.pfs`、`.pfs.000`、`head("pf8")` |
+| 音频 | `.ogg`、`.wav` |
+| 图片 | `.png`、`.jpg` |
+| 脚本 | `.ast`、`.asb`、`.iet`、`.ipt`、`.tbl`、`.ini`、`.sli`、`<Lua>` |
+| 视频 | `<ffmpeg>` |
+
 ## BGI / Ethornell
 
 | 类型 | 格式 |
@@ -120,6 +130,16 @@
 | 脚本 | — |
 | 视频 | — |
 
+## NScripter
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.nsa`、`.sar` |
+| 音频 | `.nbz`、`.mp3`、`.wav`、`.ogg` |
+| 图片 | `.bmp`、`.jpg`、`.png` |
+| 脚本 | `.dat`、`.zat`、`.txt` |
+| 视频 | `<ffmpeg>` |
+
 ## Otomate
 
 | 类型 | 格式 |
@@ -190,6 +210,17 @@
 | 脚本 | `.spt`、`.fxf`、`.xtx`、`.mml` |
 | 视频 | — |
 
+## Tamsoft
+
+| 类型 | 格式 |
+| --- | --- |
+| 封包 | `.cat`、`.semb`、`head("EMOJIPCK")` |
+| 音频 | `<CRIWARE>` |
+| 图片 | `.dds`、`head("DDS ")` |
+| 模型 | `.tmd`、`head("tmd0")` |
+| 脚本 | — |
+| 视频 | `<CRIWARE>` |
+
 ## WillPlus AdvHD
 
 | 类型 | 格式 |
@@ -208,7 +239,7 @@
 | 音频 | `.ogg`、`.wav` |
 | 图片 | `.ycg`、`.png`、`.jpg`、`.webp` |
 | 脚本 | `.ybn`、`.txt` |
-| 视频 | `.ymv`、`<ffmpeg>` |
+| 视频 | `.ymv`、`.ypf`、`<ffmpeg>` |
 
 # 中间件
 
