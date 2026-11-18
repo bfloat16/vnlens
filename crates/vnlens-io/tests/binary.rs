@@ -3,6 +3,47 @@
 use super::*;
 
 #[test]
+fn utf8_and_cesu8_preserve_supplementary_characters() -> std::io::Result<()> {
+    use std::borrow::Cow;
+    for text in ["", "日本語", "a😅𐀀\u{10ffff}\0z"] {
+        assert!(
+            matches!(BinaryReader::utf8_cesu8(text.as_bytes())?, Cow::Borrowed(value) if value == text)
+        );
+    }
+    for (encoded, expected) in [
+        (b"\xed\xa0\xbd\xed\xb8\x85".as_slice(), "😅"),
+        (b"\xed\xa0\x80\xed\xb0\x80".as_slice(), "𐀀"),
+        (b"\xed\xaf\xbf\xed\xbf\xbf".as_slice(), "\u{10ffff}"),
+    ] {
+        assert_eq!(BinaryReader::utf8_cesu8(encoded)?, expected);
+        for length in 1..encoded.len() {
+            assert_eq!(
+                BinaryReader::utf8_cesu8(&encoded[..length])
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+    }
+    let mut mixed = "日本語😅".as_bytes().to_vec();
+    mixed.extend(b"\xed\xa0\xbd\xed\xb8\x85\xed\xa0\x80\xed\xb0\x80!");
+    assert_eq!(BinaryReader::utf8_cesu8(&mixed)?, "日本語😅😅𐀀!");
+    for invalid in [
+        b"\xed\xb8\x85\xed\xa0\xbd".as_slice(),
+        b"\xed\xa0\xbdx\xed\xb8\x85".as_slice(),
+        b"\xed\xa0\xbd\xed\xa0\xbd".as_slice(),
+        b"\xed\xa0\xbd\xed\xb8\x85\xff".as_slice(),
+        b"\xc0\x80".as_slice(),
+        b"\xc1\xbf".as_slice(),
+        b"\xf4\x90\x80\x80".as_slice(),
+        b"\xe3\x81x".as_slice(),
+    ] {
+        assert!(BinaryReader::utf8_cesu8(invalid).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn msb_fields_and_variable_prefix_lookahead_keep_the_bit_cursor() -> std::io::Result<()> {
     let mut writer = BitWriter::new(BitOrder::Msb);
     writer.write_bits(0b101, 3)?;

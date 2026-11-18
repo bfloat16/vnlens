@@ -329,6 +329,53 @@ impl<'a> BitReader<'a> {
 }
 
 impl<'a> BinaryReader<'a> {
+    /// Decodes UTF-8 with CESU-8 surrogate pairs, borrowing plain UTF-8.
+    /// CESU-8 encodes each UTF-16 surrogate as a three-byte sequence. Only
+    /// complete high/low pairs are accepted; other invalid text returns
+    /// `InvalidData`. No replacement characters or modified-UTF-8 NULs are used.
+    pub fn utf8_cesu8(data: &'a [u8]) -> std::io::Result<std::borrow::Cow<'a, str>> {
+        let invalid =
+            || std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8/CESU-8 text");
+        let mut remaining = data;
+        let mut decoded = String::new();
+        loop {
+            match std::str::from_utf8(remaining) {
+                Ok(text) => {
+                    if decoded.is_empty() {
+                        return Ok(std::borrow::Cow::Borrowed(text));
+                    }
+                    decoded.push_str(text);
+                    return Ok(std::borrow::Cow::Owned(decoded));
+                }
+                Err(error) => {
+                    let (prefix, suffix) = remaining.split_at(error.valid_up_to());
+                    decoded.push_str(std::str::from_utf8(prefix).map_err(|_| invalid())?);
+                    let Some(
+                        [
+                            0xed,
+                            high @ 0xa0..=0xaf,
+                            high_tail @ 0x80..=0xbf,
+                            0xed,
+                            low @ 0xb0..=0xbf,
+                            low_tail @ 0x80..=0xbf,
+                        ],
+                    ) = suffix.get(..6)
+                    else {
+                        return Err(invalid());
+                    };
+                    let units = [
+                        0xd000 | (u16::from(high & 0x3f) << 6) | u16::from(high_tail & 0x3f),
+                        0xd000 | (u16::from(low & 0x3f) << 6) | u16::from(low_tail & 0x3f),
+                    ];
+                    for character in char::decode_utf16(units) {
+                        decoded.push(character.map_err(|_| invalid())?);
+                    }
+                    remaining = &suffix[6..];
+                }
+            }
+        }
+    }
+
     /// Borrows a checked byte range without maintaining a cursor.
     pub fn bytes_at(data: &'a [u8], offset: usize, size: usize) -> std::io::Result<&'a [u8]> {
         Self::new_at(data, offset)?.read_bytes(size)
