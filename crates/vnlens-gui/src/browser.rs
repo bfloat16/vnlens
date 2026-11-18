@@ -31,7 +31,7 @@ pub enum Target {
 }
 
 impl Target {
-    fn game(&self) -> Option<&Arc<vnlens_engine::Identification>> {
+    pub(crate) fn game(&self) -> Option<&Arc<vnlens_engine::Identification>> {
         match self {
             Self::Directory(_, game) | Self::File(_, game) | Self::ArchiveSet(_, game) => {
                 Some(game)
@@ -75,14 +75,7 @@ impl Target {
         let Some((name, _, game)) = self.route_target() else {
             return 0;
         };
-        if name.rsplit(['/', '\\']).next().is_some_and(|leaf| {
-            leaf.rsplit_once('.')
-                .is_some_and(|(_, ext)| !ext.is_empty())
-        }) {
-            0
-        } else {
-            game.resource_header_len()
-        }
+        game.resource_header_len_for(&name)
     }
     pub fn warning(&self) -> Option<&'static str> {
         // Transport metadata identifies a filesystem host, not a failed game

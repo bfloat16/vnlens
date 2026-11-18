@@ -5,6 +5,64 @@ use std::fs;
 use std::sync::atomic::AtomicU64;
 use vnlens_io::BinaryWriter;
 
+/// Set VNLENS_YURIS_DIR to the local 鏖呪ノ嶼 installation, then run
+/// cargo test -p vnlens-gui local_yuris_shared_ypf -- --ignored --nocapture.
+#[test]
+#[ignore = "Requires the local YU-RIS game; does not start the GUI"]
+fn local_yuris_shared_ypf_archives_and_movies() -> Result<()> {
+    let path = PathBuf::from(
+        std::env::var_os("VNLENS_YURIS_DIR").ok_or_else(|| anyhow!("Set VNLENS_YURIS_DIR"))?,
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    let game = Arc::new(
+        vnlens_engine::identify(&path, &cancel)?
+            .ok_or_else(|| anyhow!("Missing engine identity"))?,
+    );
+    assert_eq!(game.engine, vnlens_engine::Engine::Yuris);
+    vnlens_archive::init();
+    vnlens_video::init();
+    for name in ["bn", "cg", "cgsys", "se", "sn", "vo", "vof"] {
+        let target = Target::File(path.join("pac").join(format!("{name}.ypf")), game.clone());
+        let folder = open(&target, &cancel, false)?
+            .ok_or_else(|| anyhow!("Expected YPF archive: {name}"))?;
+        assert!(!folder.items.is_empty());
+        eprintln!("{name}.ypf: mounted archive");
+    }
+    for name in ["PV", "op", "ed1", "ed2"] {
+        let target = Target::File(path.join("pac").join(format!("{name}.ypf")), game.clone());
+        assert!(open(&target, &cancel, false)?.is_none());
+        let resource = crate::resource::read(&target, false, &cancel)?;
+        assert_eq!(resource.route, ResourceRoute::Video("ffmpeg"));
+        assert!(resource.bytes.is_empty());
+        let input = resource
+            .video
+            .ok_or_else(|| anyhow!("Missing movie source: {name}"))?;
+        let mut video = vnlens_video::Video::open_source_as(
+            input.tag,
+            input.source,
+            Some(&input.name),
+            cancel.clone(),
+        )?
+        .ok_or_else(|| anyhow!("Missing video stream: {name}"))?;
+        assert_eq!(video.meta().container, "asf");
+        let picture = video
+            .next_picture()?
+            .ok_or_else(|| anyhow!("Missing first frame: {name}"))?;
+        assert_eq!(
+            (picture.width, picture.height),
+            (video.meta().video.width, video.meta().video.height)
+        );
+        assert!(!picture.bgra.is_empty());
+        eprintln!(
+            "{name}.ypf: ASF video, {}x{}, {}",
+            picture.width,
+            picture.height,
+            video.meta().video.codec
+        );
+    }
+    Ok(())
+}
+
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
@@ -27,6 +85,32 @@ fn temp() -> Temp {
     fs::write(path.join("Script2.arc"), []).unwrap();
     fs::write(path.join("Graphic.arc"), []).unwrap();
     Temp(path)
+}
+
+#[test]
+fn header_priority_reaches_resource_preview_without_opening_a_gui() -> Result<()> {
+    let dir = temp();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut game =
+        vnlens_engine::identify(&dir.0, &cancel)?.ok_or_else(|| anyhow!("Missing fixture host"))?;
+    game.engine = vnlens_engine::Engine::Yuris;
+    let path = dir.0.join("ed2.ypf");
+    fs::write(
+        &path,
+        b"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c",
+    )?;
+    let target = Target::File(path, Arc::new(game));
+    assert!(target.resource_header_len() >= 16);
+    assert!(matches!(
+        target.resource_route(&[])?,
+        ResourceRoute::Archive(_)
+    ));
+    assert!(open(&target, &cancel, false)?.is_none());
+    let resource = crate::resource::read(&target, false, &cancel)?;
+    assert_eq!(resource.route, ResourceRoute::Video("ffmpeg"));
+    assert!(resource.video.is_some());
+    assert!(resource.bytes.is_empty());
+    Ok(())
 }
 fn fixture(name: &str, payload: &[u8]) -> Vec<u8> {
     let mut index = vec![0; 8];
