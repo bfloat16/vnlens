@@ -2,6 +2,8 @@
 //! descriptors; Hxv4 adds an out-of-line tag-prefix XChaCha20-Poly1305 table.
 //! Mounting reads only the standard and optional Hxv4 indices. Entry segments are inflated then filtered
 //! at their logical offsets and checked against the plaintext Adler-32.
+//! XP3's protection flag alone does not select encryption: SHIELD-9 Reboot's
+//! native 0x437700 calls the installed extraction filter independently of it.
 mod names;
 mod read;
 mod special;
@@ -96,6 +98,7 @@ struct Xp3Archive {
     names: BTreeMap<String, BTreeMap<(u64, u64), usize>>,
     filter: Option<Arc<Filter>>,
     xor31: bool,
+    cxdec: bool,
 }
 impl ArchiveFormat for Xp3 {
     fn open(&self, view: &Arc<ArcView>, options: &ArchiveOptions) -> Result<Box<dyn Archive>> {
@@ -123,7 +126,24 @@ impl Xp3Archive {
                 ));
             }
         };
-        let filter = if use_hxv4 {
+        let cxdec = match options.numbers.get("xp3_cxdec").copied().unwrap_or(0) {
+            0 => false,
+            1 if !use_hxv4 && !xor31 => true,
+            _ => {
+                return Err(Error::Unsupported(
+                    "Conflicting or invalid XP3 filter options".into(),
+                ));
+            }
+        };
+        let filter = if cxdec {
+            Some(Arc::new(
+                Filter::from_cxdec_params_and_table(
+                    key(options, "cxdec_params")?,
+                    key(options, "cxdec_table")?,
+                )
+                .map_err(|reason| Error::UnknownScheme(Some(reason)))?,
+            ))
+        } else if use_hxv4 {
             let nonce = fixed::<24>(key(options, "hxv4_nonce0")?)?;
             let table = fixed::<4096>(key(options, "hxv4_table")?)?;
             let words = table
@@ -218,11 +238,15 @@ impl Xp3Archive {
                 .remove(&(0, record.name.clone()))
                 .unwrap_or_default();
             record.filter = aliases.first().map(|binding| binding.filter);
-            // The protected warning node uses reserved id zero, no protection
-            // flag and a raw segment whose size differs from its fictitious
-            // info sizes. Recognize this index shape without reading its payload.
-            if has_hxv4
-                && record.name == "\u{5000}"
+            // Protection notices have fictitious info sizes and one raw
+            // segment. Hxv4 uses reserved id zero; ordinary protected XP3
+            // writes the warning into the filename. Neither is a game asset.
+            // Match the index shape without reading the notice payload.
+            if ((has_hxv4 && record.name == "\u{5000}")
+                || (record
+                    .name
+                    .starts_with("$$$ This is a protected archive. $$$ ")
+                    && record.name.ends_with(".txt")))
                 && record.flags == 0
                 && matches!(record.segments.as_slice(), [s] if !s.compressed && s.size != record.size)
             {
@@ -231,10 +255,10 @@ impl Xp3Archive {
             // The explicit startup.tjs boot stub is read before the filter is
             // installed. Its XP3 protection flag is set, but its bytes are plain;
             // the authenticated id-zero record names the virtual startup instead.
-            if record.flags & 0x8000_0000 != 0
+            if has_hxv4
+                && record.flags & 0x8000_0000 != 0
                 && record.filter.is_none()
-                && !xor31
-                && !(has_hxv4 && record.name.eq_ignore_ascii_case("startup.tjs"))
+                && !record.name.eq_ignore_ascii_case("startup.tjs")
             {
                 return Err(Error::UnknownScheme(Some(
                     "XP3 entry encryption was not resolved by the selected engine".into(),
@@ -242,6 +266,12 @@ impl Xp3Archive {
             }
             if xor31 && record.flags & 0x8000_0000 != 0 && record.adler.is_none() {
                 return Err(corrupt(position, "XP3 hash filter requires an adlr record"));
+            }
+            if cxdec && record.adler.is_none() {
+                return Err(corrupt(
+                    position,
+                    "XP3 Cxdec filter requires an adlr record",
+                ));
             }
             let mut size = 0u64;
             let mut stored = 0u64;
@@ -326,6 +356,7 @@ impl Xp3Archive {
             names,
             filter,
             xor31,
+            cxdec,
         })
     }
 }
@@ -425,6 +456,7 @@ impl Archive for Xp3Archive {
     fn open_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         let record = self.record(entry)?;
         if record.filter.is_none()
+            && !self.cxdec
             && !(self.xor31 && record.flags & 0x8000_0000 != 0)
             && let [s] = record.segments.as_slice()
             && !s.compressed

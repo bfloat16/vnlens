@@ -16,6 +16,7 @@ pub(super) struct Xp3Source {
     pub filter: Option<Arc<Filter>>,
     pub entry_filter: Option<(u64, u16)>,
     pub xor_hash: Option<u32>,
+    pub cxdec_hash: Option<u32>,
     pub checksum: Option<u32>,
     pub offset: u64,
 }
@@ -106,6 +107,7 @@ impl Read for Segments {
                 self.source.filter.as_deref(),
                 self.source.entry_filter,
                 self.source.xor_hash,
+                self.source.cxdec_hash,
                 self.position,
                 bytes,
             );
@@ -120,11 +122,14 @@ fn apply_filter(
     filter: Option<&Filter>,
     entry_filter: Option<(u64, u16)>,
     xor_hash: Option<u32>,
+    cxdec_hash: Option<u32>,
     offset: u64,
     bytes: &mut [u8],
 ) {
     if let (Some(filter), Some((key, flags))) = (filter, entry_filter) {
         filter.apply_entry(key, flags, offset, bytes);
+    } else if let (Some(filter), Some(hash)) = (filter, cxdec_hash) {
+        filter.apply_hash(hash, offset, bytes);
     } else if let Some(hash) = xor_hash {
         vnlens_crypto::cipher::xp3::xor31(hash, offset, bytes);
     }
@@ -139,6 +144,7 @@ impl Xp3Archive {
             self.filter.as_deref(),
             record.filter,
             xor_hash,
+            self.cxdec.then_some(record.adler).flatten(),
             offset,
             bytes,
         );
@@ -154,6 +160,7 @@ impl Xp3Archive {
             xor_hash: (self.xor31 && record.flags & 0x8000_0000 != 0)
                 .then_some(record.adler)
                 .flatten(),
+            cxdec_hash: self.cxdec.then_some(record.adler).flatten(),
             checksum: record.adler,
             offset: entry.offset,
         });

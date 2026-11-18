@@ -1,4 +1,5 @@
 use super::*;
+mod local;
 use chacha20poly1305::{
     XChaCha20Poly1305,
     aead::{AeadInPlace, KeyInit},
@@ -313,6 +314,81 @@ fn repeated_paths_preserve_entries_and_select_their_storage() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn protection_notices_are_skipped_and_the_protection_bit_is_not_encryption() -> Result<()> {
+    let warning = "$$$ This is a protected archive. $$$ warning.txt";
+    for (name, flags, declared, skipped) in [
+        (warning, 0, 910, true),
+        (warning, 0, 3, false),
+        (warning, 0x8000_0000, 910, false),
+        ("ordinary.txt", 0, 910, false),
+    ] {
+        let mut sample = Sample::new(0)?;
+        let mut bytes = MAGIC.to_vec();
+        u64v(&mut bytes, 0);
+        let notice = bytes.len() as u64;
+        bytes.extend(b"bad");
+        let asset = bytes.len() as u64;
+        bytes.extend(b"asset");
+        let mut index = record(name, flags, declared, &[(0, notice, 3, 3)], 0);
+        index.extend(record(
+            "asset.bin",
+            0x8000_0000,
+            5,
+            &[(0, asset, 5, 5)],
+            adler32::checksum(b"asset"),
+        ));
+        let at = bytes.len() as u64;
+        bytes.push(0);
+        u64v(&mut bytes, index.len() as u64);
+        bytes.extend(index);
+        BinaryWriter::u64_le(at, &mut bytes[11..]);
+        sample.bytes = bytes;
+        fs::write(&sample.path, &sample.bytes)?;
+        let archive = Xp3.open(
+            &Arc::new(ArcView::open(&sample.path)?),
+            &ArchiveOptions::default(),
+        );
+        if !skipped && declared != 3 {
+            assert!(matches!(archive, Err(Error::Corrupt { .. })));
+            continue;
+        }
+        let archive = archive?;
+        assert_eq!(archive.entries().len(), if skipped { 1 } else { 2 });
+        let asset = &archive.entries()[archive.entries().len() - 1];
+        assert_eq!(asset.name, "asset.bin");
+        assert_eq!(archive.open_entry(asset)?.as_ref(), b"asset");
+        assert_eq!(archive.open_entry_raw(asset)?.as_ref(), b"asset");
+        let source = archive
+            .open_entry_source(asset)?
+            .ok_or(Error::InvalidFormat)?;
+        assert_eq!(source.read_at(0, 5)?.as_ref(), b"asset");
+        if !skipped {
+            // A real, consistently sized entry with the same name stays
+            // visible. Its bad checksum is checked only on access.
+            assert!(matches!(
+                archive.open_entry(&archive.entries()[0]),
+                Err(Error::Corrupt { .. })
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn hxv4_protected_entries_still_require_an_authenticated_binding() -> Result<()> {
+    let mut sample = Sample::new(0)?;
+    sample.bytes[sample.index] |= 0x80;
+    let next = sample.bytes.len() as u64 + 8;
+    u64v(&mut sample.bytes, next);
+    let index = record("unresolved.bin", 0x8000_0000, 3, &[(0, 0, 3, 3)], 0);
+    sample.bytes.push(0);
+    u64v(&mut sample.bytes, index.len() as u64);
+    sample.bytes.extend(index);
+    assert!(matches!(sample.open(), Err(Error::UnknownScheme(_))));
+    Ok(())
+}
 #[test]
 fn rejects_modified_authentication_cycles_truncation_and_segment_overflow() -> Result<()> {
     let mut sample = Sample::new(0)?;
@@ -612,10 +688,24 @@ fn xor31_segments_plain_entries_and_bad_payloads_remain_lazy() -> Result<()> {
     };
     fs::write(&sample.path, &sample.bytes)?;
     let view = Arc::new(ArcView::open(&sample.path)?);
+    // The flag cannot identify XOR31. With the plain route selected, mounting
+    // remains lazy and accessing encrypted bytes fails their checksum rather
+    // than trying another filter.
+    let unfiltered = Xp3.open(&view, &ArchiveOptions::default())?;
     assert!(matches!(
-        Xp3.open(&view, &ArchiveOptions::default()),
-        Err(Error::UnknownScheme(_))
+        unfiltered.open_entry(&unfiltered.entries()[0]),
+        Err(Error::Corrupt { .. })
     ));
+    assert_eq!(
+        unfiltered.open_entry(&unfiltered.entries()[1])?.as_ref(),
+        b"plain"
+    );
+    assert_eq!(
+        unfiltered
+            .open_entry_raw(&unfiltered.entries()[0])?
+            .as_ref(),
+        &raw
+    );
     let mut options = ArchiveOptions::default();
     options.numbers.insert("xp3_xor31", 1);
     let archive = Xp3Archive::open(&view, &options)?;
@@ -651,6 +741,102 @@ fn xor31_segments_plain_entries_and_bad_payloads_remain_lazy() -> Result<()> {
     assert!(matches!(
         Xp3.open(&view, &options),
         Err(Error::Unsupported(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn cxdec_filter_reads_hashed_entries_lazily_and_rejects_missing_adlr() -> Result<()> {
+    let mut params = PARAMS;
+    params[17] = 0x81;
+    let table: Vec<u8> = (0..8192).map(|i| (i * 17 ^ 0x33) as u8).collect();
+    let filter = Filter::from_cxdec_params_and_table(&params, &table)
+        .map_err(|reason| Error::UnknownScheme(Some(reason)))?;
+    let plain: Vec<u8> = (0..180u16).map(|i| (i * 13) as u8).collect();
+    let hash = adler32::checksum(&plain);
+    let mut encrypted = plain.clone();
+    filter.apply_hash(hash, 0, &mut encrypted);
+    let split = 71;
+    let mut bytes = MAGIC.to_vec();
+    u64v(&mut bytes, 0);
+    let first = bytes.len() as u64;
+    bytes.extend_from_slice(&encrypted[..split]);
+    let second = bytes.len() as u64;
+    bytes.extend_from_slice(&encrypted[split..]);
+    let mut index = record(
+        "script.tjs",
+        0,
+        plain.len() as u64,
+        &[
+            (0, first, split as u64, split as u64),
+            (
+                0,
+                second,
+                (plain.len() - split) as u64,
+                (plain.len() - split) as u64,
+            ),
+        ],
+        hash,
+    );
+    let index_at = bytes.len() as u64;
+    bytes.push(0);
+    u64v(&mut bytes, index.len() as u64);
+    bytes.extend(&index);
+    BinaryWriter::u64_le(index_at, &mut bytes[11..]);
+    let sample = Sample {
+        path: std::env::temp_dir().join(format!(
+            "vnlens-cxdec-{}-{}.xp3",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| Error::Unsupported(e.to_string()))?
+                .as_nanos()
+        )),
+        bytes,
+        special: 0,
+        index: index_at as usize,
+    };
+    fs::write(&sample.path, &sample.bytes)?;
+    let view = Arc::new(ArcView::open(&sample.path)?);
+    let mut options = ArchiveOptions::default();
+    options.numbers.insert("xp3_cxdec", 1);
+    options.keys.insert("cxdec_params", Secret::new(&params));
+    options.keys.insert("cxdec_table", Secret::new(table));
+
+    let archive = Xp3.open(&view, &options)?;
+    assert_eq!(archive.entries().len(), 1);
+    let entry = &archive.entries()[0];
+    assert_eq!(archive.open_entry(entry)?.as_ref(), &plain);
+    assert_eq!(archive.open_entry_raw(entry)?.as_ref(), &encrypted);
+    let source = archive
+        .open_entry_source(entry)?
+        .ok_or(Error::InvalidFormat)?;
+    assert_eq!(source.read_at(19, 95)?.as_ref(), &plain[19..114]);
+
+    let mut conflict = options.clone();
+    conflict.numbers.insert("xp3_xor31", 1);
+    assert!(matches!(
+        Xp3.open(&view, &conflict),
+        Err(Error::Unsupported(_))
+    ));
+
+    // Missing adlr fails on open when Cxdec is enabled.
+    let mut no_adlr = Sample::new(0)?;
+    index = record("plain.txt", 0, 5, &[(0, 0, 5, 5)], 0);
+    // Strip the adlr chunk written by record().
+    let adlr_len = 4 + 8 + 4;
+    let total_len = BinaryReader::u64_le(&index[4..]) - adlr_len;
+    BinaryWriter::u64_le(total_len, &mut index[4..]);
+    index.truncate(index.len() - adlr_len as usize);
+    let at = no_adlr.bytes.len() as u64;
+    no_adlr.bytes.push(0);
+    u64v(&mut no_adlr.bytes, index.len() as u64);
+    no_adlr.bytes.extend(index);
+    BinaryWriter::u64_le(at, &mut no_adlr.bytes[11..]);
+    fs::write(&no_adlr.path, &no_adlr.bytes)?;
+    assert!(matches!(
+        Xp3.open(&Arc::new(ArcView::open(&no_adlr.path)?), &options),
+        Err(Error::Corrupt { .. })
     ));
     Ok(())
 }
