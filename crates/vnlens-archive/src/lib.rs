@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod ages_mk2;
+mod artemis;
 mod bgi;
 mod criware;
 mod csystem;
@@ -13,6 +14,7 @@ mod gss;
 pub mod krkr;
 mod mages;
 pub mod ns;
+mod nscripter;
 pub mod otomate;
 mod propeller;
 mod psb;
@@ -21,6 +23,7 @@ mod rugp;
 mod siglus;
 mod softpal;
 mod systemnnn;
+mod tamsoft;
 mod will;
 mod yuris;
 
