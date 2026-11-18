@@ -1,8 +1,10 @@
-//! YU-RIS resource and YPF archive routing.
+//! YU-RIS resource and YPF archive routing. Native .ypf names also hold raw
+//! ASF movies, so this format explicitly gives signatures priority on access.
 use crate::routing::{Route, Router};
 use vnlens_core::{ArchiveRoute, ResourceRoute};
 
 pub(super) const ROUTER: Router = Router {
+    header_first: &["ypf"],
     header,
     archive,
     extension,

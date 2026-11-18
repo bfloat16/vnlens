@@ -161,3 +161,30 @@ fn disk_routing_reads_only_extensionless_prefixes() -> Result<()> {
     assert_eq!(reads.load(Ordering::Relaxed), 1);
     Ok(())
 }
+
+#[test]
+fn header_priority_reads_only_the_selected_prefix_and_keeps_io_errors() -> Result<()> {
+    let mut game = game(Engine::Yuris);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut files = vnlens_io::FileSystem::isolated(game.root.clone());
+    let path = game.root.join("movie.YPF");
+    files.insert(path.clone(), Arc::new(Counted(reads.clone())))?;
+    game.files = Arc::new(files);
+    assert!(matches!(
+        game.resource_route("movie.YPF", ResourceOrigin::File, &[]),
+        ResourceRoute::Archive(_)
+    ));
+    assert_eq!(reads.load(Ordering::Relaxed), 0);
+    assert_eq!(game.route_path(&path)?, ResourceRoute::Video("ymv/yuris"));
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+    // The exemption is per format; the engine's other suffixes stay authoritative.
+    assert_eq!(
+        game.route_path(&game.root.join("missing.ycg"))?,
+        ResourceRoute::Image("ycg/yuris")
+    );
+    assert!(matches!(
+        game.route_path(&game.root.join("missing.ypf")),
+        Err(vnlens_core::Error::Io(_))
+    ));
+    Ok(())
+}

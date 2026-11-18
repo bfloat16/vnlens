@@ -1,6 +1,26 @@
 use super::*;
 use crate::{Engine, Identification};
 use vnlens_core::{ResourceKind, ResourceOrigin};
+
+#[test]
+fn header_priority_only_uses_identified_middleware() {
+    let mut game = Identification {
+        root: Default::default(),
+        engine: Engine::Yuris,
+        evidence: "fixture".into(),
+        files: Default::default(),
+        options: Default::default(),
+        middleware: Vec::new(),
+        compose_pimg: Default::default(),
+    };
+    assert!(
+        matches!(game.resource_route("bank.ypf", ResourceOrigin::File, b"AFS2"), ResourceRoute::Archive(route) if route.tag == "ypf/yuris")
+    );
+    game.middleware.push(&ROUTER);
+    assert!(
+        matches!(game.resource_route("bank.ypf", ResourceOrigin::File, b"AFS2"), ResourceRoute::Archive(route) if route.tag == "cri/awb")
+    );
+}
 #[test]
 fn ns_and_identified_cri_middleware_route_metadata_and_logical_headers() {
     let mut game = Identification {
