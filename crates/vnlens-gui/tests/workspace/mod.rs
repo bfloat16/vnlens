@@ -13,6 +13,7 @@ fn unknown_utf8_resources_still_use_hex_without_starting_the_gui() -> anyhow::Re
             script: None,
             psb: None,
             image: None,
+            model: None,
             audio: false,
             video: None,
         };

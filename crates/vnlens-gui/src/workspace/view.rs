@@ -295,6 +295,9 @@ impl Workspace {
         if preview.image.is_some() {
             return self.image_preview(cx);
         }
+        if preview.model.is_some() {
+            return self.model_preview(cx);
+        }
         let text = preview.lines.is_some();
         let count = if text {
             preview.lines.as_ref().map_or(0, Vec::len)
@@ -661,6 +664,7 @@ pub(super) fn kind_label(kind: vnlens_core::ResourceKind) -> &'static str {
     match kind {
         ResourceKind::Archive => "Archive",
         ResourceKind::Image => "Image",
+        ResourceKind::Model => "3D model",
         ResourceKind::Audio => "Audio",
         ResourceKind::Script => "Script",
         ResourceKind::Data => "Data",

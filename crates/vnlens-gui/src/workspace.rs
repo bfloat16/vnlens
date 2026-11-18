@@ -22,6 +22,7 @@ mod image_view;
 mod imports;
 mod layout;
 mod level_meter;
+mod model_view;
 mod names;
 mod script_view;
 mod scroll;
@@ -142,6 +143,7 @@ struct Preview {
     lines: Option<Vec<Range<usize>>>,
     widest_line: usize,
     image: Option<Arc<RenderImage>>,
+    model: Option<model_view::ModelPreview>,
     image_frames: usize,
     image_frame: usize,
     script: Option<Arc<vnlens_script::ir::Script>>,
@@ -183,6 +185,7 @@ impl Preview {
             )
             && resource.psb.is_none()
             && resource.image.is_none()
+            && resource.model.is_none()
             && !resource.audio
             && video.is_none())
         .then(|| {
@@ -233,6 +236,10 @@ impl Preview {
             .image
             .map(|image| Self::render_image(image, None))
             .transpose()?;
+        let model = resource
+            .model
+            .map(model_view::ModelPreview::new)
+            .transpose()?;
         let ir_table = if let Some(script) = &resource.script {
             Some(script_view::Table::new(script, cancelled)?)
         } else if let Some(psb) = &resource.psb {
@@ -258,6 +265,7 @@ impl Preview {
             lines,
             widest_line,
             image,
+            model,
             image_frames,
             image_frame: 0,
             script: resource.script.map(Arc::new),
@@ -309,6 +317,9 @@ impl Preview {
     }
 
     fn release(self, cx: &mut App) {
+        if let Some(model) = self.model {
+            model.release(cx);
+        }
         if let Some(image) = self.image {
             cx.defer(move |cx| cx.drop_image(image, None));
         }
@@ -419,6 +430,7 @@ impl Workspace {
                 let _ = weak.update(cx, |this, cx| {
                     this.tick_audio(cx);
                     this.tick_video(cx);
+                    this.tick_model(cx);
                 });
                 if weak.upgrade().is_none() {
                     break;

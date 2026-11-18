@@ -5,6 +5,7 @@
 mod archive;
 mod browser;
 mod icons;
+mod model;
 mod playback;
 mod preferences;
 mod resource;
@@ -22,6 +23,7 @@ fn main() {
     vnlens_audio::init();
     vnlens_script::init();
     vnlens_video::init();
+    vnlens_model::init();
     let preferences = preferences::Preferences::load();
 
     Application::new()

@@ -34,6 +34,7 @@ pub struct Resource {
     pub script: Option<vnlens_script::ir::Script>,
     pub psb: Option<Arc<vnlens_middleware::psb::PsbValueFile>>,
     pub image: Option<vnlens_image::Image>,
+    pub model: Option<vnlens_model::Model>,
     pub audio: bool,
     /// Name hint for FFmpeg's container probe when the resource is a video.
     pub video: Option<VideoInput>,
@@ -112,6 +113,7 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
         script: None,
         psb: None,
         image: None,
+        model: None,
         audio: false,
         video: None,
     };
@@ -233,6 +235,17 @@ pub fn read(target: &Target, raw: bool, cancel: &Arc<AtomicBool>) -> Result<Reso
         }
         ResourceRoute::Image(tag) => {
             resource.image = Some(decode_image(target, tag, &resource.bytes, Some(cancel))?)
+        }
+        ResourceRoute::Model(tag) => {
+            let options = target
+                .game()
+                .ok_or_else(|| anyhow!("Model decoding requires engine context"))?;
+            resource.model = Some(vnlens_model::decode_as(
+                tag,
+                resource.bytes.clone(),
+                options.resource_options(),
+                cancel,
+            )?);
         }
         ResourceRoute::Audio(tag) => {
             vnlens_audio::metadata_as(tag, &resource.bytes)?

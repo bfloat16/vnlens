@@ -27,6 +27,7 @@ macro_rules! icon {
 const FOLDER: Icon = icon!("folder", 0x58a6f6);
 const ARCHIVE: Icon = icon!("archive", 0xe5b567);
 const IMAGE: Icon = icon!("image", 0x7ecf9c);
+const MODEL: Icon = icon!("model", 0x82b9e8);
 const AUDIO: Icon = icon!("audio", 0xe995bd);
 const VIDEO: Icon = icon!("video", 0xb6a0ec);
 const SCRIPT: Icon = icon!("script", 0xf0bf7a);
@@ -66,6 +67,7 @@ const ICONS: &[Icon] = &[
     FOLDER,
     ARCHIVE,
     IMAGE,
+    MODEL,
     AUDIO,
     VIDEO,
     SCRIPT,
@@ -136,6 +138,7 @@ fn for_item(item: &Item) -> Icon {
     // still a script, configuration or image, rather than an archive format.
     match item.kind {
         ResourceKind::Image => return IMAGE,
+        ResourceKind::Model => return MODEL,
         ResourceKind::Audio => return AUDIO,
         ResourceKind::Script => return SCRIPT,
         ResourceKind::Data => return CONFIG,
@@ -181,6 +184,7 @@ fn for_item(item: &Item) -> Icon {
         _ => match item.kind {
             ResourceKind::Archive => ARCHIVE,
             ResourceKind::Image => IMAGE,
+            ResourceKind::Model => MODEL,
             ResourceKind::Audio => AUDIO,
             ResourceKind::Script => SCRIPT,
             ResourceKind::Data => CONFIG,
