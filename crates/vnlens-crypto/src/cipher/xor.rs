@@ -20,6 +20,20 @@ pub fn apply(data: &mut [u8], key: &[u8]) -> Result<(), super::CipherError> {
     Ok(())
 }
 
+/// Applies repeating XOR at an offset within one independently keyed stream.
+/// Empty keys are rejected; the offset does not reset at random-access reads.
+pub fn apply_at(data: &mut [u8], key: &[u8], offset: u64) -> Result<(), super::CipherError> {
+    if key.is_empty() {
+        return Err(super::CipherError::EmptyKey);
+    }
+    let phase = (offset % key.len() as u64) as usize;
+    let leading = data.len().min(key.len() - phase);
+    for (byte, mask) in data[..leading].iter_mut().zip(&key[phase..]) {
+        *byte ^= mask;
+    }
+    apply(&mut data[leading..], key)
+}
+
 pub fn apply_u32_key(data: &mut [u8], key: &[u8; 4]) {
     #[cfg(target_arch = "x86_64")]
     if data.len() >= 16 {

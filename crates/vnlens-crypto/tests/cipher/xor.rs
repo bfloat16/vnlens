@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn random_access_keeps_the_stream_phase() -> Result<(), super::super::CipherError> {
+    let mut bytes = [0; 8];
+    apply_at(&mut bytes, &[0x10, 0x20, 0x30], 4)?;
+    assert_eq!(bytes, [0x20, 0x30, 0x10, 0x20, 0x30, 0x10, 0x20, 0x30]);
+    apply_at(&mut bytes, &[0x10, 0x20, 0x30], 4)?;
+    assert_eq!(bytes, [0; 8]);
+    assert!(apply_at(&mut [], &[], 0).is_err());
+    Ok(())
+}
+
+#[test]
 fn vector_xor_matches_scalar_at_unaligned_boundaries() -> Result<(), super::super::CipherError> {
     for key_len in [1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33, 63, 256, 512] {
         let key: Vec<_> = (0..key_len).map(|i| (i * 37) as u8).collect();

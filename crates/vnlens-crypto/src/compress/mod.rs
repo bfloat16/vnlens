@@ -4,6 +4,7 @@ mod copy;
 
 pub mod acp;
 pub mod bgi;
+pub mod bzip2;
 pub mod crilayla;
 pub mod csystem;
 pub mod enigma;
@@ -13,6 +14,7 @@ pub mod gss;
 pub mod lz4;
 pub mod lzf;
 pub mod lzss;
+pub mod nscripter;
 pub mod pdt;
 pub mod rugp;
 pub mod siglus;
