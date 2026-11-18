@@ -16,6 +16,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 vnlens-archive.workspace = true
+vnlens-engine.workspace = true
 image.workspace = true
 
 [lints]

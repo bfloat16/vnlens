@@ -1,6 +1,76 @@
 use super::*;
 use vnlens_io::BinaryWriter;
 
+/// Set VNLENS_ARTEMIS_DIR to the local WorldActorGB installation, then run
+/// cargo test -p vnlens-video artemis_stream -- --ignored --nocapture.
+#[test]
+#[ignore = "Requires the local Artemis game; no GUI or playback device is started"]
+fn artemis_stream_decodes_theora_from_pfs_and_loose_wmv() -> Result<()> {
+    use vnlens_core::{Catalog, ResourceOrigin, ResourceRoute};
+    let root = std::path::PathBuf::from(
+        std::env::var_os("VNLENS_ARTEMIS_DIR")
+            .ok_or_else(|| Error::Unsupported("Set VNLENS_ARTEMIS_DIR".into()))?,
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    let game = vnlens_engine::identify(&root, &cancel)?.ok_or(Error::InvalidFormat)?;
+    assert_eq!(game.engine, vnlens_engine::Engine::Artemis);
+    vnlens_archive::init();
+    let path = root.join("WorldActorGB.pfs");
+    let ResourceRoute::Archive(route) = game.route_path(&path)? else {
+        return Err(Error::InvalidFormat);
+    };
+    let archive = Catalog::load()
+        .open_view(Arc::new(game.files.open(&path)?), &route)?
+        .archive;
+    let entry = archive
+        .entries()
+        .iter()
+        .find(|e| e.name.ends_with(".ogv"))
+        .ok_or(Error::InvalidFormat)?;
+    let ResourceRoute::Media { video: tag, .. } =
+        game.resource_route(&entry.name, ResourceOrigin::Entry(entry.kind), &[])
+    else {
+        return Err(Error::InvalidFormat);
+    };
+    let source = archive
+        .open_entry_source(entry)?
+        .ok_or(Error::InvalidFormat)?;
+    assert!(contains_video(source.clone(), cancel.clone())?);
+    let mut video = Video::open_source_as(tag, source, Some(&entry.name), cancel.clone())?
+        .ok_or(Error::InvalidFormat)?;
+    assert_eq!(video.meta().video.codec, "theora");
+    let picture = video.next_picture()?.ok_or(Error::InvalidFormat)?;
+    assert!(!picture.bgra.is_empty());
+    video.seek(0.1)?;
+    assert!(video.next_picture()?.is_some());
+    eprintln!(
+        "Artemis PFS: {}x{} Theora frame and seek verified",
+        picture.width, picture.height
+    );
+    let mut movies = 0;
+    for file in game.files.read_dir(&root.join("movie"))? {
+        if file.metadata.directory {
+            continue;
+        }
+        let ResourceRoute::Video(tag) = game.route_path(&file.path)? else {
+            continue;
+        };
+        let mut video = Video::open_source_as(
+            tag,
+            game.files.source(&file.path)?,
+            Some(&file.path.to_string_lossy()),
+            cancel.clone(),
+        )?
+        .ok_or(Error::InvalidFormat)?;
+        let picture = video.next_picture()?.ok_or(Error::InvalidFormat)?;
+        assert!(!picture.bgra.is_empty());
+        movies += 1;
+    }
+    assert_eq!(movies, 2);
+    eprintln!("Artemis: {movies} WMV first frames verified");
+    Ok(())
+}
+
 /// Ten 4x2 YUV 4:4:4 frames at 10 fps; frame `i` has luma `16 + 20 * i`.
 fn y4m() -> Arc<[u8]> {
     let mut bytes = b"YUV4MPEG2 W4 H2 F10:1 Ip A1:1 C444\n".to_vec();
