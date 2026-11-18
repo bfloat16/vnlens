@@ -11,6 +11,36 @@ use std::{
 };
 use vnlens_core::{Error, Result};
 
+pub(crate) fn metadata(
+    data: &[u8],
+    name: &str,
+    id: codec::Id,
+    codec: &'static str,
+) -> Result<AudioMeta> {
+    ffmpeg::init().map_err(error)?;
+    let io =
+        format::context::StreamIo::from_read_seek(Cursor::new(data.to_vec())).map_err(error)?;
+    let input = format::input_from_stream(io, Some(name), None).map_err(error)?;
+    let stream = input
+        .streams()
+        .best(media::Type::Audio)
+        .ok_or_else(|| bad("FFmpeg audio contains no audio stream"))?;
+    let decoder = codec::Context::from_parameters(stream.parameters())
+        .map_err(error)?
+        .decoder()
+        .audio()
+        .map_err(error)?;
+    if decoder.id() != id {
+        return Err(Error::InvalidFormat);
+    }
+    Ok(AudioMeta {
+        codec,
+        channels: decoder.channels(),
+        sample_rate: decoder.rate(),
+        frames: None,
+    })
+}
+
 pub(crate) fn decode(
     data: &[u8],
     name: &str,

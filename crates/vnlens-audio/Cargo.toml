@@ -20,5 +20,8 @@ opus1.workspace = true
 rustfft.workspace = true
 ffmpeg-next.workspace = true
 
+[dev-dependencies]
+bzip2.workspace = true
+
 [lints]
 workspace = true

@@ -1,4 +1,5 @@
 //! Standard audio carried by engine archives, including YU-RIS Ogg/WAV.
+mod mpeg;
 pub(crate) mod ogg;
 mod opus;
 mod wav;

@@ -13,6 +13,7 @@ mod format;
 mod gss;
 pub mod levels;
 mod model;
+pub mod nscripter;
 pub mod rugp;
 mod siglus;
 pub mod spectrogram;
