@@ -3,6 +3,7 @@
 
 mod ages_mk2;
 mod archive_set;
+mod artemis;
 mod bgi;
 mod context;
 mod criware;
@@ -19,6 +20,7 @@ mod krkrz_hxv4;
 mod mages;
 mod model;
 mod ns;
+mod nscripter;
 mod otomate;
 mod propeller;
 mod reallive;
@@ -27,6 +29,7 @@ mod rugp;
 mod siglus;
 mod softpal;
 mod systemnnn;
+mod tamsoft;
 mod will;
 mod yuris;
 

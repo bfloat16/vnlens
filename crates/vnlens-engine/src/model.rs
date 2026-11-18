@@ -34,6 +34,9 @@ pub enum Engine {
     Mages,
     Otomate,
     Gss,
+    NScripter,
+    Tamsoft,
+    Artemis,
 }
 
 #[derive(Clone, Debug)]
