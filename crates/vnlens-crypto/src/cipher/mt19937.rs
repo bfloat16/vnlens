@@ -67,7 +67,7 @@ impl Mt19937 {
         this
     }
 
-    fn seed_from_u32(seed: u32) -> Self {
+    pub(super) fn seed_from_u32(seed: u32) -> Self {
         let mut mt = [0u32; N];
         mt[0] = seed;
         for i in 1..N {

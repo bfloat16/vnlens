@@ -91,6 +91,32 @@ impl Filter {
     /// Construct the reconstructed FilterManager from the 22-byte HXV4 PARAMS
     /// record and the 1024-word control table produced by the bootstrap KDF.
     pub fn from_params_and_table(params: &[u8], table: &[u32]) -> Result<Self, String> {
+        Self::new(params, table, false)
+    }
+
+    /// Constructs the earlier Cxdec filter used by KiriKiri's internal module
+    /// (sub_10003100/100051B0). TABLE has a 4096-byte primary table and may
+    /// carry an alternate XOR table; PARAMS bit zero selects that alternate.
+    pub fn from_cxdec_params_and_table(params: &[u8], table: &[u8]) -> Result<Self, String> {
+        if params.len() < 22 || table.len() < 4096 {
+            return Err("Truncated Cxdec PARAMS or TABLE".into());
+        }
+        let mut primary = table[..4096].to_vec();
+        if params[17] & 1 != 0 && table.len() > 4096 {
+            for (value, alternate) in primary.iter_mut().zip(&table[4096..]) {
+                *value ^= alternate;
+            }
+        }
+        let words: Vec<_> = primary
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| BinaryReader::u32_le(bytes))
+            .collect();
+        Self::new(params, &words, true)
+    }
+
+    fn new(params: &[u8], table: &[u32], cxdec: bool) -> Result<Self, String> {
         if params.len() < 0x16 {
             return Err(format!("HXV4 PARAMS truncated: {} bytes", params.len()));
         }
@@ -113,7 +139,11 @@ impl Filter {
 
         let mut lanes = Vec::with_capacity(128);
         for lane in 0..128u32 {
-            let mut rng = GeneratorRng::for_lane(lane, random_type);
+            let mut rng = if cxdec {
+                GeneratorRng::for_cxdec(lane, random_type)
+            } else {
+                GeneratorRng::for_lane(lane, random_type)
+            };
             let program = build_lane(params, &mut rng)
                 .ok_or_else(|| format!("HXV4 DripValue lane {lane} exceeded the native 128-byte generator budget in all five attempts"))?;
             lanes.push(program);
@@ -197,6 +227,30 @@ impl Filter {
     ) {
         self.state_for_entry(entry_key, local_flag)
             .apply(logical_offset, data);
+    }
+
+    /// Applies the classic Cxdec callback's hash-based stream at a logical
+    /// offset. sub_10001980 expands hash and hash XOR HIWORD(hash), splits at
+    /// offset + (hash AND mask), and replaces a zero XOR byte with one.
+    /// Unlike Hxv4 there is no archive-holder key or 16-byte prefix mask.
+    pub fn apply_hash(&self, hash: u32, logical_offset: u64, data: &mut [u8]) {
+        let left_drip = self.drip64(hash);
+        let right_drip = self.drip64(hash ^ (hash >> 16));
+        let mut left = boundary_from_drip(left_drip);
+        let mut right = boundary_from_drip(right_drip);
+        if left_drip as u8 == 0 {
+            left.xor_byte = 1;
+        }
+        if right_drip as u8 == 0 {
+            right.xor_byte = 1;
+        }
+        State {
+            split: u64::from(self.offset.wrapping_add(hash & self.mask)),
+            prefix_xor: [0; 16],
+            left,
+            right,
+        }
+        .apply(logical_offset, data);
     }
 
     /// Interpreter equivalent of `sub_10019300`.
@@ -586,11 +640,11 @@ fn build_lane(params: &[u8], rng: &mut GeneratorRng) -> Option<VmProgram> {
     None
 }
 
-#[derive(Clone, Copy, Debug)]
-struct GeneratorRng {
-    s0: u64,
-    s1: u64,
-    random_type: u8,
+#[derive(Clone)]
+enum GeneratorRng {
+    Xoroshiro { s0: u64, s1: u64, random_type: u8 },
+    Lcg(u32),
+    Mt(Box<crate::cipher::mt19937::Mt19937>),
 }
 
 impl GeneratorRng {
@@ -599,7 +653,7 @@ impl GeneratorRng {
         let base = (u64::from(!lane) << 32) | u64::from(lane);
         let s0 = splitmix64_final(base.wrapping_add(GAMMA));
         let s1 = splitmix64_final(base.wrapping_add(GAMMA.wrapping_mul(2)));
-        Self {
+        Self::Xoroshiro {
             s0,
             s1,
             random_type,
@@ -607,28 +661,43 @@ impl GeneratorRng {
     }
 
     fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
+        match self {
+            Self::Lcg(state) => {
+                // Classic DynamicCodeGen::random, sub_10004C50.
+                let old = *state;
+                *state = old.wrapping_mul(0x41c6_4e6d).wrapping_add(0x3039);
+                *state ^ ((old << 16) ^ (old >> 16))
+            }
+            Self::Mt(mt) => mt.next_u32(),
+            Self::Xoroshiro {
+                s0,
+                s1,
+                random_type,
+            } => {
+                if *random_type == 0 {
+                    let result = s0.wrapping_add(*s1).rotate_left(17).wrapping_add(*s0);
+                    *s1 ^= *s0;
+                    *s0 = s0.rotate_left(49) ^ *s1 ^ (*s1 << 21);
+                    *s1 = s1.rotate_left(28);
+                    result as u32
+                } else {
+                    let result = s0.wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+                    *s1 ^= *s0;
+                    *s0 = s0.rotate_left(24) ^ *s1 ^ (*s1 << 16);
+                    *s1 = s1.rotate_left(37);
+                    result as u32
+                }
+            }
+        }
     }
 
-    fn next_u64(&mut self) -> u64 {
-        if self.random_type == 0 {
-            // xoroshiro128++ (49,21,28), matching sub_10018F20.
-            let result = self
-                .s0
-                .wrapping_add(self.s1)
-                .rotate_left(17)
-                .wrapping_add(self.s0);
-            self.s1 ^= self.s0;
-            self.s0 = self.s0.rotate_left(49) ^ self.s1 ^ (self.s1 << 21);
-            self.s1 = self.s1.rotate_left(28);
-            result
+    fn for_cxdec(lane: u32, random_type: u8) -> Self {
+        if random_type == 0 {
+            Self::Lcg(lane)
         } else {
-            // xoroshiro128** (24,16,37), matching sub_10018FC0.
-            let result = self.s0.wrapping_mul(5).rotate_left(7).wrapping_mul(9);
-            self.s1 ^= self.s0;
-            self.s0 = self.s0.rotate_left(24) ^ self.s1 ^ (self.s1 << 16);
-            self.s1 = self.s1.rotate_left(37);
-            result
+            Self::Mt(Box::new(crate::cipher::mt19937::Mt19937::seed_from_u32(
+                lane,
+            )))
         }
     }
 }
