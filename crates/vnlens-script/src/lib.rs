@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod ages_mk2;
+mod artemis;
 mod bgi;
 mod csystem;
 mod entisgls;
@@ -16,6 +17,7 @@ mod kaleido;
 pub mod krkr;
 mod mages;
 mod middleware;
+mod nscripter;
 mod otomate;
 mod propeller;
 mod reallive;
