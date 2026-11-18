@@ -5,6 +5,113 @@ use crate::psb::{PSB_MAGIC, PsbNumber, PsbValue};
 use std::collections::BTreeMap;
 use vnlens_io::{BinaryReader, BinaryWriter};
 
+// A synthetic one-key double-array trie with a string value. Each path node
+// receives its own byte alphabet, so shared byte values cannot alias parents.
+fn text_fixture(version: u16, name: &[u8], text: &[u8]) -> Vec<u8> {
+    let mut data = vec![0; super::super::header::header_len(version)];
+    data[..4].copy_from_slice(PSB_MAGIC);
+    BinaryWriter::u16_le(version, &mut data[4..]);
+    let keys = data.len();
+    if version == 1 {
+        array(&mut data, &[0], 1, 1);
+    }
+    let names = data.len();
+    if version == 1 {
+        data.extend_from_slice(name);
+        data.push(0);
+    } else {
+        let leaf = name.len() * 256;
+        let mut bases = vec![0; leaf + 1];
+        let mut parents = bases.clone();
+        let mut parent = 0;
+        for (index, &byte) in name.iter().enumerate() {
+            bases[parent] = (index * 256) as u64;
+            let node = index * 256 + usize::from(byte);
+            parents[node] = parent as u64;
+            parent = node;
+        }
+        bases[parent] = leaf as u64;
+        parents[leaf] = parent as u64;
+        array(&mut data, &bases, 2, 2);
+        array(&mut data, &parents, 2, 2);
+        array(&mut data, &[leaf as u64], 1, 2);
+    }
+    let strings = data.len();
+    array(&mut data, &[0], 1, 1);
+    let string_data = data.len();
+    data.extend_from_slice(text);
+    data.push(0);
+    let entries = data.len();
+    if version == 1 {
+        data.extend([0x21, 0x0d, 1, 0x0d, 0, 0x11, 0, 0x15, 0]);
+    } else {
+        data.extend([0x21, 0x0d, 1, 0x0d, 0, 0x0d, 1, 0x0d, 0, 0x15, 0]);
+    }
+    let chunks = data.len();
+    array(&mut data, &[], 1, 1);
+    let end = data.len();
+    for (at, value) in [
+        (8, keys),
+        (12, names),
+        (16, strings),
+        (20, string_data),
+        (24, chunks),
+        (28, chunks),
+        (32, end),
+        (36, entries),
+    ] {
+        patch_u32(&mut data, at, value);
+    }
+    if version == 4 {
+        patch_u32(&mut data, 44, chunks);
+        patch_u32(&mut data, 48, chunks);
+        patch_u32(&mut data, 52, end);
+    }
+    if version >= 3 {
+        let mut checksum = vnlens_crypto::checksum::adler32::Adler32::default();
+        checksum.update(&data[8..40]);
+        if version == 4 {
+            checksum.update(&data[44..56]);
+        }
+        BinaryWriter::u32_le(checksum.checksum(), &mut data[40..]);
+    }
+    data
+}
+
+#[test]
+fn cesu8_names_and_strings_keep_emoji_without_replacement() -> Result<()> {
+    let encoded = b"key\xed\xa0\xbd\xed\xb8\x85_ase";
+    let expected = "key😅_ase";
+    for version in 1..=4 {
+        for name in [encoded.as_slice(), expected.as_bytes()] {
+            let data = text_fixture(version, name, encoded);
+            let psb = parse_source(&data.as_slice(), None)?;
+            assert_eq!(psb.names, [expected]);
+            assert_eq!(psb.strings, [expected]);
+            assert_eq!(
+                psb.root.as_object().unwrap()[expected].as_str(),
+                Some(expected)
+            );
+            let json: serde_json::Value = serde_json::from_str(&psb.to_json()?).unwrap();
+            assert_eq!(json[expected], expected);
+        }
+        for invalid in [
+            b"\xed\xa0\xbd".as_slice(),
+            b"\xff".as_slice(),
+            b"\xed\xb8\x85\xed\xa0\xbd".as_slice(),
+        ] {
+            for (name, text) in [(invalid, b"ok".as_slice()), (b"ok".as_slice(), invalid)] {
+                let data = text_fixture(version, name, text);
+                assert!(matches!(
+                    parse_source(&data.as_slice(), None),
+                    Err(Error::Corrupt { .. })
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn index_reader_never_requests_resource_bytes() {
     struct IndexOnly {

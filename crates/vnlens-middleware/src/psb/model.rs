@@ -186,7 +186,8 @@ pub struct ParseOptions<'a> {
     /// Auto uses header ranges and the name-array prefix, without retrying a
     /// failed tree parse. Select an explicit mode for ambiguous legacy files.
     pub encryption: PsbEncryption,
-    /// PSB strings are NUL-terminated bytes; names in v2+ are always UTF-8.
+    /// PSB strings are NUL-terminated bytes. UTF-8 strings and v2+ names also
+    /// accept CESU-8 surrogate pairs emitted by E-mote tools.
     pub encoding: &'static encoding_rs::Encoding,
     pub cancelled: Option<&'a AtomicBool>,
 }

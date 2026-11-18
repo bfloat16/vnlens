@@ -7,6 +7,59 @@ use vnlens_core::{Catalog, Error};
 use vnlens_io::{BinaryReader, BinaryWriter};
 
 #[test]
+#[ignore = "Requires a local Limelight Lemonade Jam installation; set VNLENS_LIMELIGHT_DIR"]
+fn limelight_motion_names() -> Result<()> {
+    use std::sync::atomic::AtomicBool;
+    use vnlens_core::ResourceRoute;
+    use vnlens_crypto::hash::hxv4 as hashes;
+    let root = std::path::PathBuf::from(
+        std::env::var_os("VNLENS_LIMELIGHT_DIR").ok_or(Error::InvalidFormat)?,
+    );
+    let path = root.join("data.xp3");
+    let game = vnlens_engine::identify(&path, &AtomicBool::new(false))?
+        .ok_or_else(|| Error::Unsupported("Local game was not identified".into()))?;
+    let ResourceRoute::Archive(route) = game.route_path(&path)? else {
+        return Err(Error::InvalidFormat);
+    };
+    crate::init();
+    let opened = Catalog::load().open(&path, &route)?;
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02X}")).collect::<String>();
+    let stored_name = format!(
+        "{}/{}",
+        hex(&hashes::directory("sdmotion/", "xp3hnp")),
+        hex(&hashes::filename("sd015.mtn", "xp3hnp"))
+    );
+    let entry = opened
+        .archive
+        .entries()
+        .iter()
+        .find(|entry| entry.name == stored_name)
+        .ok_or_else(|| Error::Unsupported("Local motion entry was not found".into()))?;
+    let source = opened
+        .archive
+        .open_entry_source(entry)?
+        .ok_or(Error::InvalidFormat)?;
+    let psb =
+        PsbFile::open_configured(source, "sdmotion/sd015.mtn", game.resource_options(), None)?;
+    assert_eq!(psb.document.header.version, 4);
+    assert_eq!(psb.document.names.len(), 94);
+    assert!(
+        psb.document
+            .names
+            .iter()
+            .any(|name| name.ends_with("😅_ase"))
+    );
+    assert!(
+        psb.document
+            .names
+            .iter()
+            .all(|name| !name.contains('\u{fffd}'))
+    );
+    assert!(!psb.entries().is_empty());
+    Ok(())
+}
+
+#[test]
 fn catalog_opens_standalone_psb_resources() {
     crate::init();
     let dir = unique_temp_dir();

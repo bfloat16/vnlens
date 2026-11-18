@@ -1,5 +1,7 @@
 //! Read-only PSB index loading; resource bodies stay as unrequested ranges.
 //! Native PSBObject initialization loads the prefix ending at resource data.
+//! Name tries and UTF-8 string pools can contain CESU-8 surrogate pairs for
+//! supplementary characters, as emitted by E-mote motion assets.
 use super::source::{IndexSource, PsbSource};
 use super::value::ValueParser;
 use super::{ParseOptions, Psb, PsbEncryption, PsbHeader, PsbResource, check_cancelled, corrupt};
@@ -204,9 +206,13 @@ fn load_names(
             steps += 1;
         }
         bytes.reverse();
-        let name = String::from_utf8(bytes)
-            .map_err(|_| corrupt(u64::from(header.offset_names), "PSB name is not UTF-8"))?;
-        names.push(name);
+        let name = BinaryReader::utf8_cesu8(&bytes).map_err(|_| {
+            corrupt(
+                u64::from(header.offset_names),
+                "PSB name is not valid UTF-8/CESU-8",
+            )
+        })?;
+        names.push(name.into_owned());
     }
 
     Ok(names)
@@ -354,6 +360,11 @@ fn read_cstring_at(data: &dyn ReadAt, offset: u64, options: ParseOptions<'_>) ->
             break;
         }
         bytes.push(byte);
+    }
+    if options.encoding == encoding_rs::UTF_8 {
+        return BinaryReader::utf8_cesu8(&bytes)
+            .map(|text| text.into_owned())
+            .map_err(|_| corrupt(offset, "PSB string is not valid UTF-8/CESU-8"));
     }
     options
         .encoding
