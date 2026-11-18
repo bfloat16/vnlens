@@ -196,3 +196,201 @@ fn follows_relocated_registration_and_rejects_changed_semantics() -> Result<()> 
     }
     Ok(())
 }
+
+fn zlib_stored(raw: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let mut chunks = raw.chunks(u16::MAX as usize).peekable();
+    while let Some(chunk) = chunks.next() {
+        out.push(u8::from(chunks.peek().is_none()));
+        let len = chunk.len() as u16;
+        let p = out.len();
+        out.resize(p + 4, 0);
+        BinaryWriter::u16_le(len, &mut out[p..]);
+        BinaryWriter::u16_le(!len, &mut out[p + 2..]);
+        out.extend_from_slice(chunk);
+    }
+    let adler = vnlens_crypto::checksum::adler32::checksum(raw);
+    let p = out.len();
+    out.resize(p + 4, 0);
+    BinaryWriter::u32_be(adler, &mut out[p..]);
+    out
+}
+
+fn cxdec_module(base: u32, with_api: bool, with_table: bool) -> Vec<u8> {
+    let mut f = Fixture::new(base);
+    f.bytes.resize(0x4000, 0);
+    BinaryWriter::u32_le(0x3e00, &mut f.bytes[0x180..]);
+    BinaryWriter::u32_le(0x3e00, &mut f.bytes[0x188..]);
+    if !with_api {
+        f.bytes[0x400] = b'?';
+    }
+    let at = f.at;
+    // classic_rng in executable .text section, immediately following Fixture code.
+    let rng = [
+        0x8b, 0x96, 0xd8, 0x09, 0x00, 0x00, // mov edx, [esi+0x9d8]
+        0x8b, 0xca, // mov ecx, edx
+        0x69, 0xc9, 0x6d, 0x4e, 0xc6, 0x41, // imul ecx, ecx, 0x41c64e6d
+        0x8b, 0xc2, // mov eax, edx
+        0xc1, 0xe8, 16, // shr eax, 16
+        0x81, 0xc1, 0x39, 0x30, 0x00, 0x00, // add ecx, 0x3039
+        0xc1, 0xe2, 16, // shl edx, 16
+        0x33, 0xc2, // xor eax, edx
+        0x89, 0x8e, 0xd8, 0x09, 0x00, 0x00, // mov [esi+0x9d8], ecx
+        0x33, 0xc1, // xor eax, ecx
+        0x5e, // pop esi
+        0xc3, // ret
+    ];
+    f.bytes[at..at + rng.len()].copy_from_slice(&rng);
+    let mut at = 0x1000;
+    for text in [
+        &b".?AVTImplCryptFile@@\0"[..],
+        b"unknown oder RO_8\0",
+        b"unknown oder RO_6\0",
+    ] {
+        f.bytes[at..at + text.len()].copy_from_slice(text);
+        at += text.len();
+    }
+    f.bytes[at..at + 7].copy_from_slice(b"PARAMS\0");
+    at += 7;
+    BinaryWriter::u16_le(22, &mut f.bytes[at..]);
+    at += 2;
+    let params = [
+        2, 0, 6, 5, 1, 4, 3, 7, 1, 5, 3, 2, 0, 4, 1, 0, 2, 0, 0xe2, 2, 0x83, 2,
+    ];
+    f.bytes[at..at + 22].copy_from_slice(&params);
+    at += 22;
+    if with_table {
+        f.bytes[at..at + 6].copy_from_slice(b"TABLE\0");
+        at += 6;
+        BinaryWriter::u16_le(4096, &mut f.bytes[at..]);
+        at += 2;
+        for (i, byte) in f.bytes[at..at + 4096].iter_mut().enumerate() {
+            *byte = (i * 11) as u8;
+        }
+    }
+    f.bytes
+}
+
+fn host_with_internal_module(module: &[u8]) -> Vec<u8> {
+    let packed = zlib_stored(module);
+    let mut f = Fixture::new(0x400000);
+    f.bytes.resize(0x5000 + packed.len(), 0);
+    // Host EXE does not export V2Link or import TVPSetXP3ArchiveExtractionFilter directly.
+    f.bytes[0xf8..0x100].fill(0);
+    f.bytes[0x400..0x400 + API.len()].fill(0);
+    BinaryWriter::u32_le((0x4e00 + packed.len()) as u32, &mut f.bytes[0x180..]);
+    BinaryWriter::u32_le((0x4e00 + packed.len()) as u32, &mut f.bytes[0x188..]);
+
+    let s_internal = 0x1500;
+    f.bytes[s_internal..s_internal + 16].copy_from_slice(b"internal module\0");
+    let s_v2link = 0x1510;
+    f.bytes[s_v2link..s_v2link + 7].copy_from_slice(b"V2Link\0");
+    let s_v2unlink = 0x1518;
+    f.bytes[s_v2unlink..s_v2unlink + 9].copy_from_slice(b"V2Unlink\0");
+    let v_packed = 0x1530;
+    BinaryWriter::u32_le(packed.len() as u32, &mut f.bytes[v_packed..]);
+    let v_unpacked = 0x1534;
+    BinaryWriter::u32_le(module.len() as u32, &mut f.bytes[v_unpacked..]);
+    let body = 0x2000;
+    f.bytes[body..body + packed.len()].copy_from_slice(&packed);
+
+    let start = f.at;
+    let empty_target = start + 0x200;
+    let ctor_at = start + 0x100;
+    let helper_at = start + 0x220;
+    let resolver_at = start + 0x230;
+    let absent_target = ctor_at + 53;
+
+    let mut rel_calls = Vec::new();
+    let emit_rel = |f: &mut Fixture, calls: &mut Vec<(usize, usize)>, op: &[u8], target: usize| {
+        f.emit(op);
+        calls.push((f.at, target));
+        f.word(0);
+    };
+
+    // loader()
+    f.emit(&[0x8b, 0x3d]);
+    f.word(f.va(v_packed));
+    f.emit(&[0x8b, 0x1d]);
+    f.word(f.va(v_unpacked));
+    f.emit(&[0x85, 0xff]);
+    emit_rel(&mut f, &mut rel_calls, &[0x0f, 0x84], empty_target);
+    emit_rel(&mut f, &mut rel_calls, &[0xe8], helper_at);
+    f.emit(&[0x8b, 0xf0, 0x68]);
+    f.word(f.va(s_internal));
+    f.emit(&[0x8b, 0xce]);
+    emit_rel(&mut f, &mut rel_calls, &[0xe8], helper_at);
+    f.emit(&[
+        0x89, 0x75, 0xf0, 0xc7, 0x45, 0xfc, 0x00, 0x00, 0x00, 0x00, 0x6a, 20,
+    ]);
+    emit_rel(&mut f, &mut rel_calls, &[0xe8], helper_at);
+    f.emit(&[
+        0x83, 0xc4, 4, 0x89, 0x45, 0xec, 0xc6, 0x45, 0xfc, 0x01, 0x85, 0xc0,
+    ]);
+    emit_rel(&mut f, &mut rel_calls, &[0x0f, 0x84], empty_target);
+    f.emit(&[0x53, 0x57, 0x68]);
+    f.word(f.va(body));
+    f.emit(&[0x8d, 0x4d, 0xf0, 0x51, 0x8b, 0xc8]);
+    emit_rel(&mut f, &mut rel_calls, &[0xe8], ctor_at);
+    assert!(f.at <= empty_target);
+    f.at = empty_target;
+    f.emit(&[0xc3]);
+
+    // constructor -> links_module -> link_exports()
+    f.at = ctor_at;
+    f.emit(&[0xba]);
+    f.word(f.va(s_v2link));
+    f.emit(&[0x8b, 0x4f, 0x04]);
+    emit_rel(&mut f, &mut rel_calls, &[0xe8], resolver_at);
+    f.emit(&[0x89, 0x47, 0x0c, 0xba]);
+    f.word(f.va(s_v2unlink));
+    f.emit(&[0x8b, 0x4f, 0x04]);
+    emit_rel(&mut f, &mut rel_calls, &[0xe8], resolver_at);
+    f.emit(&[0x89, 0x47, 0x10, 0x83, 0x7f, 0x0c, 0x00]);
+    emit_rel(&mut f, &mut rel_calls, &[0x0f, 0x84], absent_target);
+    emit_rel(&mut f, &mut rel_calls, &[0xe8], helper_at);
+    f.emit(&[0x50, 0x8b, 0x47, 0x0c, 0xff, 0xd0]);
+    assert_eq!(f.at, absent_target);
+    f.emit(&[0xc3]);
+
+    f.at = helper_at;
+    f.emit(&[0xc3]);
+    f.at = resolver_at;
+    f.emit(&[0xc3]);
+
+    for (at, target) in rel_calls {
+        BinaryWriter::u32_le(
+            (target as u32).wrapping_sub(at as u32 + 4),
+            &mut f.bytes[at..],
+        );
+    }
+    f.bytes
+}
+
+#[test]
+fn internal_cxdec_recovers_from_plugin_and_compressed_host_module() -> Result<()> {
+    let cancel = AtomicBool::new(false);
+    let dll = cxdec_module(0x1000_0000, true, true);
+    let dll_image = PeImage::parse(&dll)?.ok_or(Error::InvalidFormat)?;
+    let direct = internal::resolve(&dll_image, &cancel)?.ok_or(Error::InvalidFormat)?;
+    assert_eq!(direct.numbers.get("xp3_cxdec"), Some(&1));
+    assert_eq!(direct.keys["cxdec_params"].bytes().len(), 22);
+    assert_eq!(direct.keys["cxdec_table"].bytes().len(), 4096);
+
+    let host = host_with_internal_module(&dll);
+    let host_image = PeImage::parse(&host)?.ok_or(Error::InvalidFormat)?;
+    let from_host = internal::resolve(&host_image, &cancel)?.ok_or(Error::InvalidFormat)?;
+    assert_eq!(from_host, direct);
+
+    let non_filter = host_with_internal_module(&cxdec_module(0x1000_0000, false, true));
+    let non_filter_image = PeImage::parse(&non_filter)?.ok_or(Error::InvalidFormat)?;
+    assert!(internal::resolve(&non_filter_image, &cancel)?.is_none());
+
+    let missing_table = cxdec_module(0x1000_0000, true, false);
+    let missing_table_image = PeImage::parse(&missing_table)?.ok_or(Error::InvalidFormat)?;
+    assert!(matches!(
+        internal::resolve(&missing_table_image, &cancel),
+        Err(Error::UnknownScheme(_))
+    ));
+    Ok(())
+}

@@ -3,6 +3,7 @@
 //! The verified x86 compiler form is checked by decoded operands and branch
 //! targets, including the successful CRT remainder/cookie paths. Unknown
 //! registration or callback code fails closed. No plugin code is executed.
+mod internal;
 use crate::{context::Context, detect::has};
 use Mnemonic::*;
 use Register::*;
@@ -30,7 +31,23 @@ pub(super) fn resolve(
         let Some(image) = context.image(&view, cancel)? else {
             continue;
         };
+        if let Some(recovered) = internal::resolve(&image, cancel)? {
+            if options.numbers.contains_key("xp3_xor31")
+                || (options.numbers.contains_key("xp3_cxdec") && options != recovered)
+            {
+                return Err(Error::UnknownScheme(Some(
+                    "Conflicting KiriKiri XP3 filters".into(),
+                )));
+            }
+            options = recovered;
+            continue;
+        }
         if xor31(&image)? {
+            if options.numbers.contains_key("xp3_cxdec") {
+                return Err(Error::UnknownScheme(Some(
+                    "Conflicting KiriKiri XP3 filters".into(),
+                )));
+            }
             options.numbers.insert("xp3_xor31", 1);
         }
     }
