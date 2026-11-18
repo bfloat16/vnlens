@@ -18,6 +18,7 @@ pub enum ResourceOrigin {
 pub enum ResourceRoute {
     Archive(Box<ArchiveRoute>),
     Image(&'static str),
+    Model(&'static str),
     Audio(&'static str),
     Script(&'static str),
     Video(&'static str),
@@ -34,6 +35,7 @@ impl ResourceRoute {
         match self {
             Self::Archive(_) => ResourceKind::Archive,
             Self::Image(_) => ResourceKind::Image,
+            Self::Model(_) => ResourceKind::Model,
             Self::Audio(_) | Self::Media { .. } => ResourceKind::Audio,
             Self::Script(_) => ResourceKind::Script,
             Self::Video(_) => ResourceKind::Video,

@@ -30,6 +30,7 @@ pub struct Packed {
 pub enum ResourceKind {
     Archive,
     Image,
+    Model,
     Audio,
     Script,
     /// Structured values and configuration objects that are not executable scripts.
