@@ -845,6 +845,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "bzip2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
+dependencies = [
+ "libbz2-rs-sys",
+]
+
+[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3779,6 +3788,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32f454fd6831a29c0e827ed075bca2a15be201bd57f4168f0fd1041124eab17e"
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4936,6 +4951,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5da3b0203fd7ee5720aa0b5e790b591aa5d3f41c3ed2c34a3a393382198af2f7"
 
 [[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
+
+[[package]]
 name = "poly1305"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4976,7 +4997,7 @@ dependencies = [
  "log",
  "parking_lot",
  "pin-project",
- "pollster",
+ "pollster 0.2.5",
  "static_assertions",
  "thiserror 1.0.69",
 ]
@@ -7343,6 +7364,7 @@ dependencies = [
 name = "vnlens-audio"
 version = "0.1.0"
 dependencies = [
+ "bzip2",
  "ffmpeg-next",
  "lewton",
  "ogg",
@@ -7381,11 +7403,13 @@ dependencies = [
  "anyhow",
  "argon2",
  "blake2",
+ "bzip2",
  "chacha20poly1305",
  "cubecl-core",
  "cubecl-wgpu",
  "flate2",
  "ruzstd",
+ "sha1_smol",
  "sha2 0.11.1",
  "sha3",
  "thiserror 2.0.21",
@@ -7427,6 +7451,7 @@ dependencies = [
  "anyhow",
  "gpui",
  "image",
+ "pollster 0.4.0",
  "raw-window-handle",
  "rodio",
  "tracing",
@@ -7439,8 +7464,10 @@ dependencies = [
  "vnlens-image",
  "vnlens-io",
  "vnlens-middleware",
+ "vnlens-model",
  "vnlens-script",
  "vnlens-video",
+ "wgpu",
  "windows-sys 0.61.2",
 ]
 
@@ -7475,6 +7502,16 @@ dependencies = [
  "serde_json",
  "vnlens-core",
  "vnlens-crypto",
+ "vnlens-io",
+]
+
+[[package]]
+name = "vnlens-model"
+version = "0.1.0"
+dependencies = [
+ "vnlens-archive",
+ "vnlens-core",
+ "vnlens-engine",
  "vnlens-io",
 ]
 
@@ -7515,6 +7552,7 @@ dependencies = [
  "vnlens-archive",
  "vnlens-core",
  "vnlens-crypto",
+ "vnlens-engine",
  "vnlens-io",
  "vnlens-middleware",
 ]

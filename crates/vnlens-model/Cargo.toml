@@ -1,0 +1,18 @@
+[package]
+name = "vnlens-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+autotests = false
+
+[dependencies]
+vnlens-core.workspace = true
+vnlens-io.workspace = true
+
+[dev-dependencies]
+vnlens-archive.workspace = true
+vnlens-engine.workspace = true
+
+[lints]
+workspace = true

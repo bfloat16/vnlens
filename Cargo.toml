@@ -14,6 +14,7 @@ members = [
     "crates/vnlens-audio",
     "crates/vnlens-script",
     "crates/vnlens-video",
+    "crates/vnlens-model",
     "crates/vnlens-dataset",
     "crates/vnlens-gui",
     "crates/vnlens-xtask",
@@ -40,6 +41,7 @@ vnlens-image = { path = "crates/vnlens-image" }
 vnlens-audio = { path = "crates/vnlens-audio" }
 vnlens-script = { path = "crates/vnlens-script" }
 vnlens-video = { path = "crates/vnlens-video" }
+vnlens-model = { path = "crates/vnlens-model" }
 vnlens-dataset = { path = "crates/vnlens-dataset" }
 
 memmap2 = "0.9"
@@ -47,6 +49,7 @@ thiserror = "2"
 anyhow = "1"
 inventory = "0.3"
 flate2 = "1"
+bzip2 = "0.6.1"
 ruzstd = "0.9.1"
 argon2 = "0.5.3"
 blake2 = "0.10.6"
@@ -65,6 +68,9 @@ iced-x86 = { version = "1.22.0", default-features = false, features = [
     "instr_info",
 ] }
 gpui = "=0.2.2"
+# Reuses the wgpu version already selected by cubecl for the model viewport.
+wgpu = { version = "=29.0.4", default-features = false, features = ["std", "dx12", "vulkan", "wgsl"] }
+pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 windows-sys = { version = "0.61.2", features = [
     "Win32_UI_WindowsAndMessaging",
@@ -96,6 +102,7 @@ ffmpeg-next = { version = "9.0.0", default-features = false, features = [
     "software-resampling",
 ] }
 sha2 = "0.11.1"
+sha1_smol = "1.0.1"
 zip = { version = "9.5.0", default-features = false, features = ["deflate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
@@ -108,3 +115,23 @@ all = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+[profile.dev]
+incremental = false
+debug = 0
+
+[profile.dev.build-override]
+debug = false
+
+[profile.release]
+debug = 0
+
+[profile.release.build-override]
+debug = false
+
+[profile.test]
+incremental = false
+debug = 0
+
+[profile.bench]
+debug = 0
